@@ -170,9 +170,10 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     already accepts them, so nothing here changes when they arrive.
     """
     from hx.config import load_settings
+    from hx.core.compaction import Compactor
     from hx.core.context import ContextBuilder, build_project_context, load_system_prompt
     from hx.core.events import EventBus
-    from hx.core.lateinject import InjectionRegistry
+    from hx.core.lateinject import Injection, InjectionRegistry
     from hx.core.loop import AgentLoop
     from hx.core.session import load_session, new_session
     from hx.paths import ensure_user_dirs, session_outputs_dir
@@ -183,9 +184,11 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     from hx.tools.bash import BackgroundJobs, PersistentShell
     from hx.tools.read import FileTracker
     from hx.tools.registry import build_default_registry
+    from hx.tools.todo import TodoList, todo_injector
 
     ensure_user_dirs()
     settings = load_settings(parsed.cwd, parsed.overrides)
+    bus_holder = EventBus()
 
     api_key = load_api_key()
     provider = OpenRouterProvider(api_key)
@@ -205,6 +208,11 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     jobs = BackgroundJobs(session_outputs_dir(session.meta.session_id) / "jobs")
     tracker = FileTracker()
 
+    todos = TodoList()
+    injections = InjectionRegistry()
+    injections.register("todos", todo_injector(todos))
+    injections.register("stale_files", _stale_files_injector(tracker, Injection))
+
     permissions = PermissionEngine(
         mode=settings.permissions.mode,
         rules=[
@@ -214,19 +222,26 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         cwd=settings.cwd,
     )
 
+    context_builder = ContextBuilder(
+        load_system_prompt(settings.cwd),
+        settings.cwd,
+        keep_recent_turns=settings.context.keep_recent_turns,
+    )
+
     loop = AgentLoop(
         provider=provider,
         session=session,
-        tools=build_default_registry(shell, jobs, tracker),
+        tools=build_default_registry(shell, jobs, tracker, todos, bus_holder),
         permissions=permissions,
-        context=ContextBuilder(
-            load_system_prompt(settings.cwd),
-            settings.cwd,
+        context=context_builder,
+        compactor=Compactor(
+            provider=provider,
+            model=settings.models.model,
             keep_recent_turns=settings.context.keep_recent_turns,
+            context=context_builder,
         ),
-        compactor=None,
-        injections=InjectionRegistry(),
-        bus=(bus := EventBus()),
+        injections=injections,
+        bus=bus_holder,
         settings=settings,
         model_info=model_info,
         project_context=build_project_context(settings.cwd),
@@ -235,7 +250,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     return Runtime(
         settings=settings,
         session=session,
-        bus=bus,
+        bus=bus_holder,
         loop=loop,
         models=models,
         api_key=api_key,
@@ -244,6 +259,31 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         jobs=jobs,
         sandbox=sandbox,
     )
+
+
+def _stale_files_injector(tracker: Any, injection_cls: Any) -> Any:
+    """Warn when a file changed on disk after HX last read it.
+
+    This belongs in late injection, not the system prompt: the set changes
+    constantly, and putting it in the prefix would invalidate the cache on
+    every single turn.
+    """
+
+    def inject() -> Any:
+        stale = tracker.stale_files()
+        if not stale:
+            return None
+        listed = "\n".join(f"- {path}" for path in stale[:20])
+        return injection_cls(
+            source="stale_files",
+            text=(
+                "These files changed on disk since you last read them. "
+                f"Re-read before editing:\n{listed}"
+            ),
+            priority=20,
+        )
+
+    return inject
 
 
 def _rules_from_settings(permissions: Any) -> list[Any]:

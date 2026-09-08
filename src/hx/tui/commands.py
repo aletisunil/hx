@@ -134,6 +134,20 @@ async def cmd_clear(ctx: CommandContext, args: str) -> None:
     ctx.app.start_new_session()
 
 
+async def cmd_compact(ctx: CommandContext, args: str) -> None:
+    """``/compact [instructions]`` - compact now, optionally steering the summary."""
+    # The loop publishes CompactionStarted/Finished itself; announcing it here
+    # too would race those events and print the step twice.
+    compacted = await ctx.app.loop.compact(instructions=args or None, reason="/compact")
+    if not compacted:
+        ctx.app.notice("Nothing to compact yet.", "warning")
+
+
+async def cmd_todos(ctx: CommandContext, args: str) -> None:
+    """``/todos`` - show or hide the todo sidebar."""
+    await ctx.app.action_toggle_todos()
+
+
 async def cmd_resume(ctx: CommandContext, args: str) -> None:
     """``/resume`` - pick a previous session in this directory."""
     from hx.core.session import list_sessions
@@ -198,6 +212,8 @@ def build_default_commands() -> CommandRegistry:
         Command("model", "Choose the model", cmd_model, "[query]", takes_args=True),
         Command("models", "Refresh the model catalogue", cmd_models, "refresh", takes_args=True),
         Command("clear", "Start a fresh session", cmd_clear),
+        Command("compact", "Summarise older turns now", cmd_compact, "[focus]", takes_args=True),
+        Command("todos", "Toggle the todo sidebar", cmd_todos),
         Command("resume", "Resume a previous session", cmd_resume),
         Command("cost", "Token and cost breakdown", cmd_cost),
         Command("context", "What is filling the context window", cmd_context),

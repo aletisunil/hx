@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +52,29 @@ class Session:
         self.meta.updated_at = time.time()
         self._pending.append({"kind": "message", "data": to_dict(message)})
         self.flush()
+
+    def record_compaction(
+        self,
+        dropped: list[Message],
+        kept: list[Message],
+        summary: Message,
+    ) -> None:
+        """Retire the pre-compaction history and re-lay it as summary + kept.
+
+        The transcript is append-only, so the summary cannot be spliced in
+        ahead of the messages it replaces. Instead every live message is
+        flagged compacted and the new sequence is appended in order. Nothing is
+        deleted, so a resume replays exactly what happened and a future undo
+        still has the original turns to restore.
+        """
+        superseded = [*dropped, *kept]
+        for message in superseded:
+            message.compacted = True
+
+        self._pending.append({"kind": "compaction", "data": {"count": len(superseded)}})
+        self.append(summary)
+        for message in kept:
+            self.append(replace(message, compacted=False))
 
     def record_usage(self, usage: TurnUsage) -> None:
         self.usage.record(usage)
@@ -121,10 +144,21 @@ def load_session(session_id: str) -> Session:
             except json.JSONDecodeError:
                 # A torn final line from a crashed write costs one record, not the session.
                 continue
-            if record.get("kind") == "message":
+            kind = record.get("kind")
+            if kind == "message":
                 session.messages.append(from_dict(record["data"]))
-            elif record.get("kind") == "usage":
+            elif kind == "usage":
                 session.usage.record(TurnUsage(**record["data"]))
+            elif kind == "compaction":
+                # Compaction always supersedes a prefix of the live messages,
+                # so replaying in order reproduces the same partition.
+                remaining = int(record["data"]["count"])
+                for message in session.messages:
+                    if remaining <= 0:
+                        break
+                    if not message.compacted:
+                        message.compacted = True
+                        remaining -= 1
     session.meta.message_count = len(session.messages)
     return session
 

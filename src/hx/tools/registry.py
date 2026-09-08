@@ -98,6 +98,8 @@ def build_default_registry(
     shell: Any | None = None,
     jobs: Any | None = None,
     tracker: Any | None = None,
+    todos: Any | None = None,
+    bus: Any | None = None,
 ) -> ToolRegistry:
     """Registry with the builtin tools registered.
 
@@ -109,6 +111,7 @@ def build_default_registry(
     from hx.tools.glob import GlobTool
     from hx.tools.grep import GrepTool
     from hx.tools.read import FileTracker, ReadTool
+    from hx.tools.todo import TodoWriteTool
     from hx.tools.write import WriteTool
 
     file_tracker = tracker if tracker is not None else FileTracker()
@@ -121,6 +124,8 @@ def build_default_registry(
     registry.register(EditTool(file_tracker))
     registry.register(GlobTool())
     registry.register(GrepTool())
+    if todos is not None:
+        registry.register(TodoWriteTool(todos, bus))
     return registry
 
 

@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hx.core.context import AssembledContext
 from hx.core.events import (
+    CompactionFinished,
+    CompactionStarted,
     ErrorRaised,
     PermissionRequested,
     TextDelta,
@@ -383,7 +385,40 @@ class AgentLoop:
         fraction = self.session.usage.context_fraction
         if not self.compactor.should_compact(fraction, self.settings.context.compact_at):
             return
-        await self.compactor.compact(self.session.active_messages())
+        await self.compact(reason=f"context at {fraction:.0%} of the window")
+
+    async def compact(self, instructions: str | None = None, reason: str = "requested") -> bool:
+        """Replace older turns with a summary. Returns False when there was
+        nothing worth compacting.
+
+        Everything below the static prefix changes, so the cached conversation
+        is discarded by definition. That is announced rather than done quietly:
+        the next turn re-reads its input at full price.
+        """
+        if self.compactor is None:
+            return False
+
+        self.bus.publish(CompactionStarted(reason=reason))
+        try:
+            result = await self.compactor.compact(self.session.active_messages(), instructions)
+        except ProviderError as exc:
+            self.bus.publish(ErrorRaised(message=f"Compaction failed: {exc}", recoverable=True))
+            return False
+
+        if not result.dropped:
+            self.bus.publish(
+                CompactionFinished(
+                    tokens_before=result.tokens_before, tokens_after=result.tokens_after
+                )
+            )
+            return False
+
+        self.session.record_compaction(result.dropped, result.kept, result.summary)
+        self.session.usage.context_tokens = result.tokens_after
+        self.bus.publish(
+            CompactionFinished(tokens_before=result.tokens_before, tokens_after=result.tokens_after)
+        )
+        return True
 
     def cancel(self) -> None:
         """Request cancellation of the in-flight turn."""
@@ -439,5 +474,23 @@ def _permission_detail(call: ToolUseBlock) -> str:
 
 
 def _brief(params: dict[str, Any], limit: int = 80) -> str:
-    rendered = ", ".join(f"{k}={v!r}" for k, v in params.items())
-    return rendered if len(rendered) <= limit else rendered[: limit - 1] + "…"
+    """One-line parameter preview for a tool-call header.
+
+    Nested structures collapse to a placeholder rather than being sliced
+    mid-literal - a header ending in ``{'active_for…`` tells the reader nothing
+    and looks broken.
+    """
+    parts: list[str] = []
+    for key, value in params.items():
+        if isinstance(value, list):
+            rendered = f"[{len(value)} items]"
+        elif isinstance(value, dict):
+            rendered = "{…}"
+        elif isinstance(value, str) and len(value) > limit:
+            rendered = repr(value[: limit - 1] + "…")
+        else:
+            rendered = repr(value)
+        parts.append(f"{key}={rendered}")
+
+    joined = ", ".join(parts)
+    return joined if len(joined) <= limit else joined[: limit - 1] + "…"

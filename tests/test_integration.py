@@ -227,3 +227,130 @@ async def test_the_sandbox_stops_a_write_the_rules_would_have_allowed(
     finally:
         await shell.close()
         outside.unlink(missing_ok=True)
+
+
+async def test_compaction_replaces_history_and_the_turn_continues(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """The whole point: a long session keeps working instead of hitting the wall."""
+    from hx.core.compaction import SUMMARY_MARKER, Compactor
+    from hx.core.messages import TextBlock, assistant_message, user_message
+
+    loop = build(tmp_path, [text_turn("carrying on")])
+    loop.compactor = Compactor(
+        provider=FakeProvider([text_turn("## Goal\nfinish the refactor")]),
+        model=MODEL,
+        keep_recent_turns=2,
+        context=loop.context,
+    )
+
+    for index in range(10):
+        loop.session.append(user_message(f"q{index}"))
+        loop.session.append(assistant_message([TextBlock(f"a{index}")]))
+
+    assert await loop.compact(reason="test")
+
+    active = loop.session.active_messages()
+    assert SUMMARY_MARKER in active[0].text()
+    assert "finish the refactor" in active[0].text()
+    assert len(active) == 3
+
+    await loop.run("what next?")
+    assert loop.session.messages[-1].text() == "carrying on"
+
+
+async def test_compaction_fires_automatically_at_the_threshold(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    from hx.core.compaction import Compactor
+    from hx.core.messages import TextBlock, assistant_message, user_message
+
+    loop = build(tmp_path, [text_turn("ok")])
+    loop.compactor = Compactor(
+        provider=FakeProvider([text_turn("digest")]),
+        model=MODEL,
+        keep_recent_turns=2,
+        context=loop.context,
+    )
+    for index in range(8):
+        loop.session.append(user_message(f"q{index}"))
+        loop.session.append(assistant_message([TextBlock(f"a{index}")]))
+
+    # Pretend the window is nearly full.
+    loop.session.usage.context_tokens = 100_000
+    loop.session.usage.context_window = 110_000
+
+    await loop.run("continue")
+
+    assert any(m.compacted for m in loop.session.messages)
+
+
+async def test_todos_reach_the_model_through_late_injection(hx_home: Path, tmp_path: Path) -> None:
+    """Todo state must ride the tail of the request, never the system prefix."""
+    from hx.tools.todo import TodoList, todo_injector
+
+    todos = TodoList()
+    script = [
+        tool_turn(
+            "TodoWrite",
+            {"todos": [{"content": "run the tests", "status": "in_progress"}]},
+            "t1",
+        ),
+        text_turn("done"),
+    ]
+
+    settings = load_settings(tmp_path)
+    loop = build(tmp_path, script)
+    loop.tools = build_default_registry(None, None, FileTracker(), todos, loop.bus)
+    loop.injections.register("todos", todo_injector(todos))
+    assert settings is not None
+
+    await loop.run("track your work")
+
+    first, second = loop.provider.requests
+    assert "run the tests" not in first.context.system_text()
+    assert "run the tests" in second.context.messages[-1].text()
+    assert "run the tests" not in second.context.system_text()
+
+
+async def test_the_cached_prefix_survives_todo_updates(hx_home: Path, tmp_path: Path) -> None:
+    """Todos change every turn; if they sat in the prefix every turn would miss."""
+    from hx.tools.todo import TodoList, todo_injector
+
+    todos = TodoList()
+    script = [
+        tool_turn("TodoWrite", {"todos": [{"content": "one", "status": "in_progress"}]}, "t1"),
+        tool_turn("TodoWrite", {"todos": [{"content": "two", "status": "completed"}]}, "t2"),
+        text_turn("done"),
+    ]
+    loop = build(tmp_path, script)
+    loop.tools = build_default_registry(None, None, FileTracker(), todos, loop.bus)
+    loop.injections.register("todos", todo_injector(todos))
+
+    await loop.run("go")
+
+    assert len(set(loop.provider.prefix_fingerprints())) == 1
+
+
+async def test_a_file_changed_on_disk_is_flagged_to_the_model(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    from hx.cli import _stale_files_injector
+    from hx.core.lateinject import Injection
+
+    tracker = FileTracker()
+    target = tmp_path / "a.py"
+    target.write_text("v1")
+
+    script = [tool_turn("Read", {"file_path": "a.py"}, "r1"), text_turn("read it")]
+    loop = build(tmp_path, script)
+    loop.tools = build_default_registry(None, None, tracker)
+    loop.injections.register("stale", _stale_files_injector(tracker, Injection))
+
+    await loop.run("read the file")
+    target.write_text("v2 from elsewhere")
+
+    loop.provider = FakeProvider([text_turn("noted")])
+    await loop.run("now edit it")
+
+    assert "changed on disk" in loop.provider.requests[0].context.messages[-1].text()

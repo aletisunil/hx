@@ -27,6 +27,7 @@ from textual.containers import Horizontal
 
 from hx.core import events as ev
 from hx.core.context import git_branch
+from hx.core.usage import format_tokens
 from hx.providers.models import ModelRegistry
 from hx.tui.commands import CommandContext, CommandRegistry, build_default_commands
 from hx.tui.widgets.input import PromptInput
@@ -143,11 +144,19 @@ class HXApp(App[None]):
                     subagents.start(event.subagent_id, event.agent_type, event.description)
                 case ev.SubagentFinished():
                     subagents.finish(event.subagent_id, event.is_error)
+                case ev.CompactionStarted():
+                    transcript.add_notice(f"Compacting ({event.reason})…", "info")
                 case ev.CompactionFinished():
-                    transcript.add_notice(
-                        f"Compacted context: {event.tokens_before} → {event.tokens_after} tokens",
-                        "info",
-                    )
+                    saved = event.tokens_before - event.tokens_after
+                    if saved > 0:
+                        transcript.add_notice(
+                            f"Compacted {format_tokens(event.tokens_before)} → "
+                            f"{format_tokens(event.tokens_after)} tokens. "
+                            "The cached conversation is discarded, so the next "
+                            "turn re-reads it at full price.",
+                            "info",
+                        )
+                    status.set_context(event.tokens_after, status.context_window)
                 case ev.ErrorRaised():
                     transcript.add_notice(event.message, "error")
                 case ev.TurnFinished():
