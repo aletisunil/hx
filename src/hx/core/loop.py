@@ -1,0 +1,399 @@
+"""The agent turn engine.
+
+One iteration: assemble context -> stream from the provider -> collect tool_use
+blocks -> execute them -> append results -> repeat, until the model returns a
+turn with no tool calls or the user cancels.
+
+Read-only tools in the same assistant turn run concurrently; anything that
+mutates state runs serially in the order the model emitted it, so side effects
+stay predictable.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from hx.core.context import AssembledContext
+from hx.core.events import (
+    ErrorRaised,
+    TextDelta,
+    ThinkingDelta,
+    ToolCallFinished,
+    ToolCallStarted,
+    TurnFinished,
+    TurnStarted,
+    UsageUpdated,
+)
+from hx.core.messages import (
+    ContentBlock,
+    Message,
+    StopReason,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    assistant_message,
+    tool_result_message,
+    user_message,
+)
+from hx.core.usage import TurnUsage, compute_cost
+from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, StreamEnd
+from hx.tools.base import ToolContext
+
+if TYPE_CHECKING:
+    from hx.config import Settings
+    from hx.core.compaction import Compactor
+    from hx.core.context import ContextBuilder
+    from hx.core.events import EventBus
+    from hx.core.lateinject import InjectionRegistry
+    from hx.core.session import Session
+    from hx.permissions.engine import PermissionEngine
+    from hx.providers.base import Provider
+    from hx.providers.models import ModelInfo
+    from hx.tools.registry import ToolRegistry
+
+
+@dataclass(slots=True)
+class TurnResult:
+    stop_reason: StopReason
+    messages: list[Message]
+    error: str | None = None
+
+
+class AgentLoop:
+    """Drives one conversation. Subagents each get their own instance."""
+
+    MAX_TURNS: ClassVar[int] = 100
+    """Backstop against a model that calls tools forever. Hitting it is a bug
+    worth surfacing, not a condition to handle silently."""
+
+    def __init__(
+        self,
+        *,
+        provider: Provider,
+        session: Session,
+        tools: ToolRegistry,
+        permissions: PermissionEngine | None,
+        context: ContextBuilder,
+        compactor: Compactor | None,
+        injections: InjectionRegistry,
+        bus: EventBus,
+        settings: Settings,
+        model_info: ModelInfo | None = None,
+        skills_index: str | None = None,
+        project_context: str | None = None,
+    ) -> None:
+        self.provider = provider
+        self.session = session
+        self.tools = tools
+        self.permissions = permissions
+        self.context = context
+        self.compactor = compactor
+        self.injections = injections
+        self.bus = bus
+        self.settings = settings
+        self.model_info = model_info
+        self.skills_index = skills_index
+        self.project_context = project_context
+        self._cancelled = False
+        self._turn_index = 0
+        self.last_context: AssembledContext | None = None
+
+    @property
+    def model(self) -> str:
+        return self.session.meta.model
+
+    def set_model(self, model_id: str, model_info: ModelInfo | None = None) -> None:
+        self.session.meta.model = model_id
+        self.model_info = model_info
+
+    async def run(self, user_input: str) -> TurnResult:
+        """Run turns until the model stops calling tools.
+
+        Cancellation (Esc / Ctrl+C) raises ``asyncio.CancelledError`` into this
+        coroutine; the partial assistant message is still appended to the
+        transcript so the next turn has an honest history.
+        """
+        self._cancelled = False
+        if user_input:
+            self.session.append(user_message(user_input))
+
+        produced: list[Message] = []
+        stop_reason = StopReason.END_TURN
+
+        for _ in range(self.MAX_TURNS):
+            if self._cancelled:
+                return TurnResult(StopReason.CANCELLED, produced)
+
+            await self._maybe_compact()
+            self._turn_index += 1
+            self.bus.publish(TurnStarted(turn_index=self._turn_index, model=self.model))
+
+            try:
+                message, stop_reason = await self._stream_turn()
+            except asyncio.CancelledError:
+                self.bus.publish(TurnFinished(self._turn_index, StopReason.CANCELLED))
+                raise
+            except ProviderError as exc:
+                self.bus.publish(ErrorRaised(message=str(exc), recoverable=True))
+                self.bus.publish(TurnFinished(self._turn_index, StopReason.ERROR))
+                return TurnResult(StopReason.ERROR, produced, error=str(exc))
+
+            self.session.append(message)
+            produced.append(message)
+            self.bus.publish(TurnFinished(self._turn_index, stop_reason))
+
+            calls = message.tool_uses()
+            if not calls or self._cancelled:
+                return TurnResult(stop_reason, produced)
+
+            results = await self._execute_tools(calls)
+            result_message = tool_result_message(results)
+            self.session.append(result_message)
+            produced.append(result_message)
+
+        self.bus.publish(
+            ErrorRaised(message=f"Stopped after {self.MAX_TURNS} turns", recoverable=True)
+        )
+        return TurnResult(stop_reason, produced, error="turn limit reached")
+
+    async def _stream_turn(self) -> tuple[Message, StopReason]:
+        """One provider call. Publishes deltas and the usage update."""
+        request = self._build_request()
+
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        tool_calls: list[ToolUseBlock] = []
+        stop_reason = StopReason.END_TURN
+        usage = TurnUsage()
+        started = time.monotonic()
+
+        try:
+            async for item in self.provider.astream(request):
+                if isinstance(item, StreamEnd):
+                    stop_reason = item.stop_reason
+                    usage = item.usage
+                    continue
+                if not isinstance(item, StreamDelta):  # pragma: no cover - defensive
+                    continue
+                if item.text:
+                    text_parts.append(item.text)
+                    self.bus.publish(TextDelta(text=item.text))
+                if item.thinking:
+                    thinking_parts.append(item.thinking)
+                    self.bus.publish(ThinkingDelta(text=item.thinking))
+                if item.tool_use_id and item.tool_name:
+                    tool_calls.append(
+                        ToolUseBlock(
+                            id=item.tool_use_id,
+                            name=item.tool_name,
+                            input=_parse_tool_input(item.tool_input_json),
+                        )
+                    )
+        except asyncio.CancelledError:
+            # Keep whatever streamed before the interrupt: the next turn must
+            # reflect what the user actually saw.
+            if text_parts or tool_calls:
+                self.session.append(self._assemble(text_parts, thinking_parts, []))
+            raise
+
+        if not usage.latency_ms:
+            usage.latency_ms = (time.monotonic() - started) * 1000
+        self._record_usage(usage, request)
+
+        return self._assemble(text_parts, thinking_parts, tool_calls), stop_reason
+
+    def _build_request(self) -> ProviderRequest:
+        messages = self.injections.apply(self.session.active_messages())
+        cache_mode = self.model_info.cache_mode.value if self.model_info else "none"
+        assembled = self.context.build(
+            messages=messages,
+            tools=self.tools.schemas(self._allowed_tools()),
+            skills_index=self.skills_index,
+            project_context=self.project_context,
+            cache_mode=cache_mode,
+        )
+        self.last_context = assembled
+        self.session.usage.context_tokens = assembled.total_tokens
+        self.session.usage.context_window = self.model_info.context_window if self.model_info else 0
+        return ProviderRequest(
+            context=assembled,
+            model=self.model,
+            max_tokens=self.settings.models.max_tokens,
+            temperature=self.settings.models.temperature,
+        )
+
+    def _allowed_tools(self) -> set[str] | None:
+        if self.permissions is None:
+            return None
+        return self.permissions.allowed_tools(self.tools.names())
+
+    def _assemble(
+        self,
+        text_parts: list[str],
+        thinking_parts: list[str],
+        tool_calls: list[ToolUseBlock],
+    ) -> Message:
+        blocks: list[ContentBlock] = []
+        if thinking_parts:
+            blocks.append(ThinkingBlock(text="".join(thinking_parts)))
+        if text_parts:
+            blocks.append(TextBlock(text="".join(text_parts)))
+        blocks.extend(tool_calls)
+        return assistant_message(blocks, model=self.model)
+
+    def _record_usage(self, usage: TurnUsage, request: ProviderRequest) -> None:
+        if usage.cost_usd is None and self.model_info is not None:
+            usage.cost_usd = compute_cost(usage, self.model_info.pricing)
+        self.session.record_usage(usage)
+        ledger = self.session.usage
+        self.bus.publish(
+            UsageUpdated(
+                input_tokens=ledger.total_input,
+                output_tokens=ledger.total_output,
+                cache_read_tokens=ledger.total_cache_read,
+                cache_write_tokens=ledger.total_cache_write,
+                context_tokens=ledger.context_tokens,
+                context_window=ledger.context_window,
+                cost_usd=ledger.total_cost_usd,
+            )
+        )
+
+    async def _execute_tools(self, calls: list[ToolUseBlock]) -> list[ToolResultBlock]:
+        """Permission-check, then run. Read-only calls are gathered concurrently;
+        mutating calls run in emission order.
+
+        A denied call becomes an ``is_error`` result rather than an exception, so
+        the model can react instead of the turn dying.
+        """
+        results: dict[str, ToolResultBlock] = {}
+        concurrent: list[ToolUseBlock] = []
+
+        for call in calls:
+            if self._is_mutating(call):
+                for pending in concurrent:
+                    results[pending.id] = await self._run_one(pending)
+                concurrent.clear()
+                results[call.id] = await self._run_one(call)
+            else:
+                concurrent.append(call)
+
+        if concurrent:
+            gathered = await asyncio.gather(*(self._run_one(c) for c in concurrent))
+            for call, result in zip(concurrent, gathered, strict=True):
+                results[call.id] = result
+
+        return [results[c.id] for c in calls]
+
+    def _is_mutating(self, call: ToolUseBlock) -> bool:
+        try:
+            return self.tools.get(call.name).mutating
+        except Exception:
+            # An unknown tool is about to become an error result; treat it as
+            # mutating so it cannot slip into the concurrent batch.
+            return True
+
+    async def _run_one(self, call: ToolUseBlock) -> ToolResultBlock:
+        self.bus.publish(ToolCallStarted(tool_use_id=call.id, name=call.name, input=call.input))
+        started = time.monotonic()
+
+        denied = await self._check_permission(call)
+        if denied is not None:
+            self.bus.publish(
+                ToolCallFinished(
+                    tool_use_id=call.id,
+                    is_error=True,
+                    duration_ms=(time.monotonic() - started) * 1000,
+                    summary="denied",
+                )
+            )
+            return denied
+
+        ctx = ToolContext(
+            cwd=self.settings.cwd,
+            session_id=self.session.meta.session_id,
+            tool_use_id=call.id,
+            settings=self.settings,
+            emit_progress=lambda chunk: self._emit_progress(call.id, chunk),
+        )
+        result = await self.tools.call(call.name, call.input, ctx)
+
+        self.bus.publish(
+            ToolCallFinished(
+                tool_use_id=call.id,
+                is_error=result.is_error,
+                duration_ms=(time.monotonic() - started) * 1000,
+                summary=result.summary or ("error" if result.is_error else "done"),
+            )
+        )
+        return ToolResultBlock(
+            tool_use_id=call.id,
+            content=result.content,
+            is_error=result.is_error,
+            spilled_path=result.spilled_path,
+        )
+
+    async def _check_permission(self, call: ToolUseBlock) -> ToolResultBlock | None:
+        """Returns a denial result, or ``None`` when the call may proceed."""
+        if self.permissions is None or not self.tools.has(call.name):
+            return None
+
+        from hx.permissions.engine import PermissionRequest
+
+        tool = self.tools.get(call.name)
+        request = PermissionRequest(
+            tool_name=call.name,
+            specifier=tool.permission_specifier(call.input),
+            params=call.input,
+            mutating=tool.mutating,
+            description=f"{call.name}({_brief(call.input)})",
+        )
+        if await self.permissions.request(request):
+            return None
+        return ToolResultBlock(
+            tool_use_id=call.id,
+            content=f"Permission denied by the user for {call.name}.",
+            is_error=True,
+        )
+
+    def _emit_progress(self, tool_use_id: str, chunk: str) -> None:
+        from hx.core.events import ToolCallProgress
+
+        self.bus.publish(ToolCallProgress(tool_use_id=tool_use_id, chunk=chunk))
+
+    async def _maybe_compact(self) -> None:
+        """Compact if the context fraction crossed the configured threshold."""
+        if self.compactor is None:
+            return
+        fraction = self.session.usage.context_fraction
+        if not self.compactor.should_compact(fraction, self.settings.context.compact_at):
+            return
+        await self.compactor.compact(self.session.active_messages())
+
+    def cancel(self) -> None:
+        """Request cancellation of the in-flight turn."""
+        self._cancelled = True
+
+
+def _parse_tool_input(raw: str | None) -> dict[str, Any]:
+    """Tool arguments arrive as a JSON string assembled from stream fragments.
+
+    Malformed JSON becomes an empty dict; the tool's own validation then reports
+    the missing arguments to the model, which is a better error than a crash.
+    """
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _brief(params: dict[str, Any], limit: int = 80) -> str:
+    rendered = ", ".join(f"{k}={v!r}" for k, v in params.items())
+    return rendered if len(rendered) <= limit else rendered[: limit - 1] + "…"

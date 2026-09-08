@@ -1,0 +1,105 @@
+/* HX Textual stylesheet.
+
+   Colours come from Textual's design tokens ($surface, $panel, $accent, …) so
+   the app follows the terminal's light/dark theme. hx.tui.theme carries the
+   Rich styles used inside renderables, which CSS cannot reach. */
+
+Screen {
+    layers: base modal;
+    background: $background;
+}
+
+#body {
+    height: 1fr;
+}
+
+Transcript {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+}
+
+/* Vertical rhythm: every block gets air above it, so a tool call and the
+   sentence that follows it do not read as one run-on line. */
+Transcript > MessageBlock,
+Transcript > ToolBlock,
+Transcript > Notice {
+    height: auto;
+    margin: 1 0 0 0;
+}
+
+Transcript > ToolBlock {
+    padding: 0 0 0 1;
+    border-left: outer $panel;
+}
+
+Transcript > Notice {
+    padding: 0 1;
+    background: $panel;
+}
+
+TodoSidebar {
+    width: 32;
+    height: 1fr;
+    display: none;
+    padding: 0 1;
+    border-left: solid $panel;
+}
+
+TodoSidebar.visible {
+    display: block;
+}
+
+SubagentRows {
+    height: auto;
+    max-height: 6;
+    padding: 0 1;
+}
+
+PromptInput {
+    height: auto;
+    min-height: 3;
+    max-height: 12;
+    padding: 0 1;
+    border: round $panel;
+    background: $surface;
+}
+
+PromptInput:focus {
+    border: round $accent;
+}
+
+StatusBar {
+    height: 1;
+    dock: bottom;
+    padding: 0 1;
+    background: $panel;
+}
+
+ModalScreen {
+    layer: modal;
+    align: center middle;
+}
+
+#picker {
+    width: 90%;
+    max-width: 120;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: round $accent;
+    background: $surface;
+}
+
+#picker-title {
+    text-style: bold;
+    padding: 0 0 1 0;
+}
+
+#picker-options {
+    height: auto;
+    max-height: 20;
+    border: none;
+}

@@ -1,0 +1,274 @@
+"""The HX Textual application.
+
+Layout::
+
+    +--------------------------------------------------+
+    |  transcript (streaming markdown, tool blocks)     |  todo
+    |                                                   |  side
+    |                                                   |  bar
+    +--------------------------------------------------+------+
+    |  input (multiline, @file completion, ! passthrough)      |
+    +----------------------------------------------------------+
+    |  status bar: model | ctx | tokens | cache | $ | mode      |
+    +----------------------------------------------------------+
+
+The app owns no agent state. It subscribes to the event bus and renders; user
+actions are pushed back into the loop as messages.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from textual.app import App, ComposeResult
+from textual.binding import BindingType
+from textual.containers import Horizontal
+
+from hx.core import events as ev
+from hx.core.context import git_branch
+from hx.providers.models import ModelRegistry
+from hx.tui.commands import CommandContext, CommandRegistry, build_default_commands
+from hx.tui.widgets.input import PromptInput
+from hx.tui.widgets.statusbar import StatusBar
+from hx.tui.widgets.todos import SubagentRows, TodoSidebar
+from hx.tui.widgets.transcript import Transcript
+
+if TYPE_CHECKING:
+    from hx.config import Settings
+    from hx.core.events import EventBus
+    from hx.core.loop import AgentLoop
+
+
+class HXApp(App[None]):
+    """Top-level Textual app."""
+
+    CSS_PATH = "hx.tcss"
+    BINDINGS: ClassVar[list[BindingType]] = [
+        ("ctrl+c", "cancel_turn", "Cancel"),
+        ("ctrl+d", "quit", "Quit"),
+        ("escape", "interrupt", "Interrupt"),
+        ("shift+tab", "cycle_mode", "Permission mode"),
+        ("ctrl+r", "expand_output", "Expand output"),
+        ("ctrl+t", "toggle_todos", "Todos"),
+    ]
+
+    def __init__(
+        self,
+        loop: AgentLoop,
+        bus: EventBus,
+        settings: Settings,
+        models: ModelRegistry | None = None,
+        api_key: str = "",
+    ) -> None:
+        super().__init__()
+        self.loop = loop
+        self.models = models if models is not None else ModelRegistry()
+        self.api_key = api_key
+        self.bus = bus
+        self.settings = settings
+        self.commands: CommandRegistry = build_default_commands()
+        # Settings are frozen; the live permission mode is session state.
+        self.mode = settings.permissions.mode
+        self._turn_task: asyncio.Task[Any] | None = None
+        self._queued: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="body"):
+            yield Transcript()
+            yield TodoSidebar()
+        yield SubagentRows()
+        yield PromptInput(self.settings.cwd)
+        yield StatusBar()
+
+    async def on_mount(self) -> None:
+        """Start the event-bus consumer task."""
+        status = self.query_one(StatusBar)
+        status.set_model(self.loop.model)
+        status.set_mode(self.mode.value, self.settings.permissions.sandbox)
+        status.set_location(self.settings.cwd.name, git_branch(self.settings.cwd))
+        if self.loop.model_info is not None:
+            status.set_context(0, self.loop.model_info.context_window)
+
+        self.query_one(PromptInput).focus()
+        self.run_worker(self._consume_events(), name="events", exclusive=False)
+
+    async def _consume_events(self) -> None:
+        """Drain the bus and dispatch to widgets.
+
+        Text deltas are applied straight through: Textual already coalesces
+        repaints on its own refresh tick, so the per-delta cost is a buffer
+        append, not a render.
+        """
+        transcript = self.query_one(Transcript)
+        status = self.query_one(StatusBar)
+        subagents = self.query_one(SubagentRows)
+        todos = self.query_one(TodoSidebar)
+
+        async for event in self.bus.subscribe():
+            match event:
+                case ev.TurnStarted():
+                    transcript.start_assistant_message()
+                    status.set_busy(True, "thinking")
+                case ev.TextDelta():
+                    transcript.append_delta(event.text)
+                case ev.ThinkingDelta():
+                    transcript.append_thinking(event.text)
+                case ev.ToolCallStarted():
+                    transcript.add_tool_block(event.tool_use_id, event.name, event.input)
+                    status.set_busy(True, event.name)
+                case ev.ToolCallProgress():
+                    transcript.update_tool_block(event.tool_use_id, event.chunk)
+                case ev.ToolCallFinished():
+                    transcript.finish_tool_block(event.tool_use_id, event.summary, event.is_error)
+                case ev.UsageUpdated():
+                    status.set_tokens(event.input_tokens, event.output_tokens)
+                    status.set_context(event.context_tokens, event.context_window)
+                    status.set_cache(
+                        event.cache_read_tokens,
+                        event.cache_write_tokens,
+                        self.loop.session.usage.cache_hit_rate,
+                    )
+                    status.set_cost(event.cost_usd)
+                    status.set_latency(self.loop.session.usage.last_latency_ms)
+                case ev.TodosUpdated():
+                    todos.update_todos(event.todos)
+                case ev.SubagentStarted():
+                    subagents.start(event.subagent_id, event.agent_type, event.description)
+                case ev.SubagentFinished():
+                    subagents.finish(event.subagent_id, event.is_error)
+                case ev.CompactionFinished():
+                    transcript.add_notice(
+                        f"Compacted context: {event.tokens_before} → {event.tokens_after} tokens",
+                        "info",
+                    )
+                case ev.ErrorRaised():
+                    transcript.add_notice(event.message, "error")
+                case ev.TurnFinished():
+                    status.set_busy(False)
+
+    async def on_prompt_input_submitted(self, message: PromptInput.Submitted) -> None:
+        await self.submit(message.text)
+
+    async def submit(self, text: str) -> None:
+        """Handle a user submission: slash command, ``!`` passthrough, or a turn."""
+        if text.startswith("/"):
+            handled = await self.commands.dispatch(self._command_context(), text)
+            if handled:
+                return
+
+        if self._turn_task is not None and not self._turn_task.done():
+            # Do not interleave turns: queue and run it when the current one ends.
+            self._queued.append(text)
+            self.query_one(Transcript).add_notice("queued", "info")
+            return
+
+        self.query_one(Transcript).add_user_message(text)
+        self._turn_task = asyncio.create_task(self._run_turn(text))
+
+    async def _run_turn(self, text: str) -> None:
+        prompt_input = self.query_one(PromptInput)
+        prompt_input.set_enabled(False)
+        try:
+            await self.loop.run(text)
+        except asyncio.CancelledError:
+            self.query_one(Transcript).add_notice("interrupted", "warning")
+        finally:
+            prompt_input.set_enabled(True)
+            self.query_one(StatusBar).set_busy(False)
+
+        if self._queued:
+            await self.submit(self._queued.pop(0))
+
+    def _command_context(self) -> CommandContext:
+        return CommandContext(
+            app=self,
+            settings=self.settings,
+            session=self.loop.session,
+            registry=self.commands,
+        )
+
+    def notice(self, text: str, level: str = "info") -> None:
+        self.query_one(Transcript).add_notice(text, level)
+
+    def query_one_status(self) -> StatusBar:
+        return self.query_one(StatusBar)
+
+    @property
+    def last_context(self) -> Any:
+        return self.loop.last_context
+
+    def start_new_session(self) -> None:
+        """Fresh transcript, same directory. The old session stays on disk."""
+        from hx.core.session import new_session
+
+        self.loop.session = new_session(self.settings.cwd, self.loop.model)
+        self.query_one(Transcript).remove_children()
+        self.query_one(Transcript).add_notice("New session started.", "success")
+        status = self.query_one(StatusBar)
+        status.set_tokens(0, 0)
+        status.set_cache(0, 0, 0.0)
+        status.set_cost(0.0)
+        status.set_context(0, self.loop.model_info.context_window if self.loop.model_info else 0)
+
+    def resume_session(self, session_id: str) -> None:
+        from hx.core.session import load_session
+
+        try:
+            session = load_session(session_id)
+        except Exception as exc:
+            self.notice(f"Could not resume {session_id}: {exc}", "error")
+            return
+
+        self.loop.session = session
+        transcript = self.query_one(Transcript)
+        transcript.remove_children()
+        for message in session.active_messages():
+            if message.role == "user":
+                transcript.add_user_message(message.text())
+            elif text := message.text():
+                transcript.start_assistant_message()
+                transcript.append_delta(text)
+        transcript.add_notice(f"Resumed {session_id}.", "success")
+
+    async def action_cancel_turn(self) -> None:
+        await self.action_interrupt()
+
+    async def action_interrupt(self) -> None:
+        if self._turn_task is None or self._turn_task.done():
+            return
+        self.loop.cancel()
+        self._turn_task.cancel()
+
+    async def action_cycle_mode(self) -> None:
+        from hx.config import PermissionMode
+
+        order = list(PermissionMode)
+        self.mode = order[(order.index(self.mode) + 1) % len(order)]
+        if self.loop.permissions is not None:
+            self.loop.permissions.set_mode(self.mode)
+        self.query_one(StatusBar).set_mode(self.mode.value, self.settings.permissions.sandbox)
+
+    async def action_expand_output(self) -> None:
+        self.query_one(Transcript).toggle_last_tool()
+
+    async def action_toggle_todos(self) -> None:
+        sidebar = self.query_one(TodoSidebar)
+        sidebar.set_visible("visible" not in sidebar.classes)
+
+    async def ask_permission(self, request: Any) -> Any:
+        """Show the approval modal and return the user's choice."""
+        from hx.tui.widgets.permission import PermissionModal
+
+        return await self.push_screen_wait(PermissionModal(request))
+
+
+async def run_tui(
+    loop: AgentLoop,
+    bus: EventBus,
+    settings: Settings,
+    models: ModelRegistry | None = None,
+    api_key: str = "",
+) -> None:
+    app = HXApp(loop, bus, settings, models=models, api_key=api_key)
+    await app.run_async()
