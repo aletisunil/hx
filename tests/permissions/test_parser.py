@@ -9,10 +9,8 @@ from __future__ import annotations
 import pytest
 
 from hx.permissions.parser import parse
-from tests.conftest import unimplemented
 
 
-@unimplemented
 @pytest.mark.parametrize(
     ("command", "expected"),
     [
@@ -28,7 +26,6 @@ def test_every_executed_segment_is_extracted(command: str, expected: list[str]) 
     assert [s.executable for s in parse(command).segments] == expected
 
 
-@unimplemented
 def test_unparseable_commands_are_flagged_not_guessed() -> None:
     """An unparseable command must degrade to ASK, never to ALLOW."""
     assert parse("eval \"$(printf '\\x72\\x6d')\" -rf /").unparseable

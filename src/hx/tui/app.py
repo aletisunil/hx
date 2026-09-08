@@ -60,8 +60,10 @@ class HXApp(App[None]):
         settings: Settings,
         models: ModelRegistry | None = None,
         api_key: str = "",
+        sandbox_active: bool = True,
     ) -> None:
         super().__init__()
+        self.sandbox_active = sandbox_active
         self.loop = loop
         self.models = models if models is not None else ModelRegistry()
         self.api_key = api_key
@@ -70,7 +72,7 @@ class HXApp(App[None]):
         self.commands: CommandRegistry = build_default_commands()
         # Settings are frozen; the live permission mode is session state.
         self.mode = settings.permissions.mode
-        self._turn_task: asyncio.Task[Any] | None = None
+        self._turn_worker: Any = None
         self._queued: list[str] = []
 
     def compose(self) -> ComposeResult:
@@ -85,10 +87,14 @@ class HXApp(App[None]):
         """Start the event-bus consumer task."""
         status = self.query_one(StatusBar)
         status.set_model(self.loop.model)
-        status.set_mode(self.mode.value, self.settings.permissions.sandbox)
+        status.set_mode(self.mode.value, self.sandbox_active)
         status.set_location(self.settings.cwd.name, git_branch(self.settings.cwd))
         if self.loop.model_info is not None:
             status.set_context(0, self.loop.model_info.context_window)
+
+        if self.loop.permissions is not None:
+            self.loop.permissions.asker = self.ask_permission
+            status.set_mode(self.loop.permissions.mode.value, self.sandbox_active)
 
         self.query_one(PromptInput).focus()
         self.run_worker(self._consume_events(), name="events", exclusive=False)
@@ -157,14 +163,16 @@ class HXApp(App[None]):
             if handled:
                 return
 
-        if self._turn_task is not None and not self._turn_task.done():
+        if self._turn_worker is not None and not self._turn_worker.is_finished:
             # Do not interleave turns: queue and run it when the current one ends.
             self._queued.append(text)
             self.query_one(Transcript).add_notice("queued", "info")
             return
 
         self.query_one(Transcript).add_user_message(text)
-        self._turn_task = asyncio.create_task(self._run_turn(text))
+        # A Textual worker, not a bare task: the permission modal uses
+        # push_screen_wait, which is only valid inside worker context.
+        self._turn_worker = self.run_worker(self._run_turn(text), name="turn", exclusive=False)
 
     async def _run_turn(self, text: str) -> None:
         prompt_input = self.query_one(PromptInput)
@@ -235,10 +243,10 @@ class HXApp(App[None]):
         await self.action_interrupt()
 
     async def action_interrupt(self) -> None:
-        if self._turn_task is None or self._turn_task.done():
+        if self._turn_worker is None or self._turn_worker.is_finished:
             return
         self.loop.cancel()
-        self._turn_task.cancel()
+        self._turn_worker.cancel()
 
     async def action_cycle_mode(self) -> None:
         from hx.config import PermissionMode
@@ -247,7 +255,7 @@ class HXApp(App[None]):
         self.mode = order[(order.index(self.mode) + 1) % len(order)]
         if self.loop.permissions is not None:
             self.loop.permissions.set_mode(self.mode)
-        self.query_one(StatusBar).set_mode(self.mode.value, self.settings.permissions.sandbox)
+        self.query_one(StatusBar).set_mode(self.mode.value, self.sandbox_active)
 
     async def action_expand_output(self) -> None:
         self.query_one(Transcript).toggle_last_tool()
@@ -258,9 +266,11 @@ class HXApp(App[None]):
 
     async def ask_permission(self, request: Any) -> Any:
         """Show the approval modal and return the user's choice."""
+        from hx.permissions.engine import PermissionAnswer
         from hx.tui.widgets.permission import PermissionModal
 
-        return await self.push_screen_wait(PermissionModal(request))
+        answer = await self.push_screen_wait(PermissionModal(request))
+        return answer if answer is not None else PermissionAnswer(allowed=False)
 
 
 async def run_tui(
@@ -269,6 +279,7 @@ async def run_tui(
     settings: Settings,
     models: ModelRegistry | None = None,
     api_key: str = "",
+    sandbox_active: bool = True,
 ) -> None:
-    app = HXApp(loop, bus, settings, models=models, api_key=api_key)
+    app = HXApp(loop, bus, settings, models=models, api_key=api_key, sandbox_active=sandbox_active)
     await app.run_async()

@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.widgets import Static
 
 from hx.config import load_settings
 from hx.core.context import ContextBuilder
 from hx.core.events import EventBus
 from hx.core.lateinject import InjectionRegistry
 from hx.core.loop import AgentLoop
+from hx.core.messages import StopReason
 from hx.core.session import new_session
 from hx.core.usage import TurnUsage
+from hx.providers.base import StreamDelta, StreamEnd
 from hx.providers.fake import FakeProvider, text_turn
 from hx.providers.models import ModelRegistry
 from hx.tools.registry import ToolRegistry
@@ -21,7 +25,6 @@ from hx.tui.app import HXApp
 from hx.tui.widgets.input import PromptInput
 from hx.tui.widgets.statusbar import StatusBar
 from hx.tui.widgets.transcript import Transcript
-from tests.conftest import unimplemented
 
 MODEL = "anthropic/claude-sonnet-4.5"
 
@@ -131,17 +134,88 @@ async def test_enter_submits_and_ctrl_j_inserts_a_newline(hx_home: Path, tmp_pat
         assert prompt.text == ""
 
 
-@unimplemented
-async def test_escape_cancels_a_streaming_turn() -> None:
-    raise NotImplementedError
+async def test_escape_cancels_a_streaming_turn(hx_home: Path, tmp_path: Path) -> None:
+    class SlowProvider:
+        name = "slow"
+
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        async def astream(self, request: Any) -> Any:
+            yield StreamDelta(text="thinking…")
+            await asyncio.sleep(30)
+            yield StreamEnd(stop_reason=StopReason.END_TURN)
+
+        async def aclose(self) -> None:
+            return None
+
+    app = build_app(tmp_path)
+    app.loop.provider = SlowProvider()
+
+    async with app.run_test() as pilot:
+        await app.submit("go")
+        await pilot.pause(0.1)
+        await app.action_interrupt()
+        for _ in range(30):
+            await pilot.pause(0.02)
+            notices = " ".join(str(n.render()) for n in app.query_one(Transcript).query("Notice"))
+            if "interrupted" in notices:
+                break
+        assert "interrupted" in notices
 
 
-@unimplemented
-async def test_permission_modal_shows_the_diff_before_approval() -> None:
+async def test_permission_modal_shows_the_diff_before_approval(
+    hx_home: Path, tmp_path: Path
+) -> None:
     """An approval prompt that hides what it is approving is not consent."""
-    raise NotImplementedError
+    from hx.permissions.engine import PermissionRequest
+    from hx.tui.widgets.permission import PermissionModal
+
+    diff = "--- a.py\n+++ a.py\n@@ -1 +1 @@\n-old line\n+new line\n"
+    request = PermissionRequest(
+        tool_name="Edit",
+        specifier="a.py",
+        params={},
+        mutating=True,
+        description="Edit(a.py)",
+        detail=diff,
+    )
+
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        app.push_screen(PermissionModal(request))
+        await pilot.pause()
+        rendered = str(app.screen.query_one("#permission-detail").query_one(Static).render())
+
+    assert "-old line" in rendered
+    assert "+new line" in rendered
 
 
-@unimplemented
-async def test_status_bar_marks_a_degraded_sandbox() -> None:
-    raise NotImplementedError
+async def test_permission_modal_returns_the_chosen_scope(hx_home: Path, tmp_path: Path) -> None:
+    from hx.permissions.engine import GrantScope, PermissionRequest
+    from hx.tui.widgets.permission import PermissionModal
+
+    request = PermissionRequest(
+        "Bash", "rm -rf build", {}, True, "Bash(rm -rf build)", "rm -rf build"
+    )
+    app = build_app(tmp_path)
+    answers: list[Any] = []
+
+    async with app.run_test() as pilot:
+        app.push_screen(PermissionModal(request), callback=answers.append)
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+
+    assert answers[0].allowed
+    assert answers[0].scope is GrantScope.ALWAYS
+
+
+async def test_status_bar_marks_a_degraded_sandbox(hx_home: Path, tmp_path: Path) -> None:
+    """The user must never believe they are sandboxed when they are not."""
+    app = build_app(tmp_path)
+    app.sandbox_active = False
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "no-sandbox" in str(app.query_one(StatusBar).render())

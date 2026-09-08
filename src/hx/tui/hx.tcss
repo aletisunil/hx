@@ -81,6 +81,9 @@ StatusBar {
 ModalScreen {
     layer: modal;
     align: center middle;
+    /* Dim the transcript rather than erasing it: the user should still see what
+       they were doing when the prompt appeared. */
+    background: $background 60%;
 }
 
 #picker {
@@ -102,4 +105,39 @@ ModalScreen {
     height: auto;
     max-height: 20;
     border: none;
+}
+
+/* Permission prompt. Sized to its content so the buttons sit under the diff,
+   not stranded at the bottom of an empty screen. */
+#permission {
+    width: 90%;
+    max-width: 110;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: thick $warning;
+    background: $surface;
+}
+
+#permission-title {
+    padding: 0 0 1 0;
+}
+
+#permission-detail {
+    height: auto;
+    max-height: 20;
+    padding: 0 1;
+    border: round $panel;
+    background: $panel;
+}
+
+#permission-actions {
+    height: auto;
+    padding: 1 0 0 0;
+    align-horizontal: right;
+}
+
+#permission-actions Button {
+    margin: 0 0 0 1;
+    min-width: 14;
 }

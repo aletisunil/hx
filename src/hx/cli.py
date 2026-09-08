@@ -145,13 +145,29 @@ class Runtime:
     models: Any
     api_key: str
     provider: Any
+    shell: Any = None
+    jobs: Any = None
+    sandbox: Any = None
+
+    @property
+    def sandbox_active(self) -> bool:
+        return bool(self.sandbox is not None and self.sandbox.active)
+
+    async def aclose(self) -> None:
+        if self.jobs is not None:
+            await self.jobs.close_all()
+        if self.shell is not None:
+            await self.shell.close()
+        if self.sandbox is not None:
+            self.sandbox.cleanup()
+        await self.provider.aclose()
 
 
 def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
-    """Boot the stack: settings, provider, session, tools, context, loop.
+    """Boot the stack: settings, provider, session, sandbox, tools, loop.
 
-    Tools, permissions and compaction are wired in later milestones; the loop
-    already accepts them so nothing here needs to change when they land.
+    Compaction, skills, subagents and MCP land in later milestones; the loop
+    already accepts them, so nothing here changes when they arrive.
     """
     from hx.config import load_settings
     from hx.core.context import ContextBuilder, build_project_context, load_system_prompt
@@ -159,9 +175,13 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     from hx.core.lateinject import InjectionRegistry
     from hx.core.loop import AgentLoop
     from hx.core.session import load_session, new_session
-    from hx.paths import ensure_user_dirs
+    from hx.paths import ensure_user_dirs, session_outputs_dir
+    from hx.permissions.engine import PermissionEngine, load_rules
+    from hx.permissions.sandbox import Sandbox, default_policy
     from hx.providers.models import ModelRegistry
     from hx.providers.openrouter import OpenRouterProvider, load_api_key
+    from hx.tools.bash import BackgroundJobs, PersistentShell
+    from hx.tools.read import FileTracker
     from hx.tools.registry import build_default_registry
 
     ensure_user_dirs()
@@ -176,11 +196,29 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
 
     session = load_session(resume) if resume else new_session(settings.cwd, settings.models.model)
 
+    sandbox = (
+        Sandbox(default_policy(settings.cwd, settings.permissions.allow_network))
+        if settings.permissions.sandbox
+        else None
+    )
+    shell = PersistentShell(settings.cwd, shell=settings.bash.shell, sandbox=sandbox)
+    jobs = BackgroundJobs(session_outputs_dir(session.meta.session_id) / "jobs")
+    tracker = FileTracker()
+
+    permissions = PermissionEngine(
+        mode=settings.permissions.mode,
+        rules=[
+            *load_rules(settings.cwd),
+            *_rules_from_settings(settings.permissions),
+        ],
+        cwd=settings.cwd,
+    )
+
     loop = AgentLoop(
         provider=provider,
         session=session,
-        tools=build_default_registry(),
-        permissions=None,
+        tools=build_default_registry(shell, jobs, tracker),
+        permissions=permissions,
         context=ContextBuilder(
             load_system_prompt(settings.cwd),
             settings.cwd,
@@ -202,7 +240,24 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         models=models,
         api_key=api_key,
         provider=provider,
+        shell=shell,
+        jobs=jobs,
+        sandbox=sandbox,
     )
+
+
+def _rules_from_settings(permissions: Any) -> list[Any]:
+    """Rules passed on the command line or via env, layered on top of the files."""
+    from hx.permissions.engine import Decision, parse_rule
+
+    rules: list[Any] = []
+    for texts, decision in (
+        (permissions.deny, Decision.DENY),
+        (permissions.ask, Decision.ASK),
+        (permissions.allow, Decision.ALLOW),
+    ):
+        rules.extend(parse_rule(str(text), "settings", decision) for text in texts)
+    return rules
 
 
 def prompt_for_api_key() -> bool:
@@ -281,6 +336,8 @@ def run_print_command(parsed: ParsedArgs) -> int:
                         sys.stdout.flush()
                     case ev.ToolCallStarted():
                         print(f"[tool] {event.name} {event.input}", file=sys.stderr)
+                    case ev.PermissionRequested():
+                        print(f"[permission] {event.description}", file=sys.stderr)
                     case ev.ToolCallFinished():
                         marker = "error" if event.is_error else "ok"
                         print(f"[tool] {marker} ({event.duration_ms:.0f}ms)", file=sys.stderr)
@@ -295,7 +352,7 @@ def run_print_command(parsed: ParsedArgs) -> int:
             await asyncio.sleep(0.05)
             runtime.bus.close()
             await renderer
-            await runtime.provider.aclose()
+            await runtime.aclose()
 
         print()
         usage = runtime.session.usage

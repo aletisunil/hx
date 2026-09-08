@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from hx.core.context import AssembledContext
 from hx.core.events import (
     ErrorRaised,
+    PermissionRequested,
     TextDelta,
     ThinkingDelta,
     ToolCallFinished,
@@ -351,12 +352,22 @@ class AgentLoop:
             params=call.input,
             mutating=tool.mutating,
             description=f"{call.name}({_brief(call.input)})",
+            detail=_permission_detail(call),
         )
-        if await self.permissions.request(request):
+        self.bus.publish(
+            PermissionRequested(
+                request_id=call.id,
+                tool_name=call.name,
+                description=request.description,
+                detail=request.detail,
+            )
+        )
+        allowed, reason = await self.permissions.request(request)
+        if allowed:
             return None
         return ToolResultBlock(
             tool_use_id=call.id,
-            content=f"Permission denied by the user for {call.name}.",
+            content=f"{call.name} was not permitted: {reason}",
             is_error=True,
         )
 
@@ -392,6 +403,39 @@ def _parse_tool_input(raw: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _permission_detail(call: ToolUseBlock) -> str:
+    """What the approval modal shows: the command, or the exact edit.
+
+    For an edit this previews the change against the file on disk, so the user
+    approves a diff rather than a filename.
+    """
+    if call.name == "Bash":
+        return str(call.input.get("command", ""))
+
+    if call.name in {"Edit", "Write"} and (raw_path := call.input.get("file_path")):
+        from pathlib import Path
+
+        from hx.tools.edit import parse_edits, unified_diff
+
+        path = Path(str(raw_path))
+        try:
+            before = path.read_text(encoding="utf-8") if path.is_file() else ""
+            if call.name == "Write":
+                after = str(call.input.get("content", ""))
+            else:
+                after = before
+                for edit in parse_edits(call.input):
+                    after = after.replace(
+                        edit.old_string, edit.new_string, -1 if edit.replace_all else 1
+                    )
+            return unified_diff(before, after, str(path)) or f"{path} (no change)"
+        except Exception:
+            # Previewing is best effort; never block the prompt on it.
+            return str(raw_path)
+
+    return _brief(call.input, limit=400)
 
 
 def _brief(params: dict[str, Any], limit: int = 80) -> str:

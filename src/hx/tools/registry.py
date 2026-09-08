@@ -94,9 +94,34 @@ def _sort_key(name: str) -> tuple[bool, str]:
     return (name.startswith("mcp__"), name)
 
 
-def build_default_registry() -> ToolRegistry:
-    """Registry with the builtin tools registered in canonical order."""
-    return ToolRegistry()
+def build_default_registry(
+    shell: Any | None = None,
+    jobs: Any | None = None,
+    tracker: Any | None = None,
+) -> ToolRegistry:
+    """Registry with the builtin tools registered.
+
+    Bash is registered only when a shell is supplied, so a headless caller that
+    does not want command execution simply does not pass one.
+    """
+    from hx.tools.bash import BashTool
+    from hx.tools.edit import EditTool
+    from hx.tools.glob import GlobTool
+    from hx.tools.grep import GrepTool
+    from hx.tools.read import FileTracker, ReadTool
+    from hx.tools.write import WriteTool
+
+    file_tracker = tracker if tracker is not None else FileTracker()
+
+    registry = ToolRegistry()
+    if shell is not None and jobs is not None:
+        registry.register(BashTool(shell, jobs))
+    registry.register(ReadTool(file_tracker))
+    registry.register(WriteTool(file_tracker))
+    registry.register(EditTool(file_tracker))
+    registry.register(GlobTool())
+    registry.register(GrepTool())
+    return registry
 
 
 class DuplicateTool(Exception):

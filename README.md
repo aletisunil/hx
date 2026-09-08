@@ -29,16 +29,36 @@ The status bar carries the numbers that matter: model, context used against the
 window, tokens in/out, **cache read and write tokens with hit rate**, session
 cost, last-turn latency, and permission mode.
 
+## Safety
+
+Two independent layers guard every tool call, and both must pass.
+
+**Permission rules** are `Tool(specifier)` strings in `settings.json` -
+`Bash(git commit:*)`, `Edit(src/**)`, `Read(**/.ssh/**)`. Deny beats ask beats
+allow, and a deny holds even in bypass mode. Shell commands are decomposed into
+their real segments first, so an allow rule for `git status` does not carry
+`&& rm -rf /` along with it; a command that cannot be decomposed with
+confidence prompts rather than passing.
+
+**An OS sandbox** wraps command execution: Seatbelt on macOS, bubblewrap on
+Linux. The filesystem is readable, writes are confined to the project and the
+temp dir, credential paths (`~/.ssh`, `~/.aws`, and HX's own `auth.json`) are
+unreadable, and outbound network is off. If neither backend is present the
+status bar says `no-sandbox` rather than implying protection that is not there.
+
+Modes cycle with shift+tab: `plan` (read-only - mutating tools are not even
+offered to the model), `default`, `acceptEdits`, `bypass`.
+
 ## Status
 
-Working: the agent loop, OpenRouter streaming with prefix caching and accurate
-cost accounting, session persistence and resume, late injection, the TUI, and
-the `/model` `/models` `/clear` `/resume` `/cost` `/context` `/help` `/quit`
+Working: the agent loop; OpenRouter streaming with prefix caching and accurate
+cost accounting; session persistence and resume; late injection; the tool suite
+(Bash with a persistent sandboxed shell, Read, Write, Edit, Glob, Grep); the
+permission engine and OS sandbox; tool-output capping; and the TUI with its
+`/model` `/models` `/clear` `/resume` `/cost` `/context` `/help` `/quit`
 commands.
 
-Next: the tool suite (Bash, Read, Write, Edit, Glob, Grep), the permission
-engine and OS sandbox, compaction and output capping, then skills, subagents
-and MCP.
+Next: compaction, then skills, subagents and MCP.
 
 ## Development
 
