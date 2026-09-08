@@ -23,9 +23,6 @@ class ToolRegistry:
             raise DuplicateTool(tool.name)
         self._tools[tool.name] = tool
 
-    def unregister(self, name: str) -> None:
-        self._tools.pop(name, None)
-
     def get(self, name: str) -> Tool:
         try:
             return self._tools[name]
@@ -119,7 +116,7 @@ def build_default_registry(
     Bash is registered only when a shell is supplied, so a headless caller that
     does not want command execution simply does not pass one.
     """
-    from hx.tools.bash import BashTool
+    from hx.tools.bash import BashOutputTool, BashTool, KillShellTool
     from hx.tools.edit import EditTool
     from hx.tools.glob import GlobTool
     from hx.tools.grep import GrepTool
@@ -132,6 +129,8 @@ def build_default_registry(
     registry = ToolRegistry()
     if shell is not None and jobs is not None:
         registry.register(BashTool(shell, jobs))
+        registry.register(BashOutputTool(jobs))
+        registry.register(KillShellTool(jobs))
     registry.register(ReadTool(file_tracker))
     registry.register(WriteTool(file_tracker))
     registry.register(EditTool(file_tracker))

@@ -1,12 +1,18 @@
-/* HX Textual stylesheet.
+/* HX stylesheet.
 
-   Colours come from Textual's design tokens ($surface, $panel, $accent, …) so
-   the app follows the terminal's light/dark theme. hx.tui.theme carries the
-   Rich styles used inside renderables, which CSS cannot reach. */
+   Colours come from the Textual theme built in hx.tui.theme, so light, dark
+   and ansi all resolve through the same design tokens. Rich renderables read
+   the same palette directly; nothing here hard-codes a colour.
+
+   Layout: a scrolling transcript with an optional todo sidebar, over a fixed
+   dock of subagent rows, working indicator, prompt and footer. The dock never
+   scrolls away - a running turn should stay visible while the user reads back
+   through old output. */
 
 Screen {
     layers: base modal;
     background: $background;
+    color: $foreground;
 }
 
 #body {
@@ -16,7 +22,7 @@ Screen {
 Transcript {
     width: 1fr;
     height: 1fr;
-    padding: 0 1;
+    padding: 0 1 0 0;
     overflow-y: auto;
     scrollbar-size-vertical: 1;
 }
@@ -30,18 +36,18 @@ Transcript > Notice {
     margin: 1 0 0 0;
 }
 
-Transcript > ToolBlock {
-    padding: 0 0 0 1;
-    border-left: outer $panel;
+/* The user's own turn is the anchor of an exchange; it gets the strongest
+   block treatment so the eye can find where each one starts. */
+Transcript > MessageBlock.role-user {
+    margin: 1 0 0 0;
 }
 
 Transcript > Notice {
     padding: 0 1;
-    background: $panel;
 }
 
 TodoSidebar {
-    width: 32;
+    width: 34;
     height: 1fr;
     display: none;
     padding: 0 1;
@@ -58,6 +64,16 @@ SubagentRows {
     padding: 0 1;
 }
 
+/* Zero height while idle so the prompt sits flush against the transcript. */
+WorkingIndicator {
+    height: 0;
+    padding: 0 1;
+}
+
+WorkingIndicator.busy {
+    height: 1;
+}
+
 PromptInput {
     height: auto;
     min-height: 3;
@@ -68,14 +84,14 @@ PromptInput {
 }
 
 PromptInput:focus {
-    border: round $accent;
+    border: round $primary;
 }
 
 StatusBar {
-    height: 1;
+    height: 2;
     dock: bottom;
     padding: 0 1;
-    background: $panel;
+    background: $background;
 }
 
 ModalScreen {
@@ -92,12 +108,13 @@ ModalScreen {
     height: auto;
     max-height: 80%;
     padding: 1 2;
-    border: round $accent;
+    border: round $primary;
     background: $surface;
 }
 
 #picker-title {
     text-style: bold;
+    color: $primary;
     padding: 0 0 1 0;
 }
 
@@ -105,6 +122,7 @@ ModalScreen {
     height: auto;
     max-height: 20;
     border: none;
+    background: $surface;
 }
 
 /* Permission prompt. Sized to its content so the buttons sit under the diff,

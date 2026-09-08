@@ -3,6 +3,7 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -27,11 +28,36 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --extra dev --python ${{ matrix.python }}
+      # `live` needs an API key and real spend, so it never runs in CI.
       - run: uv run pytest -m "not live"
 
   install-script:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: shellcheck installer
-        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck install.sh
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: shellcheck install.sh
+      - name: install from a clean container
+        run: |
+          docker run --rm -v "$PWD:/src" debian:bookworm-slim bash -c '
+            set -eux
+            apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
+            cd /tmp
+            HX_PACKAGE=/src sh /src/install.sh
+            export PATH="$HOME/.local/bin:$PATH"
+            hx --version
+          '
+
+  publish:
+    needs: [lint, test, install-script]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv build
+      # Trusted publishing: no long-lived token stored in the repo.
+      - uses: pypa/gh-action-pypi-publish@release/v1

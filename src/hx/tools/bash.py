@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hx.tools.base import StreamingTool, ToolContext, ToolError, ToolResult
+from hx.tools.base import StreamingTool, Tool, ToolContext, ToolError, ToolResult
 from hx.tools.output import cap_output, summarize_for_ui
 
 DESCRIPTION = """Run a shell command in a persistent session.
@@ -74,10 +74,6 @@ class PersistentShell:
     def last_exit_code(self) -> int:
         """Exit status of the most recently completed command."""
         return self._exit_code
-
-    @property
-    def last_timed_out(self) -> bool:
-        return self._timed_out
 
     async def start(self) -> None:
         argv = [self.shell, "-s"]
@@ -239,13 +235,6 @@ class PersistentShell:
         """Shell cwd as HX last knew it. Refreshed by :meth:`sync_cwd`."""
         return self._cwd
 
-    async def sync_cwd(self) -> Path:
-        result = await self.run("pwd", timeout_seconds=5)
-        candidate = result.stdout.strip().splitlines()
-        if candidate:
-            self._cwd = Path(candidate[-1])
-        return self._cwd
-
 
 @dataclass(slots=True)
 class BackgroundJob:
@@ -254,6 +243,8 @@ class BackgroundJob:
     process: Any
     log_path: Path
     started: float = field(default_factory=time.time)
+    cursor: int = 0
+    """Lines already returned to the model, so polling only yields what is new."""
 
 
 class BackgroundJobs:
@@ -290,12 +281,32 @@ class BackgroundJobs:
         return job_id
 
     def output(self, job_id: str, since_line: int = 0) -> str:
+        return self.read(job_id, since_line)[0]
+
+    def read(self, job_id: str, since_line: int | None = None) -> tuple[str, int]:
+        """Return output and the next line cursor.
+
+        The cursor is remembered per job, so repeated polling returns only what
+        is new rather than re-sending the whole log on every call.
+        """
         job = self._get(job_id)
         try:
             lines = job.log_path.read_text(errors="replace").splitlines()
         except OSError:
-            return "(no output yet)"
-        return "\n".join(lines[since_line:]) or "(no new output)"
+            return "(no output yet)", job.cursor
+
+        start = job.cursor if since_line is None else max(0, since_line)
+        chunk = lines[start:]
+        job.cursor = len(lines)
+        return "\n".join(chunk) or "(no new output)", job.cursor
+
+    def state(self, job_id: str) -> dict[str, Any]:
+        job = self._get(job_id)
+        return {
+            "job_id": job.job_id,
+            "running": job.process.returncode is None,
+            "exit_code": job.process.returncode,
+        }
 
     def kill(self, job_id: str) -> None:
         job = self._get(job_id)
@@ -341,8 +352,7 @@ class BashTool(StreamingTool):
                 "command": {"type": "string"},
                 "timeout": {
                     "type": "number",
-                    "description": f"Seconds, max {MAX_TIMEOUT:.0f}",
-                    "default": DEFAULT_TIMEOUT,
+                    "description": "Seconds. Capped by the project's configured maximum.",
                 },
                 "run_in_background": {"type": "boolean", "default": False},
                 "description": {
@@ -365,14 +375,15 @@ class BashTool(StreamingTool):
         if not command:
             raise ToolError("command is empty")
 
-        timeout = min(float(params.get("timeout") or DEFAULT_TIMEOUT), MAX_TIMEOUT)
+        timeout = self._timeout(params, ctx)
 
         if params.get("run_in_background"):
             job_id = await self.jobs.start(command, ctx.cwd, self.shell.sandbox)
             return ToolResult(
                 content=(
                     f"Started background job {job_id}.\n"
-                    f"Poll it with BashOutput, or stop it with KillShell."
+                    f"Read its output with BashOutput(job_id={job_id!r}), "
+                    f"stop it with KillShell(job_id={job_id!r})."
                 ),
                 summary=f"background {job_id}",
                 metadata={"job_id": job_id},
@@ -406,8 +417,20 @@ class BashTool(StreamingTool):
         )
 
     def stream(self, params: dict[str, Any], ctx: ToolContext) -> AsyncIterator[str]:
-        timeout = min(float(params.get("timeout") or DEFAULT_TIMEOUT), MAX_TIMEOUT)
-        return self.shell.stream(str(params["command"]), timeout)
+        return self.shell.stream(str(params["command"]), self._timeout(params, ctx))
+
+    @staticmethod
+    def _timeout(params: dict[str, Any], ctx: ToolContext) -> float:
+        """Model request, bounded by the configured ceiling.
+
+        Both bounds come from settings rather than module constants, so
+        `bash.timeout_seconds` in settings.json actually does something.
+        """
+        settings = ctx.settings.bash
+        requested = params.get("timeout")
+        default = float(getattr(settings, "timeout_seconds", DEFAULT_TIMEOUT))
+        ceiling = float(getattr(settings, "max_timeout_seconds", MAX_TIMEOUT))
+        return min(float(requested) if requested else default, ceiling)
 
 
 async def _child_pids(parent: int) -> list[int]:
@@ -424,6 +447,88 @@ async def _child_pids(parent: int) -> list[int]:
     except (OSError, TimeoutError):
         return []
     return [int(line) for line in stdout.decode().split() if line.isdigit()]
+
+
+class BashOutputTool(Tool):
+    """Read new output from a background job.
+
+    Without this the Bash tool could start a job and never hear from it again,
+    which makes ``run_in_background`` worse than useless: the work happens where
+    nobody can see it.
+    """
+
+    name = "BashOutput"
+    description = (
+        "Read output from a background job started by Bash with run_in_background.\n\n"
+        "Returns lines since the last read. Call it again to poll for more."
+    )
+    mutating = False
+
+    def __init__(self, jobs: BackgroundJobs) -> None:
+        self.jobs = jobs
+
+    def schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "since_line": {
+                    "type": "integer",
+                    "description": "Skip this many lines from the start (default: continue)",
+                },
+            },
+            "required": ["job_id"],
+        }
+
+    async def run(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        job_id = str(params["job_id"])
+        since = params.get("since_line")
+        text, next_line = self.jobs.read(job_id, int(since) if since is not None else None)
+
+        capped = cap_output(
+            text,
+            session_id=ctx.session_id,
+            tool_use_id=ctx.tool_use_id,
+            char_cap=ctx.settings.context.tool_output_char_cap,
+            line_cap=ctx.settings.context.tool_output_line_cap,
+        )
+        status = self.jobs.state(job_id)
+        body = capped.text
+        if not status["running"]:
+            body += f"\n\n[job finished, exit code {status['exit_code']}]"
+
+        return ToolResult(
+            content=body,
+            spilled_path=capped.spilled_path,
+            summary=f"{next_line} lines, {'running' if status['running'] else 'finished'}",
+            metadata={"next_line": next_line, **status},
+        )
+
+
+class KillShellTool(Tool):
+    """Stop a background job."""
+
+    name = "KillShell"
+    description = "Stop a background job started by Bash with run_in_background."
+    mutating = True
+
+    def __init__(self, jobs: BackgroundJobs) -> None:
+        self.jobs = jobs
+
+    def schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
+        }
+
+    def permission_specifier(self, params: dict[str, Any]) -> str | None:
+        return str(params.get("job_id", ""))
+
+    async def run(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        job_id = str(params["job_id"])
+        self.jobs.kill(job_id)
+        return ToolResult(content=f"Killed {job_id}.", summary=f"killed {job_id}")
 
 
 def _parse_exit_code(tail: str) -> int:

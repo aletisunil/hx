@@ -106,3 +106,52 @@ def test_active_skill_allowlists_only_narrow() -> None:
 
     active.activate(Skill("b", "d", "b", Path("b"), allowed_tools=("Read", "Write")))
     assert active.tool_allowlist() == {"Read"}
+
+
+async def test_a_loaded_skill_actually_restricts_the_toolset(hx_home: Path, project: Path) -> None:
+    """The Skill tool tells the model "use only these tools". That was a claim
+    with nothing behind it until the loop intersected the allowlist."""
+    from hx.config import PermissionMode, load_settings
+    from hx.core.context import ContextBuilder
+    from hx.core.events import EventBus
+    from hx.core.lateinject import InjectionRegistry
+    from hx.core.loop import AgentLoop
+    from hx.core.session import new_session
+    from hx.permissions.engine import PermissionEngine
+    from hx.providers.fake import FakeProvider, text_turn, tool_turn
+    from hx.providers.models import ModelRegistry
+    from hx.tools.read import FileTracker
+    from hx.tools.registry import build_default_registry
+
+    directory = project / ".hx" / "skills" / "audit"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(
+        "---\nname: audit\ndescription: Read-only audit\nallowed-tools: Read, Grep\n---\n\nLook only.\n"
+    )
+    skills = {s.name: s for s in discover(project)}
+
+    active = ActiveSkills()
+    tools = build_default_registry(None, None, FileTracker())
+    tools.register(SkillTool(skills, active))
+
+    loop = AgentLoop(
+        provider=FakeProvider([tool_turn("Skill", {"name": "audit"}, "s1"), text_turn("done")]),
+        session=new_session(project, "m"),
+        tools=tools,
+        permissions=PermissionEngine(PermissionMode.DEFAULT, [], project),
+        context=ContextBuilder("sys", project),
+        compactor=None,
+        injections=InjectionRegistry(),
+        bus=EventBus(),
+        settings=load_settings(project),
+        model_info=ModelRegistry().get_or_default("m"),
+        active_skills=active,
+    )
+
+    await loop.run("audit this")
+
+    before = {t["name"] for t in loop.provider.requests[0].context.tools}
+    after = {t["name"] for t in loop.provider.requests[1].context.tools}
+
+    assert {"Write", "Edit"} <= before, "everything is offered before the skill loads"
+    assert after == {"Read", "Grep", "Skill"}, "the skill narrows the toolset for later turns"

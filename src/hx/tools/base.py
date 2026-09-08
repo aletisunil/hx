@@ -46,6 +46,13 @@ class Tool(abc.ABC):
     mutating: bool = False
     """Mutating tools run serially and require permission in non-bypass modes."""
 
+    parallel_safe: bool = False
+    """Set on a mutating tool whose calls are independent of each other.
+
+    Mutating tools are serialised by default so their side effects land in the
+    order the model emitted them. A tool that fans out to isolated workers can
+    opt out of that."""
+
     @abc.abstractmethod
     def schema(self) -> dict[str, Any]:
         """JSON Schema for the tool input.

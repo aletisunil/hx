@@ -24,6 +24,11 @@ class TaskTool(Tool):
     mutating = True
     """Conservatively mutating: a subagent may run tools that write."""
 
+    parallel_safe = True
+    """Subagents are independent by construction - separate contexts, separate
+    transcripts - so several Task calls in one turn run concurrently. Their own
+    tools are still gated by the same permission engine."""
+
     def __init__(self, runner: Any) -> None:
         self.runner = runner
 

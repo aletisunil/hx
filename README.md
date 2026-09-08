@@ -22,8 +22,14 @@ hx --model openai/gpt-5   # override the model for one run
 ```
 
 Inside the TUI: `enter` sends, `ctrl+j` newline, `esc` interrupts,
-`shift+tab` cycles permission mode, `ctrl+r` expands the last tool output,
-`ctrl+t` toggles todos. `/help` lists the slash commands.
+`shift+tab` cycles permission mode, `ctrl+p` opens the command palette,
+`ctrl+r` expands the last tool output, `ctrl+t` toggles todos. `@path`
+completes a file, and `!command` runs a shell command directly - through the
+same permission engine and sandbox, without spending a model turn.
+
+Commands: `/model` `/models` `/clear` `/compact` `/resume` `/cost` `/context`
+`/permissions` `/mode` `/skills` `/agents` `/mcp` `/todos` `/init` `/theme`
+`/help` `/quit`. `/help` lists them with keys.
 
 The status bar carries the numbers that matter: model, context used against the
 window, tokens in/out, **cache read and write tokens with hit rate**, session
@@ -106,8 +112,13 @@ Write, Edit, Glob, Grep, TodoWrite, Task, Skill); the permission engine and OS
 sandbox; late injection, compaction and output capping; skills, subagents and
 MCP; and the TUI.
 
-Not yet exercised against a live OpenRouter key - every test runs against a
-scripted provider.
+The one thing not yet exercised for real is a live OpenRouter call: the
+`live`-marked tests exist and are ready, but they need a key and are
+deselected by default. Run them with:
+
+```sh
+OPENROUTER_API_KEY=... uv run pytest -m live
+```
 
 ## Development
 

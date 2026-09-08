@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from hx.permissions.engine import PermissionEngine
     from hx.providers.base import Provider
     from hx.providers.models import ModelInfo
+    from hx.skills.runtime import ActiveSkills
     from hx.tools.registry import ToolRegistry
 
 
@@ -87,6 +88,7 @@ class AgentLoop:
         bus: EventBus,
         settings: Settings,
         model_info: ModelInfo | None = None,
+        active_skills: ActiveSkills | None = None,
         skills_index: str | None = None,
         project_context: str | None = None,
     ) -> None:
@@ -100,6 +102,7 @@ class AgentLoop:
         self.bus = bus
         self.settings = settings
         self.model_info = model_info
+        self.active_skills = active_skills
         self.skills_index = skills_index
         self.project_context = project_context
         self._cancelled = False
@@ -241,9 +244,26 @@ class AgentLoop:
         )
 
     def _allowed_tools(self) -> set[str] | None:
-        if self.permissions is None:
-            return None
-        return self.permissions.allowed_tools(self.tools.names())
+        """Which tools the model may see this turn.
+
+        A loaded skill's ``allowed-tools`` narrows the set - it is intersected,
+        never unioned, so a skill can only ever restrict. Without this the
+        Skill tool's own "use only these tools" line would be a claim with
+        nothing behind it.
+        """
+        allowed: set[str] | None = None
+        if self.permissions is not None:
+            mutating = {name for name in self.tools.names() if self.tools.get(name).mutating}
+            allowed = self.permissions.allowed_tools(self.tools.names(), mutating)
+
+        if self.active_skills is not None and (
+            skill_allowed := self.active_skills.tool_allowlist()
+        ):
+            # Skill and Task stay reachable so the model can switch skills or
+            # delegate; everything else narrows to the skill's list.
+            keep = skill_allowed | {"Skill", "Task"}
+            allowed = keep if allowed is None else (allowed & keep)
+        return allowed
 
     def _assemble(
         self,
@@ -287,7 +307,7 @@ class AgentLoop:
         concurrent: list[ToolUseBlock] = []
 
         for call in calls:
-            if self._is_mutating(call):
+            if self._runs_serially(call):
                 for pending in concurrent:
                     results[pending.id] = await self._run_one(pending)
                 concurrent.clear()
@@ -302,13 +322,14 @@ class AgentLoop:
 
         return [results[c.id] for c in calls]
 
-    def _is_mutating(self, call: ToolUseBlock) -> bool:
+    def _runs_serially(self, call: ToolUseBlock) -> bool:
         try:
-            return self.tools.get(call.name).mutating
+            tool = self.tools.get(call.name)
         except Exception:
             # An unknown tool is about to become an error result; treat it as
-            # mutating so it cannot slip into the concurrent batch.
+            # serial so it cannot slip into the concurrent batch.
             return True
+        return tool.mutating and not tool.parallel_safe
 
     def _display_name(self, name: str) -> str:
         """Attribute a subagent's tool calls so they do not read as the parent's."""
@@ -349,6 +370,7 @@ class AgentLoop:
                 is_error=result.is_error,
                 duration_ms=(time.monotonic() - started) * 1000,
                 summary=result.summary or ("error" if result.is_error else "done"),
+                metadata=dict(result.metadata),
             )
         )
         return ToolResultBlock(

@@ -11,7 +11,6 @@ the entire reason to spawn one.
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -177,20 +176,6 @@ class SubagentRunner:
             return
         for turn in loop.session.usage.turns:  # type: ignore[attr-defined]
             parent.record(turn)  # type: ignore[attr-defined]
-
-    async def run_many(self, requests: list[tuple[str, str, str]]) -> list[SubagentResult]:
-        """Run subagents concurrently via ``asyncio.TaskGroup``, preserving input order."""
-        results: list[SubagentResult | None] = [None] * len(requests)
-
-        async with asyncio.TaskGroup() as group:
-            tasks = [
-                group.create_task(self.run(agent_type, prompt, description))
-                for agent_type, prompt, description in requests
-            ]
-        for index, task in enumerate(tasks):
-            results[index] = task.result()
-
-        return [result for result in results if result is not None]
 
     def active(self) -> list[str]:
         """Ids of running subagents, for the TUI progress rows."""

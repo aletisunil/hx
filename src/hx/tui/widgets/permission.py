@@ -12,7 +12,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from hx.permissions.engine import GrantScope, PermissionAnswer
-from hx.tui.widgets.diff import render_diff
+from hx.tui.renderers import render_diff
 
 
 class PermissionModal(ModalScreen[PermissionAnswer]):

@@ -13,6 +13,7 @@ a terminal UI.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import getpass
 import subprocess
 import sys
@@ -157,6 +158,10 @@ class Runtime:
     def sandbox_active(self) -> bool:
         return bool(self.sandbox is not None and self.sandbox.active)
 
+    @property
+    def sandbox_backend(self) -> str:
+        return str(self.sandbox.backend.value) if self.sandbox is not None else "none"
+
     async def connect_mcp(self) -> list[Any]:
         """Connect MCP servers and register their tools.
 
@@ -168,6 +173,19 @@ class Runtime:
         statuses: list[Any] = await self.mcp.connect_all()
         await self.mcp.register_tools(self.tools)
         return statuses
+
+    async def refresh_models_if_stale(self) -> None:
+        """Re-fetch the model catalogue once a day.
+
+        Without this the cache written on first run never updates, so /model
+        would show last month's prices and context windows forever. A failure
+        here is not worth interrupting the session for - the cached catalogue
+        still works.
+        """
+        if not self.models.is_stale:
+            return
+        with contextlib.suppress(Exception):
+            await self.models.refresh(self.api_key)
 
     async def aclose(self) -> None:
         if self.mcp is not None:
@@ -398,6 +416,7 @@ def run_tui_command(parsed: ParsedArgs) -> int:
     async def main_async() -> None:
         try:
             await runtime.connect_mcp()
+            await runtime.refresh_models_if_stale()
             await run_tui(
                 runtime.loop, runtime.bus, runtime.settings, runtime.models, runtime.api_key
             )

@@ -90,8 +90,7 @@ class EditTool(Tool):
         self.tracker.mark_read(path)
 
         diff = unified_diff(before, after, str(path))
-        added = sum(1 for line in diff.splitlines() if line.startswith("+") and line[1:2] != "+")
-        removed = sum(1 for line in diff.splitlines() if line.startswith("-") and line[1:2] != "-")
+        added, removed = count_changes(diff)
         return ToolResult(
             content=f"Applied {len(edits)} edit(s) to {path}.\n\n{diff}",
             summary=f"{path.name} +{added} -{removed}",
@@ -145,6 +144,13 @@ def parse_edits(params: dict[str, Any]) -> list[EditOp]:
             replace_all=bool(params.get("replace_all", False)),
         )
     ]
+
+
+def count_changes(diff_text: str) -> tuple[int, int]:
+    """Added and removed line counts, ignoring the ``+++``/``---`` file headers."""
+    added = sum(1 for line in diff_text.splitlines() if line.startswith("+") and line[1:2] != "+")
+    removed = sum(1 for line in diff_text.splitlines() if line.startswith("-") and line[1:2] != "-")
+    return added, removed
 
 
 def unified_diff(before: str, after: str, path: str) -> str:

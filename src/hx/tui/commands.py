@@ -236,12 +236,98 @@ async def cmd_mcp(ctx: CommandContext, args: str) -> None:
     )
 
 
+async def cmd_permissions(ctx: CommandContext, args: str) -> None:
+    """``/permissions`` - view the active rules and what is actually enforcing them."""
+    engine = ctx.app.loop.permissions
+    if engine is None:
+        ctx.app.notice("No permission engine is attached to this session.", "warning")
+        return
+
+    lines = [f"Permission mode: {engine.mode.value}"]
+    sandbox = ctx.app.sandbox_backend
+    lines.append(
+        f"Sandbox: {sandbox}"
+        if ctx.app.sandbox_active
+        else "Sandbox: none - commands are NOT confined by the OS"
+    )
+
+    if engine.rules:
+        lines.append("")
+        lines.append("Rules (deny wins, then ask, then allow):")
+        for decision in ("deny", "ask", "allow"):
+            for rule in engine.rules:
+                if rule.decision.value != decision:
+                    continue
+                spec = f"({rule.specifier})" if rule.specifier else ""
+                lines.append(f"  {decision:<5} {rule.tool}{spec}    [{rule.source}]")
+    else:
+        lines.append("")
+        lines.append('No rules configured. Add them under "permissions" in .hx/settings.json.')
+
+    ctx.app.notice("\n".join(lines), "info" if ctx.app.sandbox_active else "warning")
+
+
+async def cmd_mode(ctx: CommandContext, args: str) -> None:
+    """``/mode [plan|default|acceptEdits|bypass]``."""
+    from hx.config import PermissionMode
+
+    if not args:
+        options = ", ".join(mode.value for mode in PermissionMode)
+        ctx.app.notice(f"Mode is {ctx.app.mode.value}. Options: {options}")
+        return
+
+    wanted = args.strip()
+    match = next((m for m in PermissionMode if m.value.lower() == wanted.lower()), None)
+    if match is None:
+        ctx.app.notice(f"Unknown mode {wanted!r}. Try /mode with no argument.", "error")
+        return
+
+    ctx.app.set_mode(match)
+    level = "warning" if match is PermissionMode.BYPASS else "success"
+    note = " - every tool call is approved automatically" if match is PermissionMode.BYPASS else ""
+    ctx.app.notice(f"Permission mode: {match.value}{note}", level)
+
+
+INIT_PROMPT = """\
+Write an HX.md for this project, at its root.
+
+Read enough of the codebase to be accurate. Cover: what the project is, how to
+build, test and lint it, the layout of the source tree, and any conventions a
+newcomer would otherwise get wrong. Be concise and concrete - it is loaded into
+context on every session, so every line costs.
+
+If HX.md already exists, improve it rather than replacing it wholesale."""
+
+
+async def cmd_init(ctx: CommandContext, args: str) -> None:
+    """``/init`` - generate an HX.md describing this project."""
+    await ctx.app.submit_to_model(INIT_PROMPT)
+
+
+async def cmd_theme(ctx: CommandContext, args: str) -> None:
+    """``/theme [dark|light|ansi]`` - switch palette for this session."""
+    from hx.tui.theme import PALETTES, THEME
+
+    if not args:
+        options = ", ".join(sorted(PALETTES))
+        ctx.app.notice(f"Theme is {THEME.palette.name}. Options: {options}")
+        return
+
+    wanted = args.strip().lower()
+    if wanted not in PALETTES:
+        ctx.app.notice(f"Unknown theme {wanted!r}. Try /theme with no argument.", "error")
+        return
+
+    ctx.app.notice(f"Theme: {ctx.app.apply_theme(wanted)}", "success")
+
+
 async def cmd_help(ctx: CommandContext, args: str) -> None:
     lines = ["Commands:"]
     lines += [f"  /{c.name:<12} {c.summary}" for c in ctx.registry.all()]
     lines.append("")
     lines.append("Keys: enter send · ctrl+j newline · esc interrupt · shift+tab mode")
-    lines.append("      ctrl+r expand last tool output · ctrl+t todos · ctrl+d quit")
+    lines.append("      ctrl+p command palette · ctrl+r expand output · ctrl+t todos · ctrl+d quit")
+    lines.append("      @path completes a file · !command runs a shell command directly")
     ctx.app.notice("\n".join(lines))
 
 
@@ -263,6 +349,10 @@ def build_default_commands() -> CommandRegistry:
         Command("skills", "List installed skills", cmd_skills),
         Command("agents", "List subagent types", cmd_agents),
         Command("mcp", "MCP server status", cmd_mcp),
+        Command("permissions", "Show permission rules and sandbox", cmd_permissions),
+        Command("mode", "Set the permission mode", cmd_mode, "[mode]", takes_args=True),
+        Command("init", "Generate an HX.md for this project", cmd_init),
+        Command("theme", "Switch the colour palette", cmd_theme, "[name]", takes_args=True),
         Command("help", "List commands and keys", cmd_help),
         Command("quit", "Exit HX", cmd_quit),
     ):

@@ -112,9 +112,6 @@ class FileTracker:
     def stale_files(self) -> list[Path]:
         return [path for path in self._hashes if self.changed_since_read(path)]
 
-    def forget(self, path: Path) -> None:
-        self._hashes.pop(path.resolve(), None)
-
 
 def resolve_path(raw: str, cwd: Path) -> Path:
     """Resolve a model-supplied path against the session cwd.

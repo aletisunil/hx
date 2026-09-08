@@ -58,6 +58,9 @@ class ToolCallFinished(Event):
     is_error: bool
     duration_ms: float
     summary: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """Structured detail the renderer draws with - an edit's diff, a command's
+    exit code. Presentation only: the model never sees it."""
 
 
 @dataclass(slots=True)

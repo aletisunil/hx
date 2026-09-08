@@ -1,4 +1,9 @@
-"""Todo sidebar. Toggled with Ctrl+T, auto-shown when the list is non-empty."""
+"""Todo sidebar and subagent rows.
+
+Both answer "what is this turn actually doing", one at plan level and one at
+worker level. The sidebar appears on its own when there is a plan to show and
+is toggled with Ctrl+T; the rows appear only while a subagent is running.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +14,12 @@ from rich.console import RenderableType
 from rich.text import Text
 from textual.widgets import Static
 
+from hx.tui.theme import THEME
+from hx.tui.widgets.working import FRAMES
+
 MARKERS: dict[str, tuple[str, str]] = {
-    "completed": ("✓", "green"),
-    "in_progress": ("▸", "bold yellow"),
+    "completed": ("✓", "success"),
+    "in_progress": ("▸", "accent"),
     "pending": ("○", "dim"),
 }
 
@@ -32,29 +40,47 @@ class TodoSidebar(Static):
 
     def render(self) -> RenderableType:
         if not self.todos:
-            return Text("no todos", style="dim")
-        body = Text()
-        body.append("Todos\n", style="bold")
+            return Text("no todos", style=THEME.fg("dim"))
+
+        done = sum(1 for todo in self.todos if todo.get("status") == "completed")
+        body = Text("Todos ", style=THEME.fg("accent", bold=True))
+        body.append(f"{done}/{len(self.todos)}\n", style=THEME.fg("dim"))
         for todo in self.todos:
             status = str(todo.get("status", "pending"))
-            marker, style = MARKERS.get(status, MARKERS["pending"])
-            label = todo.get("active_form") if status == "in_progress" else todo.get("content")
-            body.append(f"{marker} ", style=style)
-            body.append(f"{label}\n", style="strike dim" if status == "completed" else "")
+            marker, role = MARKERS.get(status, MARKERS["pending"])
+            # active_form is optional; falling through to content keeps a todo
+            # from rendering as the literal string "None".
+            content = str(todo.get("content") or "")
+            label = str(todo.get("active_form") or content) if status == "in_progress" else content
+            body.append(f"{marker} ", style=THEME.fg(role))
+            style = {
+                "completed": f"strike {THEME.fg('dim')}",
+                "in_progress": THEME.fg("text"),
+            }.get(status, THEME.fg("muted"))
+            body.append(f"{label}\n", style=style)
         return body
 
 
 class SubagentRows(Static):
-    """Live rows for running subagents: type, description, elapsed, tool count."""
+    """Live rows for running subagents: type, description and elapsed time."""
 
-    REFRESH_INTERVAL: ClassVar[float] = 1.0
+    REFRESH_INTERVAL: ClassVar[float] = 0.1
 
     def __init__(self) -> None:
         super().__init__(id="subagents")
         self.rows: dict[str, dict[str, Any]] = {}
+        self._frame = 0
 
     def on_mount(self) -> None:
-        self.set_interval(self.REFRESH_INTERVAL, self.refresh)
+        self.set_interval(self.REFRESH_INTERVAL, self._tick)
+
+    def _tick(self) -> None:
+        """Repaint only while something is running; an idle spinner is a lie
+        about work being done, and a wasted frame besides."""
+        if not any(not row["done"] for row in self.rows.values()):
+            return
+        self._frame = (self._frame + 1) % len(FRAMES)
+        self.refresh()
 
     def start(self, subagent_id: str, agent_type: str, description: str) -> None:
         self.rows[subagent_id] = {
@@ -81,8 +107,10 @@ class SubagentRows(Static):
         body = Text()
         for row in active.values():
             elapsed = time.monotonic() - row["started"]
-            body.append("⠿ ", style="yellow")
-            body.append(f"{row['type']} ", style="bold")
-            body.append(f"{row['description']} ", style="dim")
-            body.append(f"{elapsed:.0f}s\n", style="dim")
+            body.append(f"{FRAMES[self._frame]} ", style=THEME.fg("accent"))
+            body.append(f"{row['type']} ", style=THEME.fg("text", bold=True))
+            body.append(f"{row['description']} ", style=THEME.fg("muted"))
+            body.append(f"{elapsed:.0f}s\n", style=THEME.fg("dim"))
+        # Text.rstrip mutates in place and returns None.
+        body.rstrip()
         return body

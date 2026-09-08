@@ -225,7 +225,3 @@ def build_bwrap_argv(policy: SandboxPolicy, argv: list[str]) -> list[str]:
     if cwd := os.environ.get("PWD"):
         command += ["--chdir", cwd]
     return [*command, "--", *argv]
-
-
-class SandboxUnavailable(Exception):
-    """Raised only when a sandbox was explicitly required and none is available."""

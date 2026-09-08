@@ -28,6 +28,21 @@ def project(tmp_path: Path) -> Path:
     return root
 
 
+@pytest.fixture(autouse=True)
+def _reset_theme() -> object:
+    """Restore the global palette after every test.
+
+    THEME is a module-level singleton, so a test that switches to light leaves
+    every later colour assertion comparing against the wrong palette - which
+    shows up as an unrelated test failing only when run with others.
+    """
+    from hx.tui.theme import DEFAULT_THEME, THEME
+
+    previous = THEME.palette.name
+    yield None
+    THEME.use(previous if previous in {"dark", "light", "ansi"} else DEFAULT_THEME)
+
+
 unimplemented = pytest.mark.xfail(
     raises=NotImplementedError,
     reason="M0 scaffold: behaviour not implemented yet",

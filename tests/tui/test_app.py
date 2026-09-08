@@ -72,7 +72,7 @@ async def test_a_turn_streams_into_the_transcript(hx_home: Path, tmp_path: Path)
         assert status.cache_read == 880
         assert status.cost_usd == pytest.approx(0.004)
         rendered = str(app.query_one(StatusBar).render())
-        assert "cache" in rendered
+        assert "R880" in rendered and "CH" in rendered
         assert app.query_one(Transcript).query("MessageBlock")
 
 
@@ -187,8 +187,10 @@ async def test_permission_modal_shows_the_diff_before_approval(
         await pilot.pause()
         rendered = str(app.screen.query_one("#permission-detail").query_one(Static).render())
 
-    assert "-old line" in rendered
-    assert "+new line" in rendered
+    # Numbered the way the transcript numbers a diff, so the line being approved
+    # is the line the user will later see changed.
+    assert "-    1 old line" in rendered
+    assert "+    1 new line" in rendered
 
 
 async def test_permission_modal_returns_the_chosen_scope(hx_home: Path, tmp_path: Path) -> None:
@@ -217,6 +219,8 @@ async def test_status_bar_marks_a_degraded_sandbox(hx_home: Path, tmp_path: Path
     app.sandbox_active = False
 
     async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one_status().set_mode(app.mode.value, sandbox_active=False)
         await pilot.pause()
         assert "no-sandbox" in str(app.query_one(StatusBar).render())
 
@@ -270,3 +274,139 @@ async def test_a_subagent_prompt_names_who_is_asking(hx_home: Path, tmp_path: Pa
         title = str(app.screen.query_one("#permission-title", Static).render())
 
     assert "explore subagent" in title
+
+
+async def test_every_planned_command_is_registered(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    registered = {command.name for command in app.commands.all()}
+    planned = {
+        "model",
+        "models",
+        "clear",
+        "compact",
+        "resume",
+        "cost",
+        "context",
+        "permissions",
+        "mode",
+        "skills",
+        "mcp",
+        "agents",
+        "todos",
+        "init",
+        "help",
+        "quit",
+    }
+    assert planned <= registered
+
+
+async def test_mode_command_changes_the_permission_mode(hx_home: Path, tmp_path: Path) -> None:
+    from hx.config import PermissionMode
+
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        await app.submit("/mode plan")
+        await pilot.pause()
+
+        assert app.mode is PermissionMode.PLAN
+        assert app.query_one_status().mode == "plan"
+
+        await app.submit("/mode nonsense")
+        await pilot.pause()
+        assert app.mode is PermissionMode.PLAN, "an invalid mode must not change anything"
+
+
+async def test_permissions_command_reports_the_sandbox_state(hx_home: Path, tmp_path: Path) -> None:
+    """A user reading /permissions must not be misled about what protects them."""
+    from hx.config import PermissionMode
+    from hx.permissions.engine import Decision, PermissionEngine, parse_rule
+
+    app = build_app(tmp_path)
+    app.sandbox_active = False
+    app.loop.permissions = PermissionEngine(
+        PermissionMode.DEFAULT, [parse_rule("Bash(rm:*)", "settings", Decision.DENY)], tmp_path
+    )
+
+    async with app.run_test() as pilot:
+        await app.submit("/permissions")
+        await pilot.pause()
+        text = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+
+    assert "Sandbox: none" in text
+    assert "NOT confined" in text
+    assert "deny  Bash(rm:*)" in text
+
+
+async def test_bang_runs_a_shell_command_without_a_model_turn(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    from hx.tools.bash import BackgroundJobs, BashTool, PersistentShell
+
+    shell = PersistentShell(tmp_path)
+    await shell.start()
+    app = build_app(tmp_path)
+    app.loop.tools.register(BashTool(shell, BackgroundJobs(tmp_path / "logs")))
+
+    try:
+        async with app.run_test() as pilot:
+            await app.submit("!echo passthrough-ok")
+            for _ in range(40):
+                await pilot.pause(0.05)
+                blocks = app._transcript.query("ToolBlock")
+                if blocks and blocks[0].summary:
+                    break
+
+            assert "passthrough-ok" in blocks[0].output
+            assert not app.loop.provider.requests, "! must not spend a model turn"
+    finally:
+        await shell.close()
+
+
+async def test_bang_still_goes_through_the_permission_engine(hx_home: Path, tmp_path: Path) -> None:
+    """A shortcut that skipped permissions would be a hole in both layers."""
+    from hx.config import PermissionMode
+    from hx.permissions.engine import Decision, PermissionEngine, parse_rule
+    from hx.tools.bash import BackgroundJobs, BashTool, PersistentShell
+
+    shell = PersistentShell(tmp_path)
+    await shell.start()
+    app = build_app(tmp_path)
+    app.loop.tools.register(BashTool(shell, BackgroundJobs(tmp_path / "logs")))
+    app.loop.permissions = PermissionEngine(
+        PermissionMode.DEFAULT, [parse_rule("Bash(rm:*)", "t", Decision.DENY)], tmp_path
+    )
+
+    try:
+        async with app.run_test() as pilot:
+            await app.submit("!rm -rf something")
+            await pilot.pause(0.2)
+            text = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+            assert "Refused" in text
+    finally:
+        await shell.close()
+
+
+async def test_ctrl_p_opens_the_command_palette(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        app.run_worker(app.action_hx_commands(), name="palette")
+        await pilot.pause(0.1)
+        assert app.screen is not app.screen_stack[0]
+        assert app.screen.query_one("#picker-title", Static)
+        await pilot.press("escape")
+        await pilot.pause()
+
+
+async def test_the_theme_setting_reaches_textual(hx_home: Path, tmp_path: Path) -> None:
+    """`theme` was accepted by the config layer and then silently ignored."""
+    from hx.config import load_settings
+    from hx.tui.theme import THEME
+
+    for name in ("light", "dark"):
+        settings = load_settings(tmp_path, {"theme": name})
+        app = build_app(tmp_path)
+        app.settings = settings
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.theme == f"hx-{name}"
+            assert THEME.palette.name == name

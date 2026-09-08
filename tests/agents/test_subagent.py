@@ -162,15 +162,6 @@ async def test_subagent_transcript_nests_under_the_parent(hx_home: Path, tmp_pat
     assert listed == [parent.meta.session_id]
 
 
-async def test_subagents_run_concurrently(hx_home: Path, tmp_path: Path) -> None:
-    runner = build_runner(tmp_path, [text_turn("a"), text_turn("b"), text_turn("c")])
-    results = await runner.run_many(
-        [("general", "one", "d1"), ("general", "two", "d2"), ("general", "three", "d3")]
-    )
-    assert len(results) == 3
-    assert all(not result.is_error for result in results)
-
-
 def test_agent_definitions_load_from_disk(project: Path) -> None:
     agents_dir = project / ".hx" / "agents"
     agents_dir.mkdir(parents=True)
@@ -239,3 +230,78 @@ async def test_subagent_prose_does_not_stream_into_the_parent_transcript(
 
     started = [e for e in seen if isinstance(e, ToolCallStarted)]
     assert started and all("subagent > " in e.name for e in started)
+
+
+async def test_parallel_task_calls_run_concurrently(hx_home: Path, tmp_path: Path) -> None:
+    """Two Task calls in one turn must overlap.
+
+    Task is mutating, and mutating tools are serialised by default so their side
+    effects land in emission order. Subagents are independent by construction,
+    so Task opts out - without that, "concurrent subagents" was just a comment.
+    """
+    import asyncio
+    import time
+
+    from hx.config import load_settings as _load_settings
+    from hx.core.context import ContextBuilder
+    from hx.core.lateinject import InjectionRegistry
+    from hx.core.loop import AgentLoop
+    from hx.core.messages import StopReason
+    from hx.core.session import new_session
+    from hx.providers.base import StreamDelta, StreamEnd
+    from hx.providers.models import ModelRegistry
+
+    class SlowRunner:
+        def __init__(self) -> None:
+            self.definitions = {"general": AgentDefinition("general", "d", "p")}
+            self.spans: list[tuple[float, float]] = []
+
+        async def run(self, agent_type: str, prompt: str, description: str) -> Any:
+            start = time.monotonic()
+            await asyncio.sleep(0.3)
+            self.spans.append((start, time.monotonic()))
+            from hx.agents.subagent import SubagentResult
+
+            return SubagentResult("id", agent_type, "report", False, 1, 0.0)
+
+    runner = SlowRunner()
+    tools = build_default_registry(None, None, FileTracker())
+    tools.register(TaskTool(runner))
+
+    script = [
+        [
+            StreamDelta(
+                tool_use_id="a",
+                tool_name="Task",
+                tool_input_json='{"subagent_type":"general","prompt":"one"}',
+            ),
+            StreamDelta(
+                tool_use_id="b",
+                tool_name="Task",
+                tool_input_json='{"subagent_type":"general","prompt":"two"}',
+            ),
+            StreamEnd(stop_reason=StopReason.TOOL_USE),
+        ],
+        text_turn("done"),
+    ]
+    loop = AgentLoop(
+        provider=FakeProvider(script),
+        session=new_session(tmp_path, "m"),
+        tools=tools,
+        permissions=None,
+        context=ContextBuilder("sys", tmp_path),
+        compactor=None,
+        injections=InjectionRegistry(),
+        bus=EventBus(),
+        settings=_load_settings(tmp_path),
+        model_info=ModelRegistry().get_or_default("m"),
+    )
+
+    started = time.monotonic()
+    await loop.run("do both")
+    elapsed = time.monotonic() - started
+
+    assert len(runner.spans) == 2
+    assert elapsed < 0.55, f"the two subagents ran serially ({elapsed:.2f}s)"
+    (_a_start, a_end), (b_start, _b_end) = runner.spans
+    assert b_start < a_end, "the second subagent did not start until the first finished"
