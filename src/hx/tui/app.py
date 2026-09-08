@@ -62,15 +62,27 @@ class HXApp(App[None]):
         models: ModelRegistry | None = None,
         api_key: str = "",
         sandbox_active: bool = True,
+        skills: Any = None,
+        agents: Any = None,
+        mcp: Any = None,
     ) -> None:
         super().__init__()
         self.sandbox_active = sandbox_active
+        self.skills = skills or {}
+        self.agents = agents or {}
+        self.mcp = mcp
         self.loop = loop
         self.models = models if models is not None else ModelRegistry()
         self.api_key = api_key
         self.bus = bus
         self.settings = settings
         self.commands: CommandRegistry = build_default_commands()
+        # Bound in on_mount; see the note there on screen-scoped queries.
+        self._transcript: Transcript
+        self._status: StatusBar
+        self._subagents: SubagentRows
+        self._todos: TodoSidebar
+        self._prompt: PromptInput
         # Settings are frozen; the live permission mode is session state.
         self.mode = settings.permissions.mode
         self._turn_worker: Any = None
@@ -85,8 +97,20 @@ class HXApp(App[None]):
         yield StatusBar()
 
     async def on_mount(self) -> None:
-        """Start the event-bus consumer task."""
-        status = self.query_one(StatusBar)
+        """Start the event-bus consumer task and cache the main widgets.
+
+        ``query_one`` resolves against the *active* screen, so every lookup
+        would fail while a permission modal is up - killing whichever worker
+        made it. The main screen's widgets are therefore looked up once, here,
+        and referenced directly from then on.
+        """
+        self._transcript = self.query_one(Transcript)
+        self._status = self.query_one(StatusBar)
+        self._subagents = self.query_one(SubagentRows)
+        self._todos = self.query_one(TodoSidebar)
+        self._prompt = self.query_one(PromptInput)
+
+        status = self._status
         status.set_model(self.loop.model)
         status.set_mode(self.mode.value, self.sandbox_active)
         status.set_location(self.settings.cwd.name, git_branch(self.settings.cwd))
@@ -97,7 +121,7 @@ class HXApp(App[None]):
             self.loop.permissions.asker = self.ask_permission
             status.set_mode(self.loop.permissions.mode.value, self.sandbox_active)
 
-        self.query_one(PromptInput).focus()
+        self._prompt.focus()
         self.run_worker(self._consume_events(), name="events", exclusive=False)
 
     async def _consume_events(self) -> None:
@@ -107,10 +131,10 @@ class HXApp(App[None]):
         repaints on its own refresh tick, so the per-delta cost is a buffer
         append, not a render.
         """
-        transcript = self.query_one(Transcript)
-        status = self.query_one(StatusBar)
-        subagents = self.query_one(SubagentRows)
-        todos = self.query_one(TodoSidebar)
+        transcript = self._transcript
+        status = self._status
+        subagents = self._subagents
+        todos = self._todos
 
         async for event in self.bus.subscribe():
             match event:
@@ -175,24 +199,24 @@ class HXApp(App[None]):
         if self._turn_worker is not None and not self._turn_worker.is_finished:
             # Do not interleave turns: queue and run it when the current one ends.
             self._queued.append(text)
-            self.query_one(Transcript).add_notice("queued", "info")
+            self._transcript.add_notice("queued", "info")
             return
 
-        self.query_one(Transcript).add_user_message(text)
+        self._transcript.add_user_message(text)
         # A Textual worker, not a bare task: the permission modal uses
         # push_screen_wait, which is only valid inside worker context.
         self._turn_worker = self.run_worker(self._run_turn(text), name="turn", exclusive=False)
 
     async def _run_turn(self, text: str) -> None:
-        prompt_input = self.query_one(PromptInput)
+        prompt_input = self._prompt
         prompt_input.set_enabled(False)
         try:
             await self.loop.run(text)
         except asyncio.CancelledError:
-            self.query_one(Transcript).add_notice("interrupted", "warning")
+            self._transcript.add_notice("interrupted", "warning")
         finally:
             prompt_input.set_enabled(True)
-            self.query_one(StatusBar).set_busy(False)
+            self._status.set_busy(False)
 
         if self._queued:
             await self.submit(self._queued.pop(0))
@@ -206,10 +230,10 @@ class HXApp(App[None]):
         )
 
     def notice(self, text: str, level: str = "info") -> None:
-        self.query_one(Transcript).add_notice(text, level)
+        self._transcript.add_notice(text, level)
 
     def query_one_status(self) -> StatusBar:
-        return self.query_one(StatusBar)
+        return self._status
 
     @property
     def last_context(self) -> Any:
@@ -220,9 +244,9 @@ class HXApp(App[None]):
         from hx.core.session import new_session
 
         self.loop.session = new_session(self.settings.cwd, self.loop.model)
-        self.query_one(Transcript).remove_children()
-        self.query_one(Transcript).add_notice("New session started.", "success")
-        status = self.query_one(StatusBar)
+        self._transcript.remove_children()
+        self._transcript.add_notice("New session started.", "success")
+        status = self._status
         status.set_tokens(0, 0)
         status.set_cache(0, 0, 0.0)
         status.set_cost(0.0)
@@ -238,7 +262,7 @@ class HXApp(App[None]):
             return
 
         self.loop.session = session
-        transcript = self.query_one(Transcript)
+        transcript = self._transcript
         transcript.remove_children()
         for message in session.active_messages():
             if message.role == "user":
@@ -264,21 +288,22 @@ class HXApp(App[None]):
         self.mode = order[(order.index(self.mode) + 1) % len(order)]
         if self.loop.permissions is not None:
             self.loop.permissions.set_mode(self.mode)
-        self.query_one(StatusBar).set_mode(self.mode.value, self.sandbox_active)
+        self._status.set_mode(self.mode.value, self.sandbox_active)
 
     async def action_expand_output(self) -> None:
-        self.query_one(Transcript).toggle_last_tool()
+        self._transcript.toggle_last_tool()
 
     async def action_toggle_todos(self) -> None:
-        sidebar = self.query_one(TodoSidebar)
-        sidebar.set_visible("visible" not in sidebar.classes)
+        self._todos.set_visible("visible" not in self._todos.classes)
 
     async def ask_permission(self, request: Any) -> Any:
         """Show the approval modal and return the user's choice."""
         from hx.permissions.engine import PermissionAnswer
         from hx.tui.widgets.permission import PermissionModal
 
-        answer = await self.push_screen_wait(PermissionModal(request))
+        answer = await self.push_screen_wait(
+            PermissionModal(request, origin=getattr(request, "origin", None))
+        )
         return answer if answer is not None else PermissionAnswer(allowed=False)
 
 

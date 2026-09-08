@@ -76,15 +76,38 @@ rest to the session directory, and hands the model that path to grep.
 `/context` shows what is filling the window; `/cost` breaks down tokens, cache
 savings and spend.
 
+## Extending it
+
+**Skills** are directories containing `SKILL.md` with YAML frontmatter, found
+in `.hx/skills/` (project) and `~/.hx/skills/` (user); a project skill shadows
+a user one of the same name. Only the name and description enter the context -
+the body loads when the model calls `Skill(name)`, so a hundred installed
+skills cost a hundred lines, not a hundred documents. `/skills` lists them.
+
+**Subagents** run in their own context with their own transcript, tool
+allowlist and model. Only the final report returns to the parent, so a long
+search costs the caller one paragraph instead of every intermediate tool
+result. `explore`, `plan` and `general` ship built in; add your own as
+`.hx/agents/<name>.md`. A subagent never gets the `Task` tool, so recursion is
+impossible by construction. `/agents` lists them.
+
+**MCP servers** are configured in `.hx/mcp.json` (or `~/.hx/mcp.json`) and
+managed with `hx mcp list|add|remove`. Tools arrive namespaced
+`mcp__<server>__<tool>` in a deterministic order. Servers connect concurrently
+with a per-server timeout; one that is broken or slow logs a warning and is
+dropped rather than taking the session with it. `/mcp` shows their status.
+
 ## Status
 
-Working: the agent loop; OpenRouter streaming with prefix caching and accurate
-cost accounting; session persistence and resume; the tool suite (Bash with a
-persistent sandboxed shell, Read, Write, Edit, Glob, Grep, TodoWrite); the
-permission engine and OS sandbox; late injection, compaction and output
-capping; and the TUI.
+Feature complete against the original plan. Working: the agent loop; OpenRouter
+streaming with prefix caching and accurate cost accounting; session persistence
+and resume; the tool suite (Bash with a persistent sandboxed shell, Read,
+Write, Edit, Glob, Grep, TodoWrite, Task, Skill); the permission engine and OS
+sandbox; late injection, compaction and output capping; skills, subagents and
+MCP; and the TUI.
 
-Next: skills, subagents and MCP.
+Not yet exercised against a live OpenRouter key - every test runs against a
+scripted provider.
 
 ## Development
 

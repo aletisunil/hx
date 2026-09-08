@@ -33,6 +33,8 @@ class SessionMeta:
     model: str
     title: str | None = None
     message_count: int = 0
+    parent_id: str | None = None
+    """Set for subagent sessions, which nest under their parent's directory."""
 
 
 @dataclass(slots=True)
@@ -101,16 +103,27 @@ class Session:
         path.write_text(json.dumps(asdict(self.meta), indent=2))
 
 
-def new_session(cwd: Path, model: str) -> Session:
-    """Create a session with a fresh id and its on-disk directory."""
+def new_session(cwd: Path, model: str, parent_id: str | None = None) -> Session:
+    """Create a session with a fresh id and its on-disk directory.
+
+    A subagent session nests under its parent (``<parent>/sub-<id>``), which
+    keeps its transcript alongside the work it belongs to and keeps it out of
+    the ``/resume`` listing, where it would be noise.
+    """
     now = time.time()
     session_id = f"{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}-{uuid.uuid4().hex[:8]}"
+    if parent_id:
+        if ".." in parent_id or parent_id.startswith("/"):
+            raise ValueError(f"unsafe parent session id: {parent_id!r}")
+        session_id = f"{parent_id}/sub-{uuid.uuid4().hex[:8]}"
+
     meta = SessionMeta(
         session_id=session_id,
         cwd=str(cwd.resolve()),
         created_at=now,
         updated_at=now,
         model=model,
+        parent_id=parent_id,
     )
     session_outputs_dir(session_id).mkdir(parents=True, exist_ok=True)
     session = Session(meta=meta)

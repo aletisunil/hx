@@ -59,6 +59,19 @@ class ToolRegistry:
             for name in names
         ]
 
+    def subset(self, names: set[str]) -> ToolRegistry:
+        """A registry exposing only ``names``, sharing the same tool instances.
+
+        Used for subagent allowlists. Sharing instances matters: the persistent
+        shell and the file tracker must be the same objects, or a subagent
+        would get a second shell with none of the session's state.
+        """
+        restricted = ToolRegistry()
+        for name in names:
+            if name in self._tools:
+                restricted._tools[name] = self._tools[name]
+        return restricted
+
     async def call(self, name: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         """Validate, dispatch, and convert exceptions into error results.
 

@@ -148,12 +148,30 @@ class Runtime:
     shell: Any = None
     jobs: Any = None
     sandbox: Any = None
+    skills: Any = None
+    agents: Any = None
+    mcp: Any = None
+    tools: Any = None
 
     @property
     def sandbox_active(self) -> bool:
         return bool(self.sandbox is not None and self.sandbox.active)
 
+    async def connect_mcp(self) -> list[Any]:
+        """Connect MCP servers and register their tools.
+
+        Done after the loop is built and never at import time: a slow or broken
+        server should delay tool availability, not startup itself.
+        """
+        if self.mcp is None:
+            return []
+        statuses: list[Any] = await self.mcp.connect_all()
+        await self.mcp.register_tools(self.tools)
+        return statuses
+
     async def aclose(self) -> None:
+        if self.mcp is not None:
+            await self.mcp.close_all()
         if self.jobs is not None:
             await self.jobs.close_all()
         if self.shell is not None:
@@ -169,6 +187,8 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     Compaction, skills, subagents and MCP land in later milestones; the loop
     already accepts them, so nothing here changes when they arrive.
     """
+    from hx.agents.definitions import discover as discover_agents
+    from hx.agents.subagent import SubagentRunner
     from hx.config import load_settings
     from hx.core.compaction import Compactor
     from hx.core.context import ContextBuilder, build_project_context, load_system_prompt
@@ -176,14 +196,20 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     from hx.core.lateinject import Injection, InjectionRegistry
     from hx.core.loop import AgentLoop
     from hx.core.session import load_session, new_session
+    from hx.mcp.manager import MCPManager
+    from hx.mcp.manager import load_configs as load_mcp_configs
     from hx.paths import ensure_user_dirs, session_outputs_dir
     from hx.permissions.engine import PermissionEngine, load_rules
     from hx.permissions.sandbox import Sandbox, default_policy
     from hx.providers.models import ModelRegistry
     from hx.providers.openrouter import OpenRouterProvider, load_api_key
+    from hx.skills.loader import build_index
+    from hx.skills.loader import discover as discover_skills
+    from hx.skills.runtime import ActiveSkills, SkillTool
     from hx.tools.bash import BackgroundJobs, PersistentShell
     from hx.tools.read import FileTracker
     from hx.tools.registry import build_default_registry
+    from hx.tools.task import TaskTool
     from hx.tools.todo import TodoList, todo_injector
 
     ensure_user_dirs()
@@ -228,10 +254,30 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         keep_recent_turns=settings.context.keep_recent_turns,
     )
 
+    tools = build_default_registry(shell, jobs, tracker, todos, bus_holder)
+
+    skills = {skill.name: skill for skill in discover_skills(settings.cwd)}
+    if skills:
+        tools.register(SkillTool(skills, ActiveSkills()))
+
+    agents = {agent.name: agent for agent in discover_agents(settings.cwd)}
+    subagents = SubagentRunner(
+        definitions=agents,
+        provider=provider,
+        tools=tools,
+        permissions=permissions,
+        bus=bus_holder,
+        settings=settings,
+        models=models,
+        parent_session_id=session.meta.session_id,
+        parent_usage=session.usage,
+    )
+    tools.register(TaskTool(subagents))
+
     loop = AgentLoop(
         provider=provider,
         session=session,
-        tools=build_default_registry(shell, jobs, tracker, todos, bus_holder),
+        tools=tools,
         permissions=permissions,
         context=context_builder,
         compactor=Compactor(
@@ -244,6 +290,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         bus=bus_holder,
         settings=settings,
         model_info=model_info,
+        skills_index=build_index(list(skills.values())) or None,
         project_context=build_project_context(settings.cwd),
     )
 
@@ -258,6 +305,10 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         shell=shell,
         jobs=jobs,
         sandbox=sandbox,
+        skills=skills,
+        agents=agents,
+        mcp=MCPManager(load_mcp_configs(settings.cwd)),
+        tools=tools,
     )
 
 
@@ -346,6 +397,7 @@ def run_tui_command(parsed: ParsedArgs) -> int:
 
     async def main_async() -> None:
         try:
+            await runtime.connect_mcp()
             await run_tui(
                 runtime.loop, runtime.bus, runtime.settings, runtime.models, runtime.api_key
             )
@@ -386,6 +438,9 @@ def run_print_command(parsed: ParsedArgs) -> int:
 
         renderer = asyncio.create_task(render())
         await asyncio.sleep(0)
+        for status in await runtime.connect_mcp():
+            if not status.connected:
+                print(f"[mcp] {status.name} unavailable: {status.error}", file=sys.stderr)
         try:
             result = await runtime.loop.run(parsed.prompt)
         finally:
@@ -424,8 +479,77 @@ def _resume_target(parsed: ParsedArgs) -> str | None:
     return meta.session_id
 
 
+MCP_USAGE = """\
+hx mcp list                                  Show configured servers
+hx mcp add NAME COMMAND [ARGS...]            Add a stdio server
+hx mcp add NAME --url URL                    Add an HTTP server
+hx mcp remove NAME                           Remove a server
+
+Add --user to write to ~/.hx/mcp.json instead of the project's .hx/mcp.json.
+"""
+
+
 def run_mcp_command(args: list[str]) -> int:
-    raise NotImplementedError
+    from hx.mcp.manager import (
+        MCPServerConfig,
+        load_configs,
+        remove_config,
+        save_config,
+    )
+
+    user_level = "--user" in args
+    args = [arg for arg in args if arg != "--user"]
+    cwd = Path.cwd()
+
+    if not args or args[0] == "list":
+        configs = load_configs(cwd)
+        if not configs:
+            print("No MCP servers configured.\n")
+            print(MCP_USAGE)
+            return 0
+        statuses = asyncio.run(_probe_servers(configs))
+        for status in statuses:
+            mark = "ok" if status.connected else "unavailable"
+            detail = f" - {status.error}" if status.error else f" ({status.tool_count} tools)"
+            print(f"{status.name:<20} {mark}{detail}")
+        return 0
+
+    if args[0] == "add":
+        if len(args) < 3:
+            print(MCP_USAGE, file=sys.stderr)
+            return 2
+        name = args[1]
+        if args[2] == "--url":
+            config = MCPServerConfig(name=name, transport="http", url=args[3])
+        else:
+            config = MCPServerConfig(
+                name=name, transport="stdio", command=args[2], args=tuple(args[3:])
+            )
+        print(f"Added {name} to {save_config(config, cwd, user_level)}")
+        return 0
+
+    if args[0] == "remove":
+        if len(args) < 2:
+            print(MCP_USAGE, file=sys.stderr)
+            return 2
+        if remove_config(args[1], cwd, user_level):
+            print(f"Removed {args[1]}.")
+            return 0
+        print(f"No server named {args[1]}.", file=sys.stderr)
+        return 1
+
+    print(MCP_USAGE, file=sys.stderr)
+    return 2
+
+
+async def _probe_servers(configs: list[Any]) -> list[Any]:
+    from hx.mcp.manager import MCPManager
+
+    manager = MCPManager(configs)
+    try:
+        return await manager.connect_all()
+    finally:
+        await manager.close_all()
 
 
 def run_upgrade_command() -> int:

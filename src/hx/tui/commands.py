@@ -193,6 +193,49 @@ async def cmd_context(ctx: CommandContext, args: str) -> None:
     ctx.app.notice("\n".join(lines))
 
 
+async def cmd_skills(ctx: CommandContext, args: str) -> None:
+    """``/skills`` - installed skills and which are loaded."""
+    skills = ctx.app.skills or {}
+    if not skills:
+        ctx.app.notice("No skills installed. Add one at .hx/skills/<name>/SKILL.md", "warning")
+        return
+    lines = [f"Skills ({len(skills)} installed, listed by name and description only):"]
+    lines += [
+        f"  {skill.name:<20} {skill.description}"
+        for skill in sorted(skills.values(), key=lambda s: s.name)
+    ]
+    ctx.app.notice("\n".join(lines))
+
+
+async def cmd_agents(ctx: CommandContext, args: str) -> None:
+    """``/agents`` - subagent types available to the Task tool."""
+    agents = ctx.app.agents or {}
+    lines = [f"Agents ({len(agents)}):"]
+    for agent in sorted(agents.values(), key=lambda a: a.name):
+        tools = ", ".join(agent.tools) if agent.tools else "all tools except Task"
+        lines.append(f"  {agent.name:<12} {agent.description}")
+        lines.append(f"  {'':<12} tools: {tools}")
+    ctx.app.notice("\n".join(lines))
+
+
+async def cmd_mcp(ctx: CommandContext, args: str) -> None:
+    """``/mcp`` - server status and their tools."""
+    manager = ctx.app.mcp
+    if manager is None or not manager.configs:
+        ctx.app.notice("No MCP servers configured. Add one with `hx mcp add`.", "warning")
+        return
+
+    lines = ["MCP servers:"]
+    for status in manager.status():
+        if status.connected:
+            lines.append(f"  {status.name:<20} connected, {status.tool_count} tools")
+        else:
+            lines.append(f"  {status.name:<20} unavailable - {status.error}")
+    ctx.app.notice(
+        "\n".join(lines), "info" if all(s.connected for s in manager.status()) else "warning"
+    )
+
+
 async def cmd_help(ctx: CommandContext, args: str) -> None:
     lines = ["Commands:"]
     lines += [f"  /{c.name:<12} {c.summary}" for c in ctx.registry.all()]
@@ -217,6 +260,9 @@ def build_default_commands() -> CommandRegistry:
         Command("resume", "Resume a previous session", cmd_resume),
         Command("cost", "Token and cost breakdown", cmd_cost),
         Command("context", "What is filling the context window", cmd_context),
+        Command("skills", "List installed skills", cmd_skills),
+        Command("agents", "List subagent types", cmd_agents),
+        Command("mcp", "MCP server status", cmd_mcp),
         Command("help", "List commands and keys", cmd_help),
         Command("quit", "Exit HX", cmd_quit),
     ):

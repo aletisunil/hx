@@ -105,6 +105,8 @@ class AgentLoop:
         self._cancelled = False
         self._turn_index = 0
         self.last_context: AssembledContext | None = None
+        self.origin: str | None = None
+        """Set for subagents so approval prompts name who is asking."""
 
     @property
     def model(self) -> str:
@@ -134,7 +136,8 @@ class AgentLoop:
 
             await self._maybe_compact()
             self._turn_index += 1
-            self.bus.publish(TurnStarted(turn_index=self._turn_index, model=self.model))
+            if self.origin is None:
+                self.bus.publish(TurnStarted(turn_index=self._turn_index, model=self.model))
 
             try:
                 message, stop_reason = await self._stream_turn()
@@ -148,7 +151,8 @@ class AgentLoop:
 
             self.session.append(message)
             produced.append(message)
-            self.bus.publish(TurnFinished(self._turn_index, stop_reason))
+            if self.origin is None:
+                self.bus.publish(TurnFinished(self._turn_index, stop_reason))
 
             calls = message.tool_uses()
             if not calls or self._cancelled:
@@ -185,10 +189,16 @@ class AgentLoop:
                     continue
                 if item.text:
                     text_parts.append(item.text)
-                    self.bus.publish(TextDelta(text=item.text))
+                    # A subagent's prose is not the assistant speaking to the
+                    # user: it is an intermediate result that reaches them as
+                    # the Task tool's output. Streaming it into the transcript
+                    # would read as if the main assistant had said it.
+                    if self.origin is None:
+                        self.bus.publish(TextDelta(text=item.text))
                 if item.thinking:
                     thinking_parts.append(item.thinking)
-                    self.bus.publish(ThinkingDelta(text=item.thinking))
+                    if self.origin is None:
+                        self.bus.publish(ThinkingDelta(text=item.thinking))
                 if item.tool_use_id and item.tool_name:
                     tool_calls.append(
                         ToolUseBlock(
@@ -300,8 +310,16 @@ class AgentLoop:
             # mutating so it cannot slip into the concurrent batch.
             return True
 
+    def _display_name(self, name: str) -> str:
+        """Attribute a subagent's tool calls so they do not read as the parent's."""
+        return name if self.origin is None else f"{self.origin} > {name}"
+
     async def _run_one(self, call: ToolUseBlock) -> ToolResultBlock:
-        self.bus.publish(ToolCallStarted(tool_use_id=call.id, name=call.name, input=call.input))
+        self.bus.publish(
+            ToolCallStarted(
+                tool_use_id=call.id, name=self._display_name(call.name), input=call.input
+            )
+        )
         started = time.monotonic()
 
         denied = await self._check_permission(call)
@@ -355,6 +373,7 @@ class AgentLoop:
             mutating=tool.mutating,
             description=f"{call.name}({_brief(call.input)})",
             detail=_permission_detail(call),
+            origin=self.origin,
         )
         self.bus.publish(
             PermissionRequested(

@@ -219,3 +219,54 @@ async def test_status_bar_marks_a_degraded_sandbox(hx_home: Path, tmp_path: Path
     async with app.run_test() as pilot:
         await pilot.pause()
         assert "no-sandbox" in str(app.query_one(StatusBar).render())
+
+
+async def test_the_ui_still_works_while_a_modal_is_open(hx_home: Path, tmp_path: Path) -> None:
+    """query_one resolves against the *active* screen, so a widget lookup made
+    while a permission modal is up would raise and kill whichever worker made
+    it. The main widgets are bound once at mount instead."""
+    from hx.permissions.engine import PermissionRequest
+    from hx.tui.widgets.permission import PermissionModal
+
+    request = PermissionRequest(
+        "Bash", "rm -rf build", {}, True, "Bash(rm -rf build)", "rm -rf build"
+    )
+    app = build_app(tmp_path)
+
+    async with app.run_test() as pilot:
+        app.push_screen(PermissionModal(request))
+        await pilot.pause()
+        assert app.screen is not app.screen_stack[0]
+
+        # Every one of these would have raised NoMatches before.
+        app.notice("still reachable")
+        app.query_one_status().set_busy(True, "working")
+        await app.action_toggle_todos()
+        await pilot.pause()
+
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        assert "still reachable" in notices
+        assert app._status.busy
+
+
+async def test_a_subagent_prompt_names_who_is_asking(hx_home: Path, tmp_path: Path) -> None:
+    """An approval modal with no visible origin is not an informed approval."""
+    from hx.permissions.engine import PermissionRequest
+    from hx.tui.widgets.permission import PermissionModal
+
+    request = PermissionRequest(
+        "Bash",
+        "rm -rf build",
+        {},
+        True,
+        "Bash(rm -rf build)",
+        "rm -rf build",
+        origin="explore subagent",
+    )
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        app.push_screen(PermissionModal(request, origin=request.origin))
+        await pilot.pause()
+        title = str(app.screen.query_one("#permission-title", Static).render())
+
+    assert "explore subagent" in title

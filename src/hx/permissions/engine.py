@@ -53,6 +53,8 @@ class PermissionRequest:
     description: str
     detail: str = ""
     """Rendered diff or command text shown in the approval modal."""
+    origin: str | None = None
+    """Which subagent asked, when it was not the main conversation."""
 
 
 @dataclass(slots=True)

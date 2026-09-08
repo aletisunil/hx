@@ -354,3 +354,121 @@ async def test_a_file_changed_on_disk_is_flagged_to_the_model(
     await loop.run("now edit it")
 
     assert "changed on disk" in loop.provider.requests[0].context.messages[-1].text()
+
+
+async def _approve_everything(request: PermissionRequest) -> PermissionAnswer:
+    return PermissionAnswer(True, GrantScope.SESSION)
+
+
+async def test_a_skill_body_enters_context_only_when_called(hx_home: Path, tmp_path: Path) -> None:
+    """Progressive disclosure end to end: the index is always there, the body
+    only after the model asks for it."""
+    from hx.skills.loader import build_index, discover
+    from hx.skills.runtime import SkillTool
+
+    skills_dir = tmp_path / ".hx" / "skills" / "deploy"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text(
+        "---\nname: deploy\ndescription: Ship a release\n---\n\nSTEP ONE: tag the commit\n"
+    )
+    skills = {skill.name: skill for skill in discover(tmp_path)}
+
+    script = [tool_turn("Skill", {"name": "deploy"}, "s1"), text_turn("Tagging now.")]
+    loop = build(tmp_path, script)
+    loop.tools.register(SkillTool(skills))
+    loop.skills_index = build_index(list(skills.values()))
+
+    await loop.run("deploy the release")
+
+    first, second = loop.provider.requests
+    assert "Ship a release" in first.context.system_text()
+    assert "STEP ONE" not in first.context.system_text()
+    assert "STEP ONE" not in second.context.system_text()
+    assert any(
+        "STEP ONE" in block.content
+        for message in second.context.messages
+        for block in message.content
+        if hasattr(block, "content")
+    )
+
+
+async def test_a_subagent_keeps_its_tool_output_out_of_the_parent(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """The parent pays for the report, not for the search that produced it."""
+    from hx.agents.definitions import discover as discover_agents
+    from hx.agents.subagent import SubagentRunner
+    from hx.tools.task import TaskTool
+
+    for index in range(3):
+        (tmp_path / f"file{index}.py").write_text(f"# needle {index}\n" * 200)
+
+    runner = SubagentRunner(
+        definitions={a.name: a for a in discover_agents(tmp_path)},
+        provider=FakeProvider(
+            [
+                tool_turn("Grep", {"pattern": "needle", "output_mode": "content"}, "g1"),
+                text_turn("The needle is in file0.py:1."),
+            ]
+        ),
+        tools=build_default_registry(None, None, FileTracker()),
+        permissions=None,
+        bus=EventBus(),
+        settings=load_settings(tmp_path),
+        parent_usage=None,
+    )
+
+    loop = build(
+        tmp_path,
+        [
+            tool_turn("Task", {"subagent_type": "explore", "prompt": "find the needle"}, "t1"),
+            text_turn("Thanks."),
+        ],
+        asker=_approve_everything,
+    )
+    loop.tools.register(TaskTool(runner))
+
+    await loop.run("where is the needle?")
+
+    parent_result = loop.session.messages[2].tool_results()[0]
+    assert parent_result.content == "The needle is in file0.py:1."
+    assert "needle 0\n# needle 0" not in parent_result.content
+
+
+async def test_mcp_tools_join_the_registry_without_disturbing_the_prefix(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    import sys
+
+    from hx.mcp.manager import MCPManager, MCPServerConfig
+
+    server = Path(__file__).parent / "mcp" / "fixtures" / "echo_server.py"
+    manager = MCPManager(
+        [
+            MCPServerConfig(
+                name="demo",
+                transport="stdio",
+                command=sys.executable,
+                args=(str(server),),
+                timeout=15.0,
+            )
+        ]
+    )
+
+    script = [
+        tool_turn("mcp__demo__echo", {"message": "from mcp"}, "m1"),
+        text_turn("done"),
+    ]
+    loop = build(tmp_path, script, asker=_approve_everything)
+    try:
+        await manager.connect_all()
+        await manager.register_tools(loop.tools)
+
+        await loop.run("call the mcp tool")
+
+        assert loop.session.messages[2].tool_results()[0].content == "from mcp"
+        offered = [tool["name"] for tool in loop.provider.requests[0].context.tools]
+        assert offered == sorted(offered, key=lambda n: (n.startswith("mcp__"), n))
+        assert len(set(loop.provider.prefix_fingerprints())) == 1
+    finally:
+        await manager.close_all()
