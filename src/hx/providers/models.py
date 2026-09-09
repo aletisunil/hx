@@ -100,20 +100,7 @@ class ModelRegistry:
 
     def search(self, query: str) -> list[ModelInfo]:
         """Fuzzy match for the ``/model`` picker, ranked by match quality."""
-        needle = query.strip().lower()
-        if not needle:
-            return self.all()
-        scored: list[tuple[int, str, ModelInfo]] = []
-        for model in self.all():
-            haystack = f"{model.id} {model.name}".lower()
-            if needle in haystack:
-                score = 0 if model.id.lower().startswith(needle) else 1
-            elif _subsequence(needle, haystack):
-                score = 2
-            else:
-                continue
-            scored.append((score, model.id, model))
-        return [m for _, _, m in sorted(scored, key=lambda item: (item[0], item[1]))]
+        return match_models(self.all(), query)
 
     @property
     def is_stale(self) -> bool:
@@ -179,6 +166,29 @@ class ModelRegistry:
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
         tmp.replace(path)
+
+
+def match_models(models: list[ModelInfo], query: str) -> list[ModelInfo]:
+    """Rank models against a query: id prefix first, then substring, then
+    subsequence.
+
+    Lives here rather than in the picker so that ``/model opus`` and typing
+    ``opus`` into the picker's filter box narrow the same list the same way.
+    """
+    needle = query.strip().lower()
+    if not needle:
+        return list(models)
+    scored: list[tuple[int, str, ModelInfo]] = []
+    for model in models:
+        haystack = f"{model.id} {model.name}".lower()
+        if needle in haystack:
+            score = 0 if model.id.lower().startswith(needle) else 1
+        elif _subsequence(needle, haystack):
+            score = 2
+        else:
+            continue
+        scored.append((score, model.id, model))
+    return [m for _, _, m in sorted(scored, key=lambda item: (item[0], item[1]))]
 
 
 def parse_model_entry(entry: dict[str, Any]) -> ModelInfo:
