@@ -51,12 +51,22 @@ def session_outputs_dir(session_id: str) -> Path:
     return session_dir(session_id) / "outputs"
 
 
+def user_themes_dir() -> Path:
+    """User-supplied theme files (``*.json``, see :mod:`hx.tui.theme_json`)."""
+    return user_home() / "themes"
+
+
 def user_skills_dir() -> Path:
     return user_home() / "skills"
 
 
 def user_agents_dir() -> Path:
     return user_home() / "agents"
+
+
+def keybindings_file() -> Path:
+    """User keybinding overrides (see :mod:`hx.keys`)."""
+    return user_home() / "keybindings.json"
 
 
 def logs_dir() -> Path:
