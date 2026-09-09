@@ -13,6 +13,8 @@ from typing import Any
 
 from textual.pilot import Pilot
 
+from hx.tui.widgets import working
+from hx.tui.widgets.working import WorkingIndicator
 from tests.tui.test_app import build_app
 
 SIZE = (100, 32)
@@ -27,6 +29,18 @@ def _pin(app: Any) -> None:
     app._status.set_location("~/project", "main")
 
 
+def _pin_clock(monkeypatch: Any) -> None:
+    """Freeze the working indicator's animation and its stopwatch.
+
+    The spinner advances on a timer and the elapsed count comes off the wall
+    clock, so a snapshot of a running turn records whichever frame and second
+    the machine happened to reach. That passes on the machine that recorded it
+    and fails on any slower one. A single-frame FRAMES makes the index moot.
+    """
+    monkeypatch.setattr(working, "FRAMES", "⠋")
+    monkeypatch.setattr(WorkingIndicator, "elapsed", property(lambda self: 12.0))
+
+
 def test_the_idle_screen(hx_home: Path, tmp_path: Path, snap_compare: Any) -> None:
     app = build_app(tmp_path)
 
@@ -37,8 +51,9 @@ def test_the_idle_screen(hx_home: Path, tmp_path: Path, snap_compare: Any) -> No
     assert snap_compare(app, terminal_size=SIZE, run_before=run_before)
 
 
-def test_a_running_turn(hx_home: Path, tmp_path: Path, snap_compare: Any) -> None:
+def test_a_running_turn(hx_home: Path, tmp_path: Path, snap_compare: Any, monkeypatch: Any) -> None:
     """The spinner rides the prompt's top rule; the layout must not shift."""
+    _pin_clock(monkeypatch)
     app = build_app(tmp_path)
 
     async def run_before(pilot: Pilot) -> None:
@@ -59,7 +74,12 @@ def test_a_turn_with_tool_blocks(hx_home: Path, tmp_path: Path, snap_compare: An
         transcript.add_user_message("run the core tests")
         transcript.start_assistant_message()
         transcript.append_delta("Running them now.")
-        transcript.add_tool_block("t1", "Read", {"file_path": "src/hx/core/loop.py"})
+        # Absolute, and under the app's cwd, so display_path renders it
+        # relative to the project. A bare relative path resolves against the
+        # *process* cwd instead, which is not tmp_path, so it came out as an
+        # absolute ~/... path and baked the recording machine into the snapshot.
+        read_path = tmp_path / "src" / "hx" / "core" / "loop.py"
+        transcript.add_tool_block("t1", "Read", {"file_path": str(read_path)})
         transcript.finish_tool_block("t1", "20 lines", False, {"content": "x = 1"}, 12.0)
         transcript.add_tool_block("t2", "Bash", {"command": "pytest -q tests/core"})
         transcript.update_tool_block("t2", "\n".join(f"line {i}" for i in range(30)))
