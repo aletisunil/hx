@@ -140,3 +140,23 @@ async def test_empty_command_is_rejected(shell: PersistentShell, ctx: ToolContex
     tool = BashTool(shell, BackgroundJobs(ctx.cwd / "logs"))
     with pytest.raises(ToolError, match="empty"):
         await tool.run({"command": "   "}, ctx)
+
+
+@pytest.mark.parametrize("code", [3, 7])
+async def test_a_command_that_kills_the_shell_still_reports_its_status(
+    shell: PersistentShell, code: int
+) -> None:
+    """`exit 3` terminates the shell itself.
+
+    Reading returncode immediately races the reaper - it is None until the
+    process is collected - so the status was silently replaced by a fallback
+    of 1. It reproduced on Linux CI and not on macOS, which is exactly the kind
+    of thing a matrix is for.
+    """
+    result = await shell.run(f"exit {code}", timeout_seconds=10)
+    assert result.exit_code == code
+
+
+async def test_the_shell_comes_back_after_it_exits(shell: PersistentShell) -> None:
+    await shell.run("exit 3", timeout_seconds=10)
+    assert (await shell.run("echo alive")).stdout.strip() == "alive"

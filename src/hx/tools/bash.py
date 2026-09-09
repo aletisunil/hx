@@ -153,8 +153,14 @@ class PersistentShell:
                 raise TimeoutError
             data = await asyncio.wait_for(stdout.read(READ_CHUNK), timeout=remaining)
             if not data:
-                # The shell died. Surface it rather than hanging on a dead pipe.
-                self._exit_code = self._process.returncode or 1
+                # The shell died - `exit 3`, a crash, a kill. Wait for it to be
+                # reaped before reading the status: returncode is None until
+                # then, and falling back to 1 would report the wrong code.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._process.wait(), timeout=2)
+                self._exit_code = (
+                    self._process.returncode if self._process.returncode is not None else 1
+                )
                 if buffer:
                     yield buffer
                 return

@@ -48,6 +48,7 @@ check_path() {
     have hx && return
     bindir="$(uv tool dir --bin 2>/dev/null || echo "$HOME/.local/bin")"
     warn "hx is not on your PATH yet."
+    # shellcheck disable=SC2016  # $PATH is literal text for the user to copy.
     printf '\n  Add this to your shell profile:\n\n    export PATH="%s:$PATH"\n\n' "$bindir"
 }
 
