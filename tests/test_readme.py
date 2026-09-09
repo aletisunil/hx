@@ -42,35 +42,71 @@ def test_every_command_is_documented(readme: str) -> None:
     assert registered - documented == set(), "these commands are missing from the README"
 
 
-#: Keys the prompt handles itself rather than through App.BINDINGS.
-WIDGET_KEYS = {"enter", "ctrl+j"}
+#: Actions the prompt handles itself rather than through App.BINDINGS.
+WIDGET_ACTIONS = {
+    "tui.input.submit",
+    "tui.input.newLine",
+    "tui.input.complete",
+    "tui.editor.cursorLeft",
+    "tui.editor.cursorRight",
+    "tui.editor.cursorWordLeft",
+    "tui.editor.cursorWordRight",
+    "tui.editor.deleteWordForward",
+    "tui.editor.yank",
+    "tui.editor.yankPop",
+    "tui.editor.redo",
+}
+
+#: Documented in prose rather than the key table: readline editing keys, which
+#: would swamp a table that exists to answer "what can I press right now".
+PROSE_ACTIONS = WIDGET_ACTIONS - {"tui.input.submit", "tui.input.newLine"}
 
 
-def _app_bindings() -> set[str]:
-    keys = set()
-    for binding in HXApp.BINDINGS:
-        key = binding[0] if isinstance(binding, tuple) else binding.key
-        keys.add("esc" if key == "escape" else key)
-    return keys
+def _documented_keys(readme: str) -> set[str]:
+    return _table_cells(readme, r"^\| `([a-z]+(?:\+[a-z]+)*)`")
+
+
+def _bound_keys() -> set[str]:
+    """Every key the keymap resolves, as the README spells it."""
+    from hx.keys import KEYMAP, display_key
+
+    return {display_key(key) for keys in KEYMAP.keys.values() for key in keys}
 
 
 def test_every_documented_keybinding_exists(readme: str) -> None:
-    documented = _table_cells(readme, r"^\| `(ctrl\+\w+|shift\+tab|enter|esc)`")
-    unknown = documented - _app_bindings() - WIDGET_KEYS
+    unknown = _documented_keys(readme) - _bound_keys()
     assert unknown == set(), f"README documents keys nothing handles: {unknown}"
 
 
-def test_widget_level_keys_are_really_handled(readme: str) -> None:
+def test_widget_level_keys_are_really_handled() -> None:
     """They are absent from App.BINDINGS, so only the widget can vouch for them."""
     source = (README.parent / "src" / "hx" / "tui" / "widgets" / "input.py").read_text()
-    for key in WIDGET_KEYS:
-        assert f'"{key}"' in source, f"{key} is documented but the prompt does not handle it"
+    for action in WIDGET_ACTIONS:
+        assert f'"{action}"' in source, f"{action} is bound but the prompt does not handle it"
 
 
 def test_every_binding_is_documented(readme: str) -> None:
-    documented = _table_cells(readme, r"^\| `(ctrl\+\w+|shift\+tab|enter|esc)`")
-    missing = _app_bindings() - documented
+    """Each action with a key must have at least one of its keys in the table."""
+    from hx.keys import KEYMAP, display_key
+
+    documented = _documented_keys(readme)
+    missing = set()
+    for action, keys in KEYMAP.keys.items():
+        if not keys or action in PROSE_ACTIONS:
+            continue
+        if not any(display_key(key) in documented for key in keys):
+            missing.add(action)
     assert missing == set(), f"bound but undocumented: {missing}"
+
+
+def test_app_bindings_all_come_from_the_registry() -> None:
+    """No key may be added to the app without an entry the docs can find."""
+    from hx.keys import KEYMAP
+
+    registry_keys = {",".join(keys) for keys in KEYMAP.keys.values() if keys}
+    for binding in HXApp.BINDINGS:
+        key = binding[0] if isinstance(binding, tuple) else binding.key
+        assert key in registry_keys, f"{key} is bound outside the keybinding registry"
 
 
 def _documented_settings(readme: str) -> dict:

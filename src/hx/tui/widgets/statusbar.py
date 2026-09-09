@@ -50,8 +50,6 @@ class StatusBar(Static):
         self.auto_compact = True
         self.cwd = ""
         self.branch: str | None = None
-        self.busy = False
-        self.busy_label = ""
 
     def set_model(self, model_id: str) -> None:
         self.model = model_id
@@ -93,11 +91,6 @@ class StatusBar(Static):
     def set_location(self, cwd: str, branch: str | None) -> None:
         self.cwd = cwd
         self.branch = branch
-        self.refresh()
-
-    def set_busy(self, busy: bool, label: str = "") -> None:
-        self.busy = busy
-        self.busy_label = label
         self.refresh()
 
     @property

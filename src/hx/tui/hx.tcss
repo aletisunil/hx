@@ -28,12 +28,38 @@ Transcript {
 }
 
 /* Vertical rhythm: every block gets air above it, so a tool call and the
-   sentence that follows it do not read as one run-on line. */
+   sentence that follows it do not read as one run-on line.
+
+   The blank left border is a permanent one-cell gutter. It costs nothing while
+   idle and means the keyboard cursor can light it up without every block on
+   screen shifting a column sideways. */
 Transcript > MessageBlock,
 Transcript > ToolBlock,
 Transcript > Notice {
     height: auto;
     margin: 1 0 0 0;
+    border-left: blank;
+}
+
+/* The block the keyboard is pointing at. */
+Transcript > .cursored {
+    border-left: vkey $primary;
+    background: $selected-bg 25%;
+}
+
+/* Notices use the same gutter as the cursor, in the colour of what happened.
+   An error and a routine "model switched" are the same shape otherwise, and
+   the one that matters should be findable while scrolling past. */
+Transcript > Notice.notice-error {
+    border-left: vkey $error;
+}
+
+Transcript > Notice.notice-warning {
+    border-left: vkey $warning;
+}
+
+Transcript > Notice.notice-success {
+    border-left: vkey $success;
 }
 
 /* The user's own turn is the anchor of an exchange; it gets the strongest
@@ -64,27 +90,48 @@ SubagentRows {
     padding: 0 1;
 }
 
-/* Zero height while idle so the prompt sits flush against the transcript. */
-WorkingIndicator {
-    height: 0;
-    padding: 0 1;
+/* The prompt, framed by two rules. The top one carries the working status, so
+   a turn starting costs no layout: the row is there either way. */
+#prompt-frame {
+    height: auto;
+    background: $surface;
 }
 
-WorkingIndicator.busy {
+WorkingIndicator,
+#prompt-rule-bottom {
     height: 1;
+    width: 1fr;
+    background: $surface;
 }
 
 PromptInput {
     height: auto;
-    min-height: 3;
+    min-height: 1;
     max-height: 12;
     padding: 0 1;
-    border: round $panel;
+    border: none;
     background: $surface;
 }
 
-PromptInput:focus {
-    border: round $primary;
+/* Completion popup, directly above the frame it completes into. */
+#autocomplete {
+    height: auto;
+    max-height: 10;
+    padding: 0 1;
+    background: $surface;
+}
+
+/* One dim line of shortcuts. Never grows, never scrolls. */
+#hints {
+    height: 1;
+    padding: 0 1;
+    background: $background;
+}
+
+.startup-header {
+    height: auto;
+    padding: 0 1;
+    margin: 0;
 }
 
 StatusBar {
@@ -115,7 +162,23 @@ ModalScreen {
 #picker-title {
     text-style: bold;
     color: $primary;
-    padding: 0 0 1 0;
+    padding: 0;
+}
+
+/* The filter box is a line to type on, not a widget to look at. Textual's
+   default tall Input border fights the panel's own frame; a single rule under
+   it separates the query from the results and nothing else. */
+#picker-filter {
+    border: none;
+    padding: 0;
+    height: 1;
+    background: $surface;
+}
+
+#picker-rule {
+    height: 1;
+    color: $secondary;
+    background: $surface;
 }
 
 #picker-options {
@@ -133,26 +196,36 @@ ModalScreen {
     height: auto;
     max-height: 80%;
     padding: 1 2;
-    border: thick $warning;
+    /* Same frame as every other modal, in the warning colour rather than a
+       heavier border: the colour carries the risk, and a second border style
+       would just make this dialog look like it came from another app. */
+    border: round $warning;
     background: $surface;
 }
 
 #permission-title {
-    padding: 0 0 1 0;
+    padding: 0;
+}
+
+#permission-rule {
+    height: 1;
+    color: $warning;
+    background: $surface;
 }
 
 #permission-detail {
     height: auto;
     max-height: 20;
     padding: 0 1;
-    border: round $panel;
+    border: none;
     background: $panel;
 }
 
+/* One line of keys, not a row of three-line buttons. The keys are bound
+   anyway, so the buttons were restating them at four times the height. */
 #permission-actions {
-    height: auto;
-    padding: 1 0 0 0;
-    align-horizontal: right;
+    height: 1;
+    margin: 1 0 0 0;
 }
 
 #permission-actions Button {

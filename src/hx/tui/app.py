@@ -19,6 +19,7 @@ actions are pushed back into the loop as messages.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -29,9 +30,13 @@ from textual.containers import Horizontal
 from hx.core import events as ev
 from hx.core.context import git_branch
 from hx.core.usage import format_tokens
+from hx.keys import KEYMAP, bindings_for
 from hx.providers.models import ModelRegistry
 from hx.tui.commands import CommandContext, CommandRegistry, build_default_commands
 from hx.tui.theme import THEME, textual_theme
+from hx.tui.widgets.autocomplete import Autocomplete
+from hx.tui.widgets.frame import BottomRule, PromptFrame
+from hx.tui.widgets.hints import HintsBar
 from hx.tui.widgets.input import PromptInput
 from hx.tui.widgets.statusbar import StatusBar
 from hx.tui.widgets.todos import SubagentRows, TodoSidebar
@@ -50,15 +55,26 @@ class HXApp(App[None]):
     CSS_PATH = "hx.tcss"
     ENABLE_COMMAND_PALETTE = False
     """Textual's built-in palette would shadow ctrl+p; HX has its own."""
-    BINDINGS: ClassVar[list[BindingType]] = [
-        ("ctrl+c", "cancel_turn", "Cancel"),
-        ("ctrl+d", "quit", "Quit"),
-        ("escape", "interrupt", "Interrupt"),
-        ("shift+tab", "cycle_mode", "Permission mode"),
-        ("ctrl+r", "expand_output", "Expand output"),
-        ("ctrl+t", "toggle_todos", "Todos"),
-        ("ctrl+p", "hx_commands", "Commands"),
-    ]
+    #: Built from the keybinding registry, so the keys here, the ones ``/help``
+    #: prints and the ones the hints bar shows cannot drift apart.
+    BINDINGS: ClassVar[list[BindingType]] = bindings_for(  # type: ignore[assignment]
+        "app.interrupt",
+        "app.clear",
+        "app.exit",
+        "app.suspend",
+        "app.mode.cycle",
+        "app.commands",
+        "app.model.select",
+        "app.tools.expand",
+        "app.todos.toggle",
+        "app.message.copy",
+        "app.transcript.pageUp",
+        "app.transcript.pageDown",
+        "app.transcript.top",
+        "app.transcript.bottom",
+        "app.transcript.previousPrompt",
+        "app.transcript.nextPrompt",
+    )
 
     def __init__(
         self,
@@ -72,8 +88,10 @@ class HXApp(App[None]):
         skills: Any = None,
         agents: Any = None,
         mcp: Any = None,
+        notices: list[str] | None = None,
     ) -> None:
         super().__init__()
+        self._startup_notices = list(notices or ())
         self.sandbox_active = sandbox_active
         self._sandbox_backend = sandbox_backend
         self.skills = skills or {}
@@ -92,18 +110,26 @@ class HXApp(App[None]):
         self._todos: TodoSidebar
         self._prompt: PromptInput
         self._working: WorkingIndicator
+        self._bottom_rule: BottomRule
         # Settings are frozen; the live permission mode is session state.
         self.mode = settings.permissions.mode
+        # Before anything parses hx.tcss: the stylesheet reads variables that
+        # only exist once an HX theme is installed, and Textual parses CSS on
+        # the way to the first frame, well before on_mount runs.
+        self.apply_theme(settings.theme)
         self._turn_worker: Any = None
         self._queued: list[str] = []
+        #: Set by a ctrl+c on an empty prompt; a second press then exits.
+        self._clear_armed = False
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="body"):
             yield Transcript(self.settings.cwd)
             yield TodoSidebar()
         yield SubagentRows()
-        yield WorkingIndicator()
-        yield PromptInput(self.settings.cwd)
+        yield Autocomplete()
+        yield PromptFrame(self.settings.cwd)
+        yield HintsBar()
         yield StatusBar()
 
     async def on_mount(self) -> None:
@@ -114,6 +140,8 @@ class HXApp(App[None]):
         made it. The main screen's widgets are therefore looked up once, here,
         and referenced directly from then on.
         """
+        # Applied in __init__ as well, for the stylesheet's sake; repeated here
+        # because settings can be swapped between construction and mount.
         self.apply_theme(self.settings.theme)
 
         self._transcript = self.query_one(Transcript)
@@ -122,6 +150,7 @@ class HXApp(App[None]):
         self._todos = self.query_one(TodoSidebar)
         self._prompt = self.query_one(PromptInput)
         self._working = self.query_one(WorkingIndicator)
+        self._bottom_rule = self.query_one(BottomRule)
 
         status = self._status
         status.set_model(self.loop.model)
@@ -136,7 +165,21 @@ class HXApp(App[None]):
                 self.loop.permissions.mode.value, self.sandbox_active, self._sandbox_backend
             )
 
+        if not self.settings.quiet_startup:
+            from hx import __version__
+            from hx.tui.widgets.header import StartupHeader
+
+            self._header = StartupHeader(__version__)
+            self._transcript.mount(self._header)
+
+        for problem in KEYMAP.problems:
+            self._transcript.add_notice(f"Keybindings: {problem}", "warning")
+
+        for notice in self._startup_notices:
+            self._transcript.add_notice(notice, "info")
+
         self._prompt.focus()
+        self._sync_frame()
         self.run_worker(self._consume_events(), name="events", exclusive=False)
 
     async def _consume_events(self) -> None:
@@ -156,7 +199,6 @@ class HXApp(App[None]):
             match event:
                 case ev.TurnStarted():
                     transcript.start_assistant_message()
-                    status.set_busy(True, "thinking")
                     working.start("thinking")
                 case ev.TextDelta():
                     transcript.append_delta(event.text)
@@ -164,7 +206,6 @@ class HXApp(App[None]):
                     transcript.append_thinking(event.text)
                 case ev.ToolCallStarted():
                     transcript.add_tool_block(event.tool_use_id, event.name, event.input)
-                    status.set_busy(True, event.name)
                     working.start(event.name)
                 case ev.ToolCallProgress():
                     transcript.update_tool_block(event.tool_use_id, event.chunk)
@@ -210,7 +251,6 @@ class HXApp(App[None]):
                 case ev.ErrorRaised():
                     transcript.add_notice(event.message, "error")
                 case ev.TurnFinished():
-                    status.set_busy(False)
                     working.stop()
 
     async def on_prompt_input_submitted(self, message: PromptInput.Submitted) -> None:
@@ -218,8 +258,12 @@ class HXApp(App[None]):
 
     async def submit(self, text: str) -> None:
         """Handle a user submission: slash command, ``!`` passthrough, or a turn."""
+        # Any real activity disarms the pending exit. Otherwise a ctrl+c from
+        # an hour ago still counts as the first of two presses, and the next
+        # one quits with no warning at all.
+        self._clear_armed = False
         if text.strip() == "/":
-            await self.action_hx_commands()
+            await self.action_commands()
             return
 
         if text.startswith("/"):
@@ -322,7 +366,6 @@ class HXApp(App[None]):
             self._transcript.add_notice("interrupted", "warning")
         finally:
             prompt_input.set_enabled(True)
-            self._status.set_busy(False)
             self._working.stop()
 
         if self._queued:
@@ -347,7 +390,8 @@ class HXApp(App[None]):
         theme = textual_theme(palette.name)
         self.register_theme(theme)
         self.theme = theme.name
-        self.refresh(layout=True)
+        if self.is_running:
+            self.refresh(layout=True)
         return palette.name
 
     @property
@@ -365,7 +409,7 @@ class HXApp(App[None]):
             self.loop.permissions.set_mode(mode)
         self._status.set_mode(mode.value, self.sandbox_active, self._sandbox_backend)
 
-    async def action_hx_commands(self) -> None:
+    async def action_commands(self) -> None:
         """Open HX's own command palette.
 
         Textual ships a built-in palette on the same key; it is disabled above
@@ -393,6 +437,10 @@ class HXApp(App[None]):
         setter = getattr(provider, "set_api_key", None)
         if setter is not None:
             setter(key)
+
+    def last_message_text(self) -> str | None:
+        """Text of the most recent assistant message, for ``/copy``."""
+        return self._transcript.cursored_text()
 
     def notice(self, text: str, level: str = "info") -> None:
         self._transcript.add_notice(text, level)
@@ -437,26 +485,130 @@ class HXApp(App[None]):
                 transcript.append_delta(text)
         transcript.add_notice(f"Resumed {session_id}.", "success")
 
-    async def action_cancel_turn(self) -> None:
-        await self.action_interrupt()
-
     async def action_interrupt(self) -> None:
         if self._turn_worker is None or self._turn_worker.is_finished:
             return
         self.loop.cancel()
         self._turn_worker.cancel()
 
-    async def action_cycle_mode(self) -> None:
+    async def action_clear(self) -> None:
+        """Clear the prompt; on an already-empty prompt, a second press exits.
+
+        pi's behaviour, and the reason ctrl+c does not cancel a turn from the
+        prompt: escape does that, and a key that sometimes discards a draft and
+        sometimes kills a turn is a key nobody presses confidently.
+
+        While a turn *is* running there is no draft to discard and nothing
+        ambiguous left, so the key means what every terminal user expects it to
+        mean. Arming the exit there instead would let two presses of the
+        universal "stop" chord tear down the session mid-answer.
+        """
+        if self._turn_worker is not None and not self._turn_worker.is_finished:
+            await self.action_interrupt()
+            return
+        if self._prompt.text:
+            self._prompt.clear()
+            self._clear_armed = False
+            return
+        if self._clear_armed:
+            self.exit()
+            return
+        self._clear_armed = True
+        self.notice(f"Press {KEYMAP.text('app.clear')} again to exit.", "info")
+
+    async def action_exit(self) -> None:
+        """Exit, but only from an empty prompt - ctrl+d deletes otherwise."""
+        if not self._prompt.text:
+            self.exit()
+
+    async def action_suspend(self) -> None:
+        """Drop to the shell with SIGTSTP, the way any other terminal app does."""
+        import signal
+
+        with self.suspend():
+            os.kill(os.getpid(), signal.SIGTSTP)
+
+    async def action_mode_cycle(self) -> None:
         from hx.config import PermissionMode
 
         order = list(PermissionMode)
         self.set_mode(order[(order.index(self.mode) + 1) % len(order)])
 
-    async def action_expand_output(self) -> None:
+    async def action_model_select(self) -> None:
+        await self.submit("/model")
+
+    async def action_tools_expand(self) -> None:
+        """Expand tool output - or the startup header, while it is still up.
+
+        The header says this key shows every shortcut, so it has to, and the
+        user has not run a tool yet at the point they read that.
+        """
+        header = getattr(self, "_header", None)
+        if header is not None and not self._transcript._tools:
+            header.toggle()
+            return
         self._transcript.toggle_expanded()
 
-    async def action_toggle_todos(self) -> None:
+    def _sync_frame(self) -> None:
+        """Keep the prompt's rules in step with focus and the draft's height."""
+        focused = self._prompt.has_focus
+        self._working.set_focused_style(focused)
+        self._bottom_rule.set_focused_style(focused)
+
+        hidden_above = self._prompt.scroll_offset.y
+        visible = self._prompt.size.height
+        hidden_below = max(0, self._prompt.document.line_count - hidden_above - visible)
+        self._working.set_hidden_above(hidden_above)
+        self._bottom_rule.set_hidden_below(hidden_below)
+
+    def on_text_area_changed(self, event: Any) -> None:
+        self._sync_frame()
+
+    def on_descendant_focus(self, event: Any) -> None:
+        self._sync_frame()
+
+    def on_descendant_blur(self, event: Any) -> None:
+        self._sync_frame()
+
+    async def action_todos_toggle(self) -> None:
         self._todos.set_visible("visible" not in self._todos.classes)
+
+    async def action_message_copy(self) -> None:
+        """Copy the cursored message, or the last answer when none is cursored."""
+        text = self._transcript.cursored_text()
+        if not text:
+            self.notice("Nothing to copy yet.", "warning")
+            return
+        await self.copy(text)
+
+    async def copy(self, text: str) -> None:
+        """Copy to the system clipboard and say so, or say why not."""
+        from hx.tui.clipboard import ClipboardError, copy_text, format_size
+
+        try:
+            via = await copy_text(text, write_osc52=self.copy_to_clipboard)
+        except ClipboardError as exc:
+            self.notice(f"Could not copy: {exc}", "error")
+            return
+        self.notice(f"Copied {format_size(text)} to the clipboard ({via}).", "success")
+
+    async def action_transcript_page_up(self) -> None:
+        self._transcript.page_up()
+
+    async def action_transcript_page_down(self) -> None:
+        self._transcript.page_down()
+
+    async def action_transcript_top(self) -> None:
+        self._transcript.scroll_to_top()
+
+    async def action_transcript_bottom(self) -> None:
+        self._transcript.scroll_to_bottom()
+
+    async def action_transcript_previous_prompt(self) -> None:
+        self._transcript.move_cursor(-1)
+
+    async def action_transcript_next_prompt(self) -> None:
+        self._transcript.move_cursor(1)
 
     async def ask_permission(self, request: Any) -> Any:
         """Show the approval modal and return the user's choice."""
@@ -488,6 +640,7 @@ async def run_tui(
     skills: Any = None,
     agents: Any = None,
     mcp: Any = None,
+    notices: list[str] | None = None,
 ) -> None:
     app = HXApp(
         loop,
@@ -500,5 +653,6 @@ async def run_tui(
         skills=skills,
         agents=agents,
         mcp=mcp,
+        notices=notices,
     )
     await app.run_async()

@@ -100,17 +100,26 @@ async def cmd_model(ctx: CommandContext, args: str) -> None:
         ctx.app.notice("No model catalogue cached yet. Run /models refresh.", "warning")
         return
 
-    if args:
-        matches = registry.search(args)
+    query = args.strip()
+    if query:
+        matches = registry.search(query)
         # An id typed in full is a choice, not a query: it prefixes its own
         # variants (…-flash, …-flash-0731), so matching alone never narrows it.
-        exact = next((m for m in matches if m.id.lower() == args.strip().lower()), None)
+        exact = next((m for m in matches if m.id.lower() == query.lower()), None)
         if exact is not None or len(matches) == 1:
             _switch_model(ctx, exact.id if exact is not None else matches[0].id)
             return
-        models = matches or models
+        if not matches:
+            # Falling back to the whole catalogue silently looks like the filter
+            # is broken; say that nothing matched instead.
+            ctx.app.notice(f"No model matches {query!r}. Showing the full catalogue.", "warning")
+            query = ""
+        else:
+            models = matches
 
-    chosen = await ctx.app.push_screen_wait(ModelPicker(models, ctx.session.meta.model))
+    chosen = await ctx.app.push_screen_wait(
+        ModelPicker(models, ctx.session.meta.model, initial=query)
+    )
     if chosen:
         _switch_model(ctx, chosen)
 
@@ -418,10 +427,57 @@ async def cmd_help(ctx: CommandContext, args: str) -> None:
         for c in ctx.registry.all()
     ]
     lines.append("")
-    lines.append("Keys: enter send · ctrl+j newline · esc interrupt · shift+tab mode")
-    lines.append("      ctrl+p command palette · ctrl+r expand output · ctrl+t todos · ctrl+d quit")
-    lines.append("      @path completes a file · !command runs a shell command directly")
+    lines.append("Keys")
+    # Generated from the registry rather than typed out: a hand-written key
+    # list is a copy that drifts the first time a binding moves.
+    lines += [f"  {key:<16} {description}" for key, description in help_keys()]
+    lines.append("")
+    lines.append("  @path            completes a file")
+    lines.append("  !command         runs a shell command directly")
     ctx.app.notice("\n".join(lines))
+
+
+#: Actions worth listing in ``/help``, in the order a new user meets them.
+HELP_ACTIONS = (
+    "tui.input.submit",
+    "tui.input.newLine",
+    "tui.input.complete",
+    "app.interrupt",
+    "app.clear",
+    "app.exit",
+    "app.mode.cycle",
+    "app.commands",
+    "app.model.select",
+    "app.tools.expand",
+    "app.todos.toggle",
+    "app.message.copy",
+    "app.transcript.previousPrompt",
+    "app.transcript.nextPrompt",
+    "app.transcript.top",
+    "app.transcript.bottom",
+    "app.suspend",
+)
+
+
+def help_keys() -> list[tuple[str, str]]:
+    """``(keys, description)`` for every action ``/help`` lists."""
+    from hx.keys import KEYMAP
+
+    rows = []
+    for action in HELP_ACTIONS:
+        keys = KEYMAP.text(action)
+        if keys:
+            rows.append((keys, KEYMAP.description(action)))
+    return rows
+
+
+async def cmd_copy(ctx: CommandContext, args: str) -> None:
+    """``/copy`` - put the last assistant message on the clipboard."""
+    text = ctx.app.last_message_text()
+    if not text:
+        ctx.app.notice("Nothing to copy yet.", "warning")
+        return
+    await ctx.app.copy(text)
 
 
 async def cmd_quit(ctx: CommandContext, args: str) -> None:
@@ -447,6 +503,7 @@ def build_default_commands() -> CommandRegistry:
         Command("init", "Generate an HX.md for this project", cmd_init),
         Command("theme", "Switch the colour palette", cmd_theme, "[name]", takes_args=True),
         Command("configure", "Settings and the OpenRouter API key", cmd_configure),
+        Command("copy", "Copy the last reply to the clipboard", cmd_copy),
         Command("help", "List commands and keys", cmd_help),
         Command("quit", "Exit HX", cmd_quit, aliases=("exit", "q")),
     ):

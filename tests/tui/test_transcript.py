@@ -6,6 +6,7 @@ from pathlib import Path
 
 from rich.console import Console
 
+from hx.tui.renderers import expand_hint
 from hx.tui.theme import THEME
 from hx.tui.widgets.transcript import MessageBlock, Notice, ToolBlock, markdown
 from hx.tui.widgets.working import WorkingIndicator
@@ -50,7 +51,7 @@ def test_expanding_a_block_shows_the_output_it_was_hiding() -> None:
     block.finish("done", is_error=False)
 
     collapsed = _plain(block.render())
-    assert "ctrl+r to expand" in collapsed
+    assert expand_hint() in collapsed
     assert "line 0" not in collapsed
 
     block.expanded = True

@@ -129,7 +129,7 @@ async def test_shift_tab_cycles_permission_mode(hx_home: Path, tmp_path: Path) -
     app = build_app(tmp_path)
     async with app.run_test() as pilot:
         before = app.mode
-        await app.action_cycle_mode()
+        await app.action_mode_cycle()
         await pilot.pause()
         assert app.mode != before
         assert app.query_one(StatusBar).mode == app.mode.value
@@ -259,13 +259,13 @@ async def test_the_ui_still_works_while_a_modal_is_open(hx_home: Path, tmp_path:
 
         # Every one of these would have raised NoMatches before.
         app.notice("still reachable")
-        app.query_one_status().set_busy(True, "working")
-        await app.action_toggle_todos()
+        app._working.start("thinking")
+        await app.action_todos_toggle()
         await pilot.pause()
 
         notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
         assert "still reachable" in notices
-        assert app._status.busy
+        assert app._working.busy
 
 
 async def test_a_subagent_prompt_names_who_is_asking(hx_home: Path, tmp_path: Path) -> None:
@@ -404,7 +404,7 @@ async def test_bang_still_goes_through_the_permission_engine(hx_home: Path, tmp_
 async def test_ctrl_p_opens_the_command_palette(hx_home: Path, tmp_path: Path) -> None:
     app = build_app(tmp_path)
     async with app.run_test() as pilot:
-        app.run_worker(app.action_hx_commands(), name="palette")
+        app.run_worker(app.action_commands(), name="palette")
         await pilot.pause(0.1)
         assert app.screen is not app.screen_stack[0]
         assert app.screen.query_one("#picker-title", Static)
@@ -709,3 +709,370 @@ async def test_configure_cancelled_changes_nothing(hx_home: Path, tmp_path: Path
         await pilot.press("escape")
         await pilot.pause(0.1)
     assert not (hx_home / "auth.json").exists()
+
+
+def _catalogue(app: HXApp, *model_ids: str) -> None:
+    from hx.providers.models import CacheMode, ModelInfo, ModelPricing
+
+    app.models._models = {
+        model_id: ModelInfo(
+            id=model_id,
+            name=model_id,
+            context_window=400_000,
+            max_output_tokens=8192,
+            pricing=ModelPricing(prompt=1e-6, completion=2e-6),
+            cache_mode=CacheMode.IMPLICIT,
+        )
+        for model_id in model_ids
+    }
+
+
+async def test_the_picker_is_navigable_from_the_filter_box(hx_home: Path, tmp_path: Path) -> None:
+    """The filter box holds focus, so the arrow keys never reached the list -
+    nothing was ever highlighted and Enter picked whatever sorted first."""
+    from textual.widgets import OptionList
+
+    from hx.tui.widgets.palette import ModelPicker
+
+    app = build_app(tmp_path)
+    _catalogue(app, "openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-opus-5")
+
+    async with app.run_test() as pilot:
+        await app.submit("/model")
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, ModelPicker)
+        options = app.screen.query_one("#picker-options", OptionList)
+
+        assert options.highlighted == 0, "a row must be selected before any key is pressed"
+        await pilot.press("down")
+        await pilot.pause()
+        assert options.highlighted == 1
+        await pilot.press("down")
+        await pilot.pause()
+        assert options.highlighted == 2
+        await pilot.press("up")
+        await pilot.pause()
+        assert options.highlighted == 1
+
+        chosen = options.get_option_at_index(1).id
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+
+    assert app.loop.model == chosen
+
+
+async def test_typing_in_the_picker_narrows_and_keeps_a_selection(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    from textual.widgets import OptionList
+
+    app = build_app(tmp_path)
+    _catalogue(app, "openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-opus-5")
+
+    async with app.run_test() as pilot:
+        await app.submit("/model")
+        await pilot.pause(0.1)
+        options = app.screen.query_one("#picker-options", OptionList)
+        assert options.option_count == 3
+
+        for char in "opus":
+            await pilot.press(char)
+        await pilot.pause()
+
+        assert options.option_count == 1
+        assert options.highlighted == 0
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+
+    assert app.loop.model == "anthropic/claude-opus-5"
+
+
+async def test_a_model_query_pre_fills_the_filter_box(hx_home: Path, tmp_path: Path) -> None:
+    """`/model gpt-5` narrows the list; leaving the box empty made that look
+    like the filter had failed to apply."""
+    from hx.tui.widgets.palette import ModelPicker
+
+    app = build_app(tmp_path)
+    _catalogue(app, "openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-opus-5")
+
+    async with app.run_test() as pilot:
+        await app.submit("/model gpt-5")
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, ModelPicker)
+        assert app.screen.query_one("#picker-filter", Input).value == "gpt-5"
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+
+async def test_a_query_matching_nothing_says_so(hx_home: Path, tmp_path: Path) -> None:
+    """Silently falling back to the whole catalogue reads as a broken filter."""
+    app = build_app(tmp_path)
+    _catalogue(app, "openai/gpt-5", "anthropic/claude-opus-5")
+
+    async with app.run_test() as pilot:
+        await app.submit("/model zzzznope")
+        await pilot.pause(0.1)
+        assert app.screen.query_one("#picker-filter", Input).value == ""
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+
+    assert "No model matches" in notices
+
+
+# -- pi's interaction model ------------------------------------------------
+
+
+async def test_ctrl_c_clears_the_prompt_and_a_second_press_exits(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """Escape cancels turns, so ctrl+c is free to mean "discard this draft"."""
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        for char in "hello":
+            await pilot.press(char)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app._prompt.text == ""
+        assert app.is_running
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        assert "again to exit" in notices
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert not app.is_running
+
+
+async def test_ctrl_d_exits_only_from_an_empty_prompt(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        for char in "abc":
+            await pilot.press(char)
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+        assert app.is_running, "ctrl+d with text should delete, not quit"
+
+        app._prompt.clear()
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+        assert not app.is_running
+
+
+async def test_typing_a_slash_opens_the_completion_popup(hx_home: Path, tmp_path: Path) -> None:
+    """The placeholder has always promised this; now it happens."""
+    from hx.tui.widgets.autocomplete import Autocomplete
+
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        popup = app.query_one(Autocomplete)
+        assert popup.display is False
+
+        for key in ("slash", "c", "o"):
+            await pilot.press(key)
+        await pilot.pause()
+
+        assert popup.display is True
+        labels = [candidate.label for candidate in popup.completion.candidates]
+        assert "/copy" in labels and "/compact" in labels
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert popup.display is False
+
+
+async def test_tab_accepts_the_highlighted_completion(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        for key in ("slash", "t", "h", "e"):
+            await pilot.press(key)
+        await pilot.pause()
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app._prompt.text == "/theme"
+
+
+async def test_ctrl_up_walks_back_through_messages(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        transcript = app._transcript
+        transcript.add_user_message("first question")
+        transcript.start_assistant_message()
+        transcript.append_delta("first answer")
+        transcript.add_user_message("second question")
+        await pilot.pause()
+
+        await pilot.press("ctrl+up")
+        await pilot.pause()
+        assert transcript.cursor is not None
+        assert transcript.cursor.buffer == "second question"
+        assert "cursored" in transcript.cursor.classes
+
+        await pilot.press("ctrl+up")
+        await pilot.pause()
+        assert transcript.cursor.buffer == "first answer"
+
+        await pilot.press("ctrl+down")
+        await pilot.pause()
+        assert transcript.cursor.buffer == "second question"
+
+
+async def test_the_cursor_survives_the_bottom_of_the_list(hx_home: Path, tmp_path: Path) -> None:
+    """Stepping past the end should stop, not wrap round to the top."""
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        app._transcript.add_user_message("only one")
+        await pilot.pause()
+        for _ in range(3):
+            await pilot.press("ctrl+up")
+        await pilot.pause()
+        assert app._transcript.cursor.buffer == "only one"
+
+
+async def test_ctrl_x_copies_the_message_under_the_cursor(hx_home: Path, tmp_path: Path) -> None:
+    copied: list[str] = []
+    app = build_app(tmp_path)
+
+    async def fake_copy(text: str, **kwargs: Any) -> str:
+        copied.append(text)
+        return "pbcopy"
+
+    async with app.run_test() as pilot:
+        import hx.tui.clipboard as clipboard
+
+        original = clipboard.copy_text
+        clipboard.copy_text = fake_copy  # type: ignore[assignment]
+        try:
+            app._transcript.add_user_message("copy me")
+            await pilot.pause()
+            await pilot.press("ctrl+up")
+            await pilot.press("ctrl+x")
+            await pilot.pause()
+        finally:
+            clipboard.copy_text = original  # type: ignore[assignment]
+
+    assert copied == ["copy me"]
+
+
+async def test_copying_with_no_cursor_takes_the_last_answer(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        transcript = app._transcript
+        transcript.add_user_message("question")
+        transcript.start_assistant_message()
+        transcript.append_delta("the answer")
+        await pilot.pause()
+        assert app.last_message_text() == "the answer"
+
+
+async def test_expanding_with_a_cursor_touches_only_that_block(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        transcript = app._transcript
+        transcript.add_tool_block("a", "Bash", {"command": "ls"})
+        transcript.add_tool_block("b", "Bash", {"command": "pwd"})
+        await pilot.pause()
+
+        transcript.set_cursor(transcript._tools["a"])
+        transcript.toggle_expanded()
+
+        assert transcript._tools["a"].expanded is True
+        assert transcript._tools["b"].expanded is False
+
+
+async def test_expanding_with_no_cursor_still_means_all(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        transcript = app._transcript
+        transcript.add_tool_block("a", "Bash", {"command": "ls"})
+        transcript.add_tool_block("b", "Bash", {"command": "pwd"})
+        await pilot.pause()
+
+        transcript.toggle_expanded()
+
+        assert transcript._tools["a"].expanded is True
+        assert transcript._tools["b"].expanded is True
+
+
+async def test_the_startup_header_expands_to_the_full_key_list(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        header = app._header
+        compact = " ".join(str(row) for row in header.render().renderables)
+        assert "shows every key" in compact
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        expanded = " ".join(str(row) for row in header.render().renderables)
+        assert "Cycle permission mode" in expanded
+
+
+async def test_the_prompt_rules_track_focus(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._working.style_muted is False, "the prompt has focus at startup"
+
+
+async def test_ctrl_c_interrupts_a_running_turn_instead_of_exiting(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """Two presses of the universal stop chord must not tear down the session.
+
+    The prompt is empty while a turn streams, which is exactly the state that
+    arms the exit - so ctrl+c mid-answer used to quit HX instead of stopping it.
+    """
+
+    class SlowProvider:
+        name = "slow"
+
+        async def astream(self, request: Any) -> Any:
+            yield StreamDelta(text="thinking…")
+            await asyncio.sleep(30)
+            yield StreamEnd(stop_reason=StopReason.END_TURN)
+
+        async def aclose(self) -> None:
+            return None
+
+    app = build_app(tmp_path)
+    app.loop.provider = SlowProvider()
+
+    async with app.run_test() as pilot:
+        await app.submit("go")
+        await pilot.pause(0.1)
+
+        await app.action_clear()
+        await app.action_clear()
+
+        assert app.is_running, "ctrl+c during a turn must not exit"
+        for _ in range(30):
+            await pilot.pause(0.02)
+            notices = " ".join(str(n.render()) for n in app.query_one(Transcript).query("Notice"))
+            if "interrupted" in notices:
+                break
+        assert "interrupted" in notices
+
+
+async def test_a_stale_ctrl_c_does_not_arm_the_exit(hx_home: Path, tmp_path: Path) -> None:
+    """Arming has to expire with the activity that follows it, or a press from
+    an hour ago silently counts as the first of two."""
+    app = build_app(tmp_path)
+
+    async with app.run_test() as pilot:
+        await app.action_clear()
+        assert app._clear_armed
+
+        await app.submit("hello")
+        await pilot.pause(0.1)
+        assert not app._clear_armed, "submitting a turn disarms the pending exit"
+
+        await app.action_clear()
+        assert app.is_running
+        assert app._clear_armed, "and re-arms with its own warning first"

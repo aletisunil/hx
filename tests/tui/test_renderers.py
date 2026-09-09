@@ -14,6 +14,7 @@ from hx.tui.renderers import (
     ToolCall,
     count_changes,
     display_path,
+    expand_hint,
     render_diff,
     renderer_for,
 )
@@ -91,7 +92,7 @@ def test_command_output_keeps_the_tail_and_says_what_it_hid() -> None:
     body = _plain(renderer_for("Bash").body(call))
     assert "line 29" in body
     assert "line 0" not in body
-    assert "more lines" in body and "ctrl+r to expand" in body
+    assert "more lines" in body and expand_hint() in body
     assert "Took 4.2s" in body
 
 

@@ -87,22 +87,71 @@ it pipes cleanly.
 
 ### Keys
 
+Every key below is defined once, in `src/hx/keys.py`. `/help`, the hints line
+under the prompt and this table all read from that registry, and any of them can
+be rebound (see [Keybindings](#keybindings)).
+
 | Key | Does |
 |---|---|
 | `enter` | send |
-| `ctrl+j` | newline |
+| `ctrl+j` | newline (also `shift+enter`) |
 | `esc` | interrupt the current turn |
-| `ctrl+c` | cancel the current turn |
+| `ctrl+c` | clear the prompt; twice on an empty prompt exits |
+| `ctrl+d` | exit, when the prompt is empty |
+| `ctrl+z` | suspend to the background |
 | `shift+tab` | cycle permission mode |
 | `ctrl+p` | command palette |
-| `ctrl+r` | expand the last tool output |
+| `ctrl+l` | model picker |
+| `ctrl+o` | expand tool output (also `ctrl+r`) |
 | `ctrl+t` | toggle the todo sidebar |
-| `ctrl+d` | quit |
+| `ctrl+x` | copy the selected message to the clipboard |
+| `ctrl+up` | previous message |
+| `ctrl+down` | next message |
+| `pgup` | scroll the transcript up |
+| `pgdn` | scroll the transcript down |
+| `ctrl+home` | jump to the start of the transcript |
+| `ctrl+end` | jump back to the newest output |
 | `@path` | complete a file path |
 | `!command` | run a shell command directly, no model turn |
 
 `!` still goes through the permission engine and the sandbox — it skips the
 model, not the safety layers.
+
+The prompt is a readline-style editor: `ctrl+a`/`ctrl+e` for line start and end,
+`ctrl+b`/`ctrl+f` by character, `alt+b`/`alt+f` by word, `ctrl+w` and `alt+d` to
+kill a word, `ctrl+u` and `ctrl+k` to kill to the start or end of a line, then
+`ctrl+y` to yank it back and `alt+y` to walk further down the kill ring.
+`ctrl+z` undoes, `ctrl+shift+z` redoes.
+
+Typing `/` or `@` opens a completion list above the prompt; `tab` cycles it,
+`enter` accepts, `esc` dismisses.
+
+#### Copying
+
+`ctrl+x` copies the message the cursor is on, and `/copy` copies the last reply.
+HX writes through the platform's own clipboard tool first (`pbcopy`, `wl-copy`,
+`xclip`, `xsel`) and falls back to OSC 52, which is also always sent over SSH so
+the text lands on the machine you are actually sitting at.
+
+Because `ctrl+c` clears the prompt, drag-selecting in the transcript is your
+terminal's own selection rather than the TUI's — use your terminal's copy key
+for that. HX does not emit OSC 133 prompt markers yet, so shell-integration
+features that jump between prompts will not see HX's messages.
+
+#### Keybindings
+
+Any key can be rebound in `~/.hx/keybindings.json`, keyed by the action ids in
+`src/hx/keys.py`:
+
+```json
+{
+  "app.tools.expand": "ctrl+r",
+  "app.message.copy": ["ctrl+x", "alt+c"]
+}
+```
+
+Conflicts and unknown action names are reported as a notice at startup rather
+than being silently resolved.
 
 ### Commands
 
@@ -122,7 +171,8 @@ model, not the safety layers.
 | `/skills` | installed skills |
 | `/agents` | subagent types |
 | `/mcp` | server status |
-| `/theme [name]` | `dark`, `light`, `ansi` |
+| `/theme [name]` | `dark`, `light`, `ansi`, or any theme in `~/.hx/themes` |
+| `/copy` | copy the last reply to the clipboard |
 | `/init` | generate an `HX.md` for the project |
 | `/help` | list commands and keys |
 | `/quit` | exit (also `/exit`, `/q`) |
@@ -149,7 +199,8 @@ rule without discarding yours. Everything else is replaced.
 
 ```jsonc
 {
-  "theme": "dark",                    // dark | light | ansi
+  "theme": "dark",                    // dark | light | ansi, or a file in ~/.hx/themes
+  "quiet_startup": false,             // skip the startup header
   "telemetry": false,
 
   "models": {
@@ -184,8 +235,31 @@ rule without discarding yours. Everything else is replaced.
 ```
 
 Environment overrides: `HX_MODEL`, `HX_SUBAGENT_MODEL`, `HX_MAX_TOKENS`,
-`HX_PERMISSION_MODE`, `HX_SANDBOX`, `HX_COMPACT_AT`, `HX_THEME`. Also
-`HX_HOME` to relocate user state.
+`HX_PERMISSION_MODE`, `HX_SANDBOX`, `HX_COMPACT_AT`, `HX_THEME`,
+`HX_QUIET_STARTUP`. Also `HX_HOME` to relocate user state.
+
+### Themes
+
+A theme is a JSON file: a `vars` block of raw colours, and a `colors` block
+mapping semantic roles onto them. Drop one in `~/.hx/themes/mine.json` and
+`/theme mine` picks it up — no restart, no code change.
+
+```jsonc
+{
+  "name": "mine",
+  "dark": true,
+  "vars": { "green": "#b5bd68", "gray": "#808080" },
+  "colors": {
+    "background": "#18181e",
+    "success": "green",           // a vars key, or a literal
+    "muted": "gray"
+    // ...every role; a missing one is an error, not a silent black
+  }
+}
+```
+
+The role names are pi's, so [pi](https://github.com/earendil-works/pi) theme
+files load here unchanged. `src/hx/tui/themes/dark.json` is the reference.
 
 ### Where things live
 
@@ -194,6 +268,8 @@ Environment overrides: `HX_MODEL`, `HX_SUBAGENT_MODEL`, `HX_MAX_TOKENS`,
 | `~/.hx/settings.json` | your settings |
 | `~/.hx/auth.json` | API key, mode 0600 |
 | `~/.hx/models.json` | cached model catalogue, refreshed daily |
+| `~/.hx/themes/` | your themes, one JSON file each |
+| `~/.hx/keybindings.json` | your key overrides |
 | `~/.hx/sessions/` | transcripts, spilled tool output, subagent sessions |
 | `~/.hx/skills/`, `~/.hx/agents/` | your skills and agents |
 | `./.hx/settings.json` | project settings, checked in if you like |
@@ -334,6 +410,13 @@ OPENROUTER_API_KEY=... uv run pytest -m live
 Tests marked `sandbox` exercise the real OS sandbox and are skipped where no
 backend exists.
 
+The TUI has SVG layout snapshots. Read the diff before accepting a change to
+them - they exist to catch a frame that quietly lost a row:
+
+```sh
+uv run pytest tests/tui/test_snapshots.py --snapshot-update
+```
+
 ### Layout
 
 ```
@@ -344,7 +427,9 @@ src/hx/
   tools/        Bash, Read, Write, Edit, Glob, Grep, TodoWrite, Task, output capping
   permissions/  rule engine, shell decomposition, Seatbelt/bubblewrap
   skills/ agents/ mcp/
-  tui/          Textual app, commands, theme, per-tool renderers, widgets
+  keys.py       keybinding registry: ids, defaults, descriptions, user overrides
+  tui/          Textual app, commands, per-tool renderers, widgets
+    themes/     the shipped palettes, as JSON
 ```
 
 The core is headless and emits events; the TUI and print mode are both just
