@@ -894,6 +894,34 @@ async def test_tab_accepts_the_highlighted_completion(hx_home: Path, tmp_path: P
         assert app._prompt.text == "/theme"
 
 
+async def test_enter_runs_an_exact_slash_command_with_completion_open(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A complete command executes on the first Enter, even with autocomplete open."""
+    from hx.tui.widgets.palette import ModelPicker
+
+    app = build_app(tmp_path)
+    app.models._models["openai/gpt-5"] = _gpt5()
+
+    async with app.run_test() as pilot:
+        old_session = app.loop.session.meta.session_id
+        for key in ("slash", "c", "l", "e", "a", "r"):
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+
+        assert app._prompt.text == ""
+        assert app.loop.session.meta.session_id != old_session
+
+        for key in ("slash", "m", "o", "d", "e", "l"):
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+
+        assert isinstance(app.screen, ModelPicker)
+        await pilot.press("escape")
+
+
 async def test_ctrl_up_walks_back_through_messages(hx_home: Path, tmp_path: Path) -> None:
     app = build_app(tmp_path)
     async with app.run_test() as pilot:

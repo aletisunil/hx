@@ -249,7 +249,18 @@ class PromptInput(TextArea):
             completion.move(-1 if key == "up" else 1)
             self._sync_popup()
             return True
-        if self._matches(key, "tui.input.complete") or self._matches(key, "tui.input.submit"):
+        if self._matches(key, "tui.input.submit"):
+            # Once the prompt already contains the highlighted completion,
+            # Enter means submit. Treating it as another completion acceptance
+            # made exact slash commands such as /clear and /model require a
+            # surprising second Enter.
+            candidate = completion.current
+            if candidate is not None and self.text == completion.prefix + candidate.value:
+                self._submit()
+            else:
+                self.accept_completion()
+            return True
+        if self._matches(key, "tui.input.complete"):
             self.accept_completion()
             return True
         if self._matches(key, "app.interrupt"):
