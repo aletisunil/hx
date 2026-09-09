@@ -32,6 +32,7 @@ Usage:
   hx -p, --print PROMPT     Run one prompt headlessly and print the result
   hx resume [SESSION_ID]    Resume a previous session
   hx mcp list|add|remove    Manage MCP servers
+  hx auth [set|clear]       Show or change the OpenRouter API key
   hx upgrade                Update hx to the latest version
   hx --version              Show version
   hx --help                 Show this message
@@ -79,6 +80,8 @@ def _dispatch(args: list[str]) -> int:
         return run_upgrade_command()
     if parsed.command == "mcp":
         return run_mcp_command(list(parsed.rest))
+    if parsed.command == "auth":
+        return run_auth_command(list(parsed.rest))
     if parsed.command == "print":
         return run_print_command(parsed)
     return run_tui_command(parsed)
@@ -123,7 +126,7 @@ def parse_args(args: list[str]) -> ParsedArgs:
 
     if positional:
         head, *tail = positional
-        if head in {"resume", "mcp", "upgrade"}:
+        if head in {"resume", "mcp", "upgrade", "auth"}:
             parsed.command = head
             parsed.rest = tuple(tail)
             if head == "resume" and tail:
@@ -418,7 +421,16 @@ def run_tui_command(parsed: ParsedArgs) -> int:
             await runtime.connect_mcp()
             await runtime.refresh_models_if_stale()
             await run_tui(
-                runtime.loop, runtime.bus, runtime.settings, runtime.models, runtime.api_key
+                runtime.loop,
+                runtime.bus,
+                runtime.settings,
+                runtime.models,
+                runtime.api_key,
+                sandbox_active=runtime.sandbox_active,
+                sandbox_backend=runtime.sandbox_backend,
+                skills=runtime.skills,
+                agents=runtime.agents,
+                mcp=runtime.mcp,
             )
         finally:
             runtime.bus.close()
@@ -569,6 +581,63 @@ async def _probe_servers(configs: list[Any]) -> list[Any]:
         return await manager.connect_all()
     finally:
         await manager.close_all()
+
+
+AUTH_USAGE = """\
+hx auth              Show whether a key is set, and where it comes from
+hx auth set          Paste a new key (hidden) and save it to ~/.hx/auth.json
+hx auth clear        Remove the saved key
+
+The environment (HX_OPENROUTER_API_KEY, then OPENROUTER_API_KEY) takes
+precedence over the saved file.
+"""
+
+
+def run_auth_command(args: list[str]) -> int:
+    """Show or change the stored OpenRouter key.
+
+    The TUI has /configure; this is the same thing for a headless machine,
+    where there is no interface to prompt from mid-session.
+    """
+    import json
+
+    from hx.providers.openrouter import api_key_source, load_api_key, mask_api_key
+
+    action = args[0] if args else "status"
+
+    if action == "status":
+        source = api_key_source()
+        if source is None:
+            print("No OpenRouter API key set. Run `hx auth set`.")
+            return 1
+        print(f"Key {mask_api_key(load_api_key())} from {source}")
+        if source.startswith("environment"):
+            print("Note: the environment overrides anything saved in ~/.hx/auth.json.")
+        return 0
+
+    if action == "set":
+        if not prompt_for_api_key():
+            print("No key entered.", file=sys.stderr)
+            return 1
+        return 0
+
+    if action == "clear":
+        path = auth_file()
+        if not path.is_file():
+            print("No saved key to remove.")
+            return 0
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        data.pop("openrouter_api_key", None)
+        path.write_text(json.dumps(data, indent=2))
+        path.chmod(0o600)
+        print(f"Removed the saved key from {path}.")
+        return 0
+
+    print(AUTH_USAGE, file=sys.stderr)
+    return 2
 
 
 def run_upgrade_command() -> int:

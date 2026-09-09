@@ -139,6 +139,16 @@ class OpenRouterProvider:
         usage.latency_ms = (time.monotonic() - started) * 1000
         yield StreamEnd(stop_reason=state.stop_reason, usage=usage)
 
+    def set_api_key(self, key: str) -> None:
+        """Swap the credential on a live provider.
+
+        The header is baked into the client at construction, so it has to be
+        rewritten too - otherwise a key changed mid-session would be saved to
+        disk and then ignored until restart.
+        """
+        self.api_key = key
+        self._client.headers["Authorization"] = f"Bearer {key}"
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -406,6 +416,33 @@ def load_api_key() -> str:
         "No OpenRouter API key found. Set OPENROUTER_API_KEY, or run `hx` interactively "
         "to save one. Get a key at https://openrouter.ai/keys"
     )
+
+
+def api_key_source() -> str | None:
+    """Where the active key comes from, or ``None`` when there is not one.
+
+    The environment wins over the saved file, so this is what stops a user
+    saving a new key through the UI and wondering why nothing changed.
+    """
+    for name in ("HX_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"):
+        if os.environ.get(name):
+            return f"environment ({name})"
+
+    path = auth_file()
+    if path.is_file():
+        try:
+            if json.loads(path.read_text()).get("openrouter_api_key"):
+                return str(path)
+        except (OSError, json.JSONDecodeError):
+            return None
+    return None
+
+
+def mask_api_key(key: str) -> str:
+    """A key fragment safe to display. Never the whole thing."""
+    if len(key) <= 12:
+        return "…"
+    return f"{key[:6]}…{key[-4:]}"
 
 
 def save_api_key(key: str) -> None:

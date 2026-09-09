@@ -304,6 +304,40 @@ async def cmd_init(ctx: CommandContext, args: str) -> None:
     await ctx.app.submit_to_model(INIT_PROMPT)
 
 
+async def cmd_configure(ctx: CommandContext, args: str) -> None:
+    """``/configure`` - session settings, and set or replace the OpenRouter key."""
+    from hx.providers.openrouter import api_key_source, mask_api_key, save_api_key
+    from hx.tui.widgets.configure import ConfigureModal, build_summary
+
+    source = api_key_source()
+    hint = f"{mask_api_key(ctx.app.api_key)} (from {source})" if source else "not set"
+
+    warning = ""
+    if source and source.startswith("environment"):
+        # Saving to the file while an env var is set would look like a no-op.
+        warning = (
+            f"{source} takes precedence over the saved key. "
+            "Unset it for a new key to take effect in future sessions."
+        )
+
+    key = await ctx.app.push_screen_wait(ConfigureModal(build_summary(ctx.app), hint, warning))
+    if not key:
+        return
+
+    try:
+        save_api_key(key)
+    except OSError as exc:
+        ctx.app.notice(f"Could not save the key: {exc}", "error")
+        return
+
+    ctx.app.set_api_key(key)
+    # The key itself never reaches the transcript.
+    ctx.app.notice(
+        f"API key saved ({mask_api_key(key)}) and applied to this session.",
+        "success",
+    )
+
+
 async def cmd_theme(ctx: CommandContext, args: str) -> None:
     """``/theme [dark|light|ansi]`` - switch palette for this session."""
     from hx.tui.theme import PALETTES, THEME
@@ -353,6 +387,7 @@ def build_default_commands() -> CommandRegistry:
         Command("mode", "Set the permission mode", cmd_mode, "[mode]", takes_args=True),
         Command("init", "Generate an HX.md for this project", cmd_init),
         Command("theme", "Switch the colour palette", cmd_theme, "[name]", takes_args=True),
+        Command("configure", "Settings and the OpenRouter API key", cmd_configure),
         Command("help", "List commands and keys", cmd_help),
         Command("quit", "Exit HX", cmd_quit),
     ):

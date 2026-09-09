@@ -159,3 +159,39 @@ ModalScreen {
     margin: 0 0 0 1;
     min-width: 14;
 }
+
+/* Configuration modal. Sized to content, like the permission prompt. */
+#configure {
+    width: 80%;
+    max-width: 90;
+    height: auto;
+    padding: 1 2;
+    border: round $accent;
+    background: $surface;
+}
+
+#configure-summary {
+    height: auto;
+    padding: 1 0;
+}
+
+#configure-warning {
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+#configure-key {
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+#configure-actions {
+    height: auto;
+    padding: 1 0 0 0;
+    align-horizontal: right;
+}
+
+#configure-actions Button {
+    margin: 0 0 0 1;
+    min-width: 12;
+}

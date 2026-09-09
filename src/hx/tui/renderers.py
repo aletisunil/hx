@@ -7,8 +7,8 @@ what happened in the vocabulary of the tool, and unknown tools - MCP servers,
 extensions - fall back to a generic header rather than to nothing.
 
 Renderers are pure: they take the call, its output and its metadata, and return
-Rich renderables. They never touch the loop, so they can be unit-tested without
-a running app and reused by the print-mode renderer.
+Rich renderables. They never touch the loop or a widget, so they can be
+unit-tested without a running app.
 """
 
 from __future__ import annotations

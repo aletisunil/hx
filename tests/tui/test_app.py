@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from hx.config import load_settings
 from hx.core.context import ContextBuilder
@@ -410,3 +410,116 @@ async def test_the_theme_setting_reaches_textual(hx_home: Path, tmp_path: Path) 
             await pilot.pause()
             assert app.theme == f"hx-{name}"
             assert THEME.palette.name == name
+
+
+async def test_model_command_switches_the_model(hx_home: Path, tmp_path: Path) -> None:
+    """/model with an unambiguous query switches without opening the picker."""
+    from hx.providers.models import CacheMode, ModelInfo, ModelPricing
+
+    app = build_app(tmp_path)
+    app.models._models = {
+        "openai/gpt-5": ModelInfo(
+            id="openai/gpt-5",
+            name="GPT-5",
+            context_window=400_000,
+            max_output_tokens=8192,
+            pricing=ModelPricing(prompt=1e-6, completion=2e-6),
+            cache_mode=CacheMode.IMPLICIT,
+        ),
+        MODEL: app.models.get_or_default(MODEL),
+    }
+
+    async with app.run_test() as pilot:
+        await app.submit("/model gpt-5")
+        await pilot.pause()
+
+        assert app.loop.model == "openai/gpt-5"
+        assert app.loop.session.meta.model == "openai/gpt-5"
+        assert app.query_one_status().model == "openai/gpt-5"
+        assert app.query_one_status().context_window == 400_000
+
+
+async def test_model_command_reports_an_empty_catalogue(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    app.models._models = {}
+    async with app.run_test() as pilot:
+        await app.submit("/model")
+        await pilot.pause()
+        text = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+    assert "/models refresh" in text
+
+
+async def test_configure_saves_and_applies_a_new_key(hx_home: Path, tmp_path: Path) -> None:
+    """A key that can only be set at first run leaves a revoked key unfixable."""
+    from hx.providers.openrouter import load_api_key
+    from hx.tui.widgets.configure import ConfigureModal
+
+    class FakeProviderWithKey:
+        name = "fake"
+
+        def __init__(self) -> None:
+            self.api_key = "old"
+            self.requests: list[object] = []
+
+        def set_api_key(self, key: str) -> None:
+            self.api_key = key
+
+        async def aclose(self) -> None:
+            return None
+
+    app = build_app(tmp_path)
+    app.loop.provider = FakeProviderWithKey()
+
+    async with app.run_test() as pilot:
+        worker = app.run_worker(app.commands.dispatch(app._command_context(), "/configure"))
+        await pilot.pause(0.1)
+
+        modal = app.screen
+        assert isinstance(modal, ConfigureModal)
+        modal.query_one("#configure-input", Input).value = "sk-or-v1-newkey0123456789"
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        await worker.wait()
+
+        assert app.loop.provider.api_key == "sk-or-v1-newkey0123456789"
+        assert app.api_key == "sk-or-v1-newkey0123456789"
+
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        assert "sk-or-…6789" in notices
+        assert "newkey0123456789" not in notices, "the key must never reach the transcript"
+
+    assert load_api_key() == "sk-or-v1-newkey0123456789"
+    assert (hx_home / "auth.json").stat().st_mode & 0o777 == 0o600
+
+
+async def test_configure_warns_when_the_environment_wins(
+    hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saving a key while an env var is set looks like a no-op otherwise."""
+    from hx.tui.widgets.configure import ConfigureModal
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-from-the-environment")
+    app = build_app(tmp_path)
+
+    async with app.run_test() as pilot:
+        app.run_worker(app.commands.dispatch(app._command_context(), "/configure"))
+        await pilot.pause(0.1)
+
+        modal = app.screen
+        assert isinstance(modal, ConfigureModal)
+        warning = str(modal.query_one("#configure-warning", Static).render())
+        assert "OPENROUTER_API_KEY" in warning
+        assert "precedence" in warning
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+
+async def test_configure_cancelled_changes_nothing(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        app.run_worker(app.commands.dispatch(app._command_context(), "/configure"))
+        await pilot.pause(0.1)
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+    assert not (hx_home / "auth.json").exists()

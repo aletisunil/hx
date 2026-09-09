@@ -22,7 +22,9 @@ from hx.providers.openrouter import (
     MAX_CACHE_CONTROL_MARKERS,
     MissingAPIKey,
     OpenRouterProvider,
+    api_key_source,
     load_api_key,
+    mask_api_key,
     parse_usage,
     save_api_key,
 )
@@ -112,3 +114,33 @@ def test_missing_api_key_is_actionable(hx_home: Path, monkeypatch: pytest.Monkey
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with pytest.raises(MissingAPIKey, match=re.escape("openrouter.ai/keys")):
         load_api_key()
+
+
+def test_key_masking_never_shows_the_middle() -> None:
+    assert mask_api_key("sk-or-v1-0123456789abcdef") == "sk-or-…cdef"
+    assert "0123456789" not in mask_api_key("sk-or-v1-0123456789abcdef")
+    assert mask_api_key("short") == "…"
+
+
+def test_api_key_source_prefers_the_environment(
+    hx_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HX_OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert api_key_source() is None
+
+    save_api_key("sk-or-from-file")
+    assert api_key_source() == str(hx_home / "auth.json")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-from-env")
+    assert api_key_source() == "environment (OPENROUTER_API_KEY)"
+
+
+def test_a_swapped_key_reaches_the_request_header(project: Path) -> None:
+    """Saving a key to disk is useless if the live client keeps the old header."""
+    provider = OpenRouterProvider(api_key="old-key")
+    assert provider._client.headers["Authorization"] == "Bearer old-key"
+
+    provider.set_api_key("new-key")
+    assert provider.api_key == "new-key"
+    assert provider._client.headers["Authorization"] == "Bearer new-key"

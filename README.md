@@ -9,8 +9,12 @@ curl -fsSL https://raw.githubusercontent.com/sunilaleti/hx/main/install.sh | sh
 ```
 
 Then run `hx` in any project directory. On first run it prompts for an
-OpenRouter API key and saves it to `~/.hx/auth.json` (mode 0600); you can also
-set `OPENROUTER_API_KEY`.
+OpenRouter API key and saves it to `~/.hx/auth.json` (mode 0600).
+
+To change it later, use `/configure` in the TUI or `hx auth set` from a shell.
+`hx auth` shows whether a key is set and where it comes from, masked. The
+environment (`HX_OPENROUTER_API_KEY`, then `OPENROUTER_API_KEY`) takes
+precedence over the saved file, and both surfaces say so.
 
 ## Usage
 
@@ -29,7 +33,7 @@ same permission engine and sandbox, without spending a model turn.
 
 Commands: `/model` `/models` `/clear` `/compact` `/resume` `/cost` `/context`
 `/permissions` `/mode` `/skills` `/agents` `/mcp` `/todos` `/init` `/theme`
-`/help` `/quit`. `/help` lists them with keys.
+`/configure` `/help` `/quit`. `/help` lists them with keys.
 
 The status bar carries the numbers that matter: model, context used against the
 window, tokens in/out, **cache read and write tokens with hit rate**, session

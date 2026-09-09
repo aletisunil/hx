@@ -120,6 +120,15 @@ class ToolBlock(Static):
     def append(self, chunk: str) -> None:
         self.output += chunk
 
+    def on_click(self) -> None:
+        """Clicking a block expands it, the same as Ctrl+R on all of them.
+
+        The output is right there under the pointer; making the user find a
+        keystroke to see the rest of it is a needless step.
+        """
+        self.expanded = not self.expanded
+        self.refresh(layout=True)
+
     def finish(
         self,
         summary: str,

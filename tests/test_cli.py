@@ -77,3 +77,57 @@ def test_onboarding_is_skipped_when_not_interactive(
 
 def test_parsed_args_defaults_to_the_tui() -> None:
     assert parse_args([]) == ParsedArgs(command="tui")
+
+
+def test_auth_is_a_recognised_command() -> None:
+    assert parse_args(["auth"]).command == "auth"
+    assert parse_args(["auth", "set"]).rest == ("set",)
+
+
+def test_auth_status_reports_no_key(hx_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from hx.cli import run_auth_command
+
+    assert run_auth_command([]) == 1
+    assert "hx auth set" in capsys.readouterr().out
+
+
+def test_auth_status_names_the_source_and_masks_the_key(
+    hx_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from hx.cli import run_auth_command
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secretmaterial9999")
+    assert run_auth_command([]) == 0
+
+    out = capsys.readouterr().out
+    assert "sk-or-…9999" in out
+    assert "secretmaterial" not in out, "the key must never be printed in full"
+    assert "OPENROUTER_API_KEY" in out
+    assert "overrides" in out
+
+
+def test_auth_clear_removes_the_saved_key(
+    hx_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from hx.cli import run_auth_command
+    from hx.providers.openrouter import MissingAPIKey, load_api_key, save_api_key
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("HX_OPENROUTER_API_KEY", raising=False)
+
+    save_api_key("sk-or-v1-tobecleared0000")
+    assert load_api_key() == "sk-or-v1-tobecleared0000"
+
+    assert run_auth_command(["clear"]) == 0
+    assert (hx_home / "auth.json").stat().st_mode & 0o777 == 0o600
+    with pytest.raises(MissingAPIKey):
+        load_api_key()
+
+
+def test_auth_rejects_an_unknown_subcommand(
+    hx_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from hx.cli import run_auth_command
+
+    assert run_auth_command(["nonsense"]) == 2
+    assert "hx auth" in capsys.readouterr().err

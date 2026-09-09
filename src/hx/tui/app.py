@@ -365,6 +365,18 @@ class HXApp(App[None]):
         if chosen:
             await self.submit(f"/{chosen}")
 
+    def set_api_key(self, key: str) -> None:
+        """Apply a new credential to the running provider.
+
+        Saved keys are picked up on the next start; this is what makes the
+        change take effect now, without losing the session.
+        """
+        self.api_key = key
+        provider = getattr(self.loop, "provider", None)
+        setter = getattr(provider, "set_api_key", None)
+        if setter is not None:
+            setter(key)
+
     def notice(self, text: str, level: str = "info") -> None:
         self._transcript.add_notice(text, level)
 
@@ -455,6 +467,21 @@ async def run_tui(
     models: ModelRegistry | None = None,
     api_key: str = "",
     sandbox_active: bool = True,
+    sandbox_backend: str = "none",
+    skills: Any = None,
+    agents: Any = None,
+    mcp: Any = None,
 ) -> None:
-    app = HXApp(loop, bus, settings, models=models, api_key=api_key, sandbox_active=sandbox_active)
+    app = HXApp(
+        loop,
+        bus,
+        settings,
+        models=models,
+        api_key=api_key,
+        sandbox_active=sandbox_active,
+        sandbox_backend=sandbox_backend,
+        skills=skills,
+        agents=agents,
+        mcp=mcp,
+    )
     await app.run_async()
