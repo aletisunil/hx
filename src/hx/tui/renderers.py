@@ -34,7 +34,13 @@ BASH_COLLAPSED_LINES = 8
 """Command output earns a little more room: it is usually the answer itself,
 not a preview of one."""
 
-EXPAND_HINT = "ctrl+r to expand"
+
+def expand_hint() -> str:
+    """``ctrl+o to expand`` - the key comes from the registry, so a rebind moves it."""
+    from hx.keys import primary_key
+
+    return f"{primary_key('app.tools.expand')} to expand"
+
 
 MAX_DIFF_LINES = 200
 """Diff lines shown in a permission prompt. Scrolling past 4000 lines to find
@@ -110,8 +116,11 @@ def _lexer_for(path: str) -> str | None:
     }.get(suffix)
 
 
-def _syntax_theme() -> str:
-    return "github-dark" if THEME.palette.dark else "sas"
+def _syntax_theme() -> Any:
+    """Pygments style for the active palette, so code follows the theme."""
+    from hx.tui.theme import syntax_style
+
+    return syntax_style()
 
 
 def highlight(code: str, path: str) -> RenderableType:
@@ -132,7 +141,7 @@ def truncate_hint(hidden: int) -> Text:
     """``… (12 more lines, ctrl+r to expand)`` - pi's affordance, verbatim."""
     return Text.assemble(
         (f"… ({hidden} more line{'s' if hidden != 1 else ''}, ", THEME.fg("muted")),
-        (EXPAND_HINT, THEME.fg("dim")),
+        (expand_hint(), THEME.fg("dim")),
         (")", THEME.fg("muted")),
     )
 

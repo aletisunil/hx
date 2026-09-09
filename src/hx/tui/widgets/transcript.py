@@ -122,7 +122,7 @@ class ToolBlock(Static):
         self.output += chunk
 
     def on_click(self) -> None:
-        """Clicking a block expands it, the same as Ctrl+R on all of them.
+        """Clicking a block expands it, the same as the expand key does.
 
         The output is right there under the pointer; making the user find a
         keystroke to see the rest of it is a needless step.
@@ -222,6 +222,8 @@ class Transcript(VerticalScroll):
         self._tools: dict[str, ToolBlock] = {}
         self._order: list[str] = []
         self.expanded = False
+        #: Block the keyboard is pointing at, or None while following the tail.
+        self.cursor: Static | None = None
 
     def _follow(self) -> None:
         if self.is_vertical_scroll_end:
@@ -291,18 +293,96 @@ class Transcript(VerticalScroll):
         self._follow()
 
     def toggle_expanded(self) -> bool:
-        """Expand or collapse every tool block at once.
+        """Expand tool output: the cursored block alone, or all of them.
 
-        Each collapsed block advertises "ctrl+r to expand", so the key has to
-        mean that for all of them; toggling only the newest would make the hint
-        a lie on every block above it. Returns the new state.
+        With no cursor the key means "all", because every collapsed block
+        advertises the same shortcut and toggling only the newest would make
+        that hint a lie on each block above it. Once the user has moved the
+        cursor they have named a block, so the key applies to that one.
+        Returns the resulting state of whatever was toggled.
         """
+        cursored = self.cursor
+        if isinstance(cursored, ToolBlock):
+            cursored.expanded = not cursored.expanded
+            cursored.refresh(layout=True)
+            return cursored.expanded
+
         self.expanded = not self.expanded
         for block in self._tools.values():
             block.expanded = self.expanded
             block.refresh(layout=True)
         self._follow()
         return self.expanded
+
+    # -- Keyboard navigation ------------------------------------------------
+    #
+    # Focus stays in the prompt the whole time, as it does in pi: the reader
+    # scrolls and steps through messages without ever losing the ability to
+    # start typing. So these are driven by app-level bindings, not by focus.
+
+    def page_up(self) -> None:
+        self.scroll_page_up(animate=False)
+
+    def page_down(self) -> None:
+        self.scroll_page_down(animate=False)
+
+    def scroll_to_top(self) -> None:
+        self.scroll_home(animate=False)
+
+    def scroll_to_bottom(self) -> None:
+        """Back to the tail, and following it again."""
+        self.set_cursor(None)
+        self.scroll_end(animate=False)
+
+    def _navigable(self) -> list[Static]:
+        """Blocks the cursor stops on: the two halves of an exchange.
+
+        Tool blocks and notices are skipped. Stepping through forty of them to
+        reach the previous question is exactly the scrolling this replaces.
+        """
+        return [
+            child
+            for child in self.children
+            if isinstance(child, MessageBlock) and child.role in {"user", "assistant"}
+        ]
+
+    def set_cursor(self, block: Static | None) -> None:
+        if self.cursor is not None:
+            self.cursor.remove_class("cursored")
+        self.cursor = block
+        if block is not None:
+            block.add_class("cursored")
+            self.scroll_to_widget(block, animate=False, top=True)
+
+    def move_cursor(self, delta: int) -> Static | None:
+        """Step to the next or previous message, and show it.
+
+        Starting from the bottom, so the first press goes to the last message
+        rather than the first one - which is where the reader just was.
+        """
+        blocks = self._navigable()
+        if not blocks:
+            return None
+        if self.cursor is None or self.cursor not in blocks:
+            index = len(blocks) - 1 if delta < 0 else 0
+        else:
+            index = blocks.index(self.cursor) + delta
+            index = max(0, min(len(blocks) - 1, index))
+        self.set_cursor(blocks[index])
+        return blocks[index]
+
+    def cursored_text(self) -> str | None:
+        """Text of the cursored block, falling back to the last message.
+
+        The fallback is what makes the copy key useful without navigating
+        first: the thing a user most often wants is the answer just given.
+        """
+        if isinstance(self.cursor, MessageBlock):
+            return self.cursor.buffer
+        for child in reversed(list(self.children)):
+            if isinstance(child, MessageBlock) and child.role == "assistant":
+                return child.buffer
+        return None
 
     def add_notice(self, text: str, level: str = "info") -> None:
         """System notices: compaction, model switch, sandbox degraded."""
@@ -312,6 +392,7 @@ class Transcript(VerticalScroll):
     def clear_all(self) -> None:
         self._current = None
         self._thinking = None
+        self.cursor = None
         self._tools.clear()
         self._order.clear()
         self.remove_children()
