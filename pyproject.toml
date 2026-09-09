@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hx-cli"
-version = "0.0.1"
+dynamic = ["version"]
 description = "HX - a terminal coding agent"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,6 +43,11 @@ hx = "hx.cli:main"
 [project.urls]
 Homepage = "https://github.com/aletisunil/hx"
 Issues = "https://github.com/aletisunil/hx/issues"
+
+# The version lives in the package, not here - three hand-maintained copies
+# is how `hx --version` ends up disagreeing with what is on PyPI.
+[tool.hatch.version]
+path = "src/hx/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hx"]

@@ -171,3 +171,19 @@ def test_documented_cli_flags_are_accepted(readme: str) -> None:
             continue
         value = {"--model": "m", "--mode": "plan", "--cwd": "."}.get(flag)
         parse_args([flag, value] if value else [flag])
+
+
+def test_the_version_has_exactly_one_source() -> None:
+    """Three hand-maintained copies is how `hx --version` ends up disagreeing
+    with what is on PyPI."""
+    from importlib.metadata import version
+
+    import hx
+    from hx.mcp.client import CLIENT_INFO
+
+    assert version("hx-cli") == hx.__version__
+    assert CLIENT_INFO["version"] == hx.__version__
+
+    pyproject = (README.parent / "pyproject.toml").read_text()
+    assert 'dynamic = ["version"]' in pyproject
+    assert not re.search(r"^version = ", pyproject, re.M), "pyproject pins a second copy"

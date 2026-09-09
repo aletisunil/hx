@@ -392,5 +392,9 @@ streaming with prefix caching and accurate cost accounting, session persistence
 and resume, the tool suite, the permission engine and OS sandbox, late
 injection, compaction, output capping, skills, subagents, MCP, and the TUI.
 
-Not yet released. The `live` tests — which prove the real wire format, tool use
-and a genuine cache hit — are written but need a key to run.
+Published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/), released
+from CI on a tag.
+
+The one thing still unproven is a live OpenRouter call: the `live` tests exist
+and cover the wire format, tool use and a genuine cache hit, but they need a
+key and are deselected by default.

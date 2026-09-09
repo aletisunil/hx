@@ -18,8 +18,10 @@ from typing import Any
 
 import httpx
 
+from hx import __version__
+
 PROTOCOL_VERSION = "2025-06-18"
-CLIENT_INFO = {"name": "hx", "version": "0.0.1"}
+CLIENT_INFO = {"name": "hx", "version": __version__}
 
 log = logging.getLogger(__name__)
 
