@@ -179,6 +179,61 @@ async def test_escape_cancels_a_streaming_turn(hx_home: Path, tmp_path: Path) ->
         assert "interrupted" in notices
 
 
+async def test_prompt_stays_editable_and_queues_while_streaming(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    class QueuedProvider:
+        name = "queued"
+
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+            self.release_first = asyncio.Event()
+
+        async def astream(self, request: Any) -> Any:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                yield StreamDelta(text="working…")
+                await self.release_first.wait()
+            else:
+                yield StreamDelta(text="follow-up done")
+            yield StreamEnd(stop_reason=StopReason.END_TURN)
+
+        async def aclose(self) -> None:
+            return None
+
+    app = build_app(tmp_path)
+    provider = QueuedProvider()
+    app.loop.provider = provider
+
+    async with app.run_test() as pilot:
+        await app.submit("first")
+        await pilot.pause(0.1)
+
+        prompt = app.query_one(PromptInput)
+        assert not prompt.read_only
+        for key in ("f", "o", "l", "l", "o", "w", "space", "u", "p"):
+            await pilot.press(key)
+        assert prompt.text == "follow up"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert prompt.text == ""
+        assert app._queued == ["follow up"]
+        assert len(provider.requests) == 1
+
+        provider.release_first.set()
+        for _ in range(30):
+            await pilot.pause(0.02)
+            if len(provider.requests) == 2:
+                break
+
+        assert len(provider.requests) == 2
+        user_messages = [
+            message.text() for message in app.loop.session.messages if message.role == "user"
+        ]
+        assert user_messages == ["first", "follow up"]
+
+
 async def test_permission_modal_shows_the_diff_before_approval(
     hx_home: Path, tmp_path: Path
 ) -> None:

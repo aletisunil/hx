@@ -21,6 +21,7 @@ from hx.tui.widgets.autocomplete import Autocomplete, Candidate, Completion
 MAX_HISTORY = 500
 
 PLACEHOLDER = "Ask HX…  (/ for commands)"
+RUNNING_PLACEHOLDER = "Ask HX…  (Enter to queue)"
 
 #: Actions that have to beat TextArea's own bindings. A focused widget wins in
 #: Textual, so ctrl+c would copy and ctrl+d would delete a character before the
@@ -377,11 +378,13 @@ class PromptInput(TextArea):
             return
         popup.show(self.completion)
 
-    def set_enabled(self, enabled: bool) -> None:
-        """Disabled while a turn streams; queued input is submitted after."""
-        self.read_only = not enabled
-        interrupt = KEYMAP.text("app.interrupt")
-        self.set_placeholder(PLACEHOLDER if enabled else f"{interrupt} to interrupt…")
+    def set_running(self, running: bool) -> None:
+        """Reflect turn state without locking the user's draft.
+
+        Submissions made while a turn is running are queued by ``HXApp``.  The
+        prompt must stay editable so the user can prepare and submit them.
+        """
+        self.set_placeholder(RUNNING_PLACEHOLDER if running else PLACEHOLDER)
 
 
 class FileCompleter:

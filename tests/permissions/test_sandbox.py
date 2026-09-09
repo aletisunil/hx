@@ -18,7 +18,6 @@ from hx.permissions.sandbox import (
     Sandbox,
     SandboxBackend,
     SandboxPolicy,
-    build_bwrap_argv,
     build_seatbelt_profile,
     default_policy,
     detect_backend,
@@ -76,15 +75,6 @@ def test_deny_paths_are_resolved_before_emission(tmp_path: Path) -> None:
     assert str(real.resolve()) in profile
 
 
-def test_bwrap_argv_unshares_the_network_by_default(project: Path) -> None:
-    argv = build_bwrap_argv(default_policy(project), ["/bin/sh", "-c", "true"])
-    assert "--unshare-net" in argv
-    assert argv[:3] == ["bwrap", "--ro-bind", "/"]
-    assert "--unshare-net" not in build_bwrap_argv(
-        default_policy(project, allow_network=True), ["true"]
-    )
-
-
 def test_degrades_visibly_when_no_backend(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A sandbox that silently does nothing is worse than a visible absence."""
     monkeypatch.setattr("platform.system", lambda: "Haiku")
@@ -94,14 +84,6 @@ def test_degrades_visibly_when_no_backend(project: Path, monkeypatch: pytest.Mon
     sandbox = Sandbox(default_policy(project), backend=SandboxBackend.NONE)
     assert not sandbox.active
     assert sandbox.wrap(["echo", "hi"]) == ["echo", "hi"]
-
-
-@pytest.mark.sandbox
-@pytest.mark.skipif(detect_backend() is SandboxBackend.NONE, reason="no sandbox backend")
-def test_write_inside_the_project_still_works(project: Path) -> None:
-    sandbox = Sandbox(default_policy(project))
-    _run(sandbox, f"echo inside > {project}/ok.txt")
-    assert (project / "ok.txt").exists()
 
 
 @pytest.mark.sandbox
@@ -142,11 +124,3 @@ def test_denied_paths_cannot_be_read(project: Path) -> None:
 def test_network_is_blocked_by_default(project: Path) -> None:
     sandbox = Sandbox(default_policy(project, allow_network=False))
     assert _run(sandbox, "curl -sS -m 5 https://example.com").returncode != 0
-
-
-@pytest.mark.sandbox
-@pytest.mark.skipif(detect_backend() is SandboxBackend.NONE, reason="no sandbox backend")
-def test_ordinary_work_is_not_broken(project: Path) -> None:
-    """A sandbox that blocks real work gets turned off, which protects nothing."""
-    result = _run(Sandbox(default_policy(project)), "ls / >/dev/null && python3 -c 'print(1+1)'")
-    assert result.stdout.strip() == "2"

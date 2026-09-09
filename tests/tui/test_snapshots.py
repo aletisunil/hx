@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 from textual.pilot import Pilot
 
 from hx.tui.widgets import working
@@ -18,6 +19,18 @@ from hx.tui.widgets.working import WorkingIndicator
 from tests.tui.test_app import build_app
 
 SIZE = (100, 32)
+
+
+@pytest.fixture(autouse=True)
+def _force_snapshot_colors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep SVG colours independent of the shell running pytest.
+
+    Textual honours ``NO_COLOR`` when the app is constructed and filters its
+    rendered output to monochrome. That is useful for the real TUI, but it made
+    snapshots recorded from a non-colour terminal disagree with CI's true-colour
+    rendering even though the widgets and theme were identical.
+    """
+    monkeypatch.delenv("NO_COLOR", raising=False)
 
 
 def _pin(app: Any) -> None:

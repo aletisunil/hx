@@ -11,13 +11,86 @@ set -eu
 # The PyPI distribution is hx-cli; the command it installs is `hx`.
 HX_PACKAGE="${HX_PACKAGE:-hx-cli}"
 HX_PYTHON="${HX_PYTHON:-3.12}"
+HX_SUPPORT_EMAIL="iam@sunilaleti.dev"
 UV_INSTALLER="https://astral.sh/uv/install.sh"
 
 log()  { printf '\033[0;36m==>\033[0m %s\n' "$1"; }
 warn() { printf '\033[0;33mwarning:\033[0m %s\n' "$1" >&2; }
-die()  { printf '\033[0;31merror:\033[0m %s\n' "$1" >&2; exit 1; }
+die()  {
+    printf '\033[0;31merror:\033[0m %s\n' "$1" >&2
+    printf 'Need help? Contact \033[1;33m%s\033[0m\n' "$HX_SUPPORT_EMAIL" >&2
+    exit 1
+}
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+should_animate() {
+    [ -t 1 ] && [ -z "${HX_NO_ANIMATION:-}" ] && [ -z "${CI:-}" ]
+}
+
+render_logo() {
+    padding=$1
+    clear_prefix=
+    [ "${2:-}" = clear ] && clear_prefix='\033[2K\r'
+
+    printf '\033[0;36m'
+    printf '%b%s%s\n' "$clear_prefix" "$padding" ' _   _  __  __'
+    printf '%b%s%s\n' "$clear_prefix" "$padding" '| | | | \ \/ /'
+    printf '%b%s%s\n' "$clear_prefix" "$padding" '| |_| |  >  <'
+    printf '%b%s%s\n' "$clear_prefix" "$padding" "|  _  | / /\\ \\"
+    printf '%b%s%s\n' "$clear_prefix" "$padding" "|_| |_|/_/  \\_\\"
+    printf '\033[0m'
+}
+
+animate_logo() {
+    if ! should_animate; then
+        render_logo ''
+        return
+    fi
+
+    # Slide in, overshoot slightly, then settle into place.
+    render_logo '            ' clear
+    sleep 0.07
+    printf '\033[5A'
+    render_logo '        ' clear
+    sleep 0.07
+    printf '\033[5A'
+    render_logo '    ' clear
+    sleep 0.07
+    printf '\033[5A'
+    render_logo '' clear
+    sleep 0.07
+    printf '\033[5A'
+    render_logo '  ' clear
+    sleep 0.07
+    printf '\033[5A'
+    render_logo '' clear
+}
+
+stream_text() {
+    message=$1
+    printf '  '
+    if should_animate; then
+        # Word-by-word output keeps the effect portable across macOS and Linux.
+        # shellcheck disable=SC2086  # Intentional word splitting for animation.
+        for word in $message; do
+            printf '%s ' "$word"
+            sleep 0.03
+        done
+        printf '\n'
+    else
+        printf '%s\n' "$message"
+    fi
+}
+
+banner() {
+    animate_logo
+    printf '\n'
+    stream_text 'HX is a terminal coding agent that works inside your project.'
+    stream_text 'It reads and edits files, runs commands in a sandbox, and handles larger tasks with persistent sessions, skills, tools, and subagents.'
+    stream_text 'Connect to models through OpenRouter and see context, cost, and usage for every turn.'
+    printf '  Questions or issues? Contact \033[1;33m%s\033[0m\n\n' "$HX_SUPPORT_EMAIL"
+}
 
 ensure_uv() {
     if have uv; then
@@ -53,6 +126,7 @@ check_path() {
 }
 
 main() {
+    banner
     ensure_uv
     install_hx
     check_path

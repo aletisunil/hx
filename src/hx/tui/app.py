@@ -359,16 +359,20 @@ class HXApp(App[None]):
 
     async def _run_turn(self, text: str) -> None:
         prompt_input = self._prompt
-        prompt_input.set_enabled(False)
+        prompt_input.set_running(True)
         try:
             await self.loop.run(text)
         except asyncio.CancelledError:
             self._transcript.add_notice("interrupted", "warning")
         finally:
-            prompt_input.set_enabled(True)
+            prompt_input.set_running(False)
             self._working.stop()
 
         if self._queued:
+            # This coroutine is still the active Textual worker until it
+            # returns, so submit() would otherwise see a running turn and put
+            # the same prompt straight back on the queue.
+            self._turn_worker = None
             await self.submit(self._queued.pop(0))
 
     def _command_context(self) -> CommandContext:
@@ -498,17 +502,16 @@ class HXApp(App[None]):
         prompt: escape does that, and a key that sometimes discards a draft and
         sometimes kills a turn is a key nobody presses confidently.
 
-        While a turn *is* running there is no draft to discard and nothing
-        ambiguous left, so the key means what every terminal user expects it to
-        mean. Arming the exit there instead would let two presses of the
-        universal "stop" chord tear down the session mid-answer.
+        With an empty prompt during a running turn, the key means what every
+        terminal user expects it to mean. A draft still takes priority so it
+        can be cleared without interrupting the agent; escape always interrupts.
         """
-        if self._turn_worker is not None and not self._turn_worker.is_finished:
-            await self.action_interrupt()
-            return
         if self._prompt.text:
             self._prompt.clear()
             self._clear_armed = False
+            return
+        if self._turn_worker is not None and not self._turn_worker.is_finished:
+            await self.action_interrupt()
             return
         if self._clear_armed:
             self.exit()
