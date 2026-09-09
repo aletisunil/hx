@@ -643,7 +643,7 @@ def run_auth_command(args: list[str]) -> int:
 def run_upgrade_command() -> int:
     """Wraps ``uv tool upgrade hx``."""
     try:
-        completed = subprocess.run(["uv", "tool", "upgrade", "hx"], check=False)
+        completed = subprocess.run(["uv", "tool", "upgrade", "hx-cli"], check=False)
     except FileNotFoundError:
         print("uv is not installed. See https://docs.astral.sh/uv/", file=sys.stderr)
         return 1

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "hx"
+name = "hx-cli"
 version = "0.0.1"
 description = "HX - a terminal coding agent"
 readme = "README.md"

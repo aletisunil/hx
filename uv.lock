@@ -543,7 +543,7 @@ wheels = [
 ]
 
 [[package]]
-name = "hx"
+name = "hx-cli"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [

@@ -8,7 +8,8 @@
 
 set -eu
 
-HX_PACKAGE="${HX_PACKAGE:-hx}"
+# The PyPI distribution is hx-cli; the command it installs is `hx`.
+HX_PACKAGE="${HX_PACKAGE:-hx-cli}"
 HX_PYTHON="${HX_PYTHON:-3.12}"
 UV_INSTALLER="https://astral.sh/uv/install.sh"
 
