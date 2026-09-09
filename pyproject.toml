@@ -35,6 +35,8 @@ dev = [
   "mypy>=1.11",
   "textual-dev>=1.5",
   "types-PyYAML",
+  "types-Pygments",
+  "pytest-textual-snapshot>=1.0",
 ]
 
 [project.scripts]
@@ -63,7 +65,8 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 # Blocking filesystem calls are the point in a test assertion, not a hazard.
-"tests/*" = ["B011", "ASYNC240"]
+# RUF001: the TUI's glyphs are deliberate, and a test has to spell them exactly.
+"tests/*" = ["B011", "ASYNC240", "RUF001"]
 
 [tool.mypy]
 python_version = "3.11"
