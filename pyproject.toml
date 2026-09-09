@@ -41,8 +41,8 @@ dev = [
 hx = "hx.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/sunilaleti/hx"
-Issues = "https://github.com/sunilaleti/hx/issues"
+Homepage = "https://github.com/aletisunil/hx"
+Issues = "https://github.com/aletisunil/hx/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hx"]

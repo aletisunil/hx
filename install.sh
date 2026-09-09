@@ -1,7 +1,7 @@
 #!/bin/sh
 # HX installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/sunilaleti/hx/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/aletisunil/hx/main/install.sh | sh
 #
 # Bootstraps `uv` if it is missing, then installs hx as an isolated uv tool with
 # a pinned Python. Idempotent: re-running upgrades in place.

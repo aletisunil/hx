@@ -10,7 +10,7 @@ a sandboxed shell, and shows you what every turn costs.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/sunilaleti/hx/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/aletisunil/hx/main/install.sh | sh
 ```
 
 The script bootstraps [uv](https://docs.astral.sh/uv/) if you don't have it,
@@ -23,8 +23,23 @@ If you'd rather not pipe a script into a shell:
 uv tool install hx-cli      # or: pipx install hx-cli
 ```
 
-The distribution is `hx-cli`; the command it installs is `hx`. If the command
-isn't found afterwards, add uv's bin directory to your `PATH`:
+### `hx-cli` on PyPI, `hx` in your terminal
+
+The package is published as **`hx-cli`**. The command it installs is **`hx`**,
+and that is what you type — the longer name never appears again after install.
+
+The plain name `hx` on PyPI is registered by someone else and has no releases,
+so `uv tool install hx` fails with "no versions of hx". Install `hx-cli`.
+
+| | Name |
+|---|---|
+| PyPI package | `hx-cli` |
+| Command | `hx` |
+| Python import | `hx` |
+| Config directory | `~/.hx` |
+
+If the command isn't found after installing, add uv's bin directory to your
+`PATH`:
 
 ```sh
 export PATH="$(uv tool dir --bin):$PATH"
@@ -301,7 +316,7 @@ dropped rather than taking the session with it.
 ## Development
 
 ```sh
-git clone https://github.com/sunilaleti/hx && cd hx
+git clone https://github.com/aletisunil/hx && cd hx
 uv sync --extra dev
 
 uv run pytest                # the suite; live tests are deselected
@@ -367,10 +382,6 @@ To check a build before tagging:
 ```sh
 uv build && ls dist/
 ```
-
-> **Note on the name.** The PyPI name `hx` is registered by someone else with
-> no releases, so it cannot be used. The distribution is `hx-cli`; the import
-> package and the installed command are both `hx`, which is what users type.
 
 ---
 

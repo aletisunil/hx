@@ -41,7 +41,7 @@ CHAT_COMPLETIONS = f"{API_BASE}/chat/completions"
 MODELS = f"{API_BASE}/models"
 
 DEFAULT_HEADERS = {
-    "HTTP-Referer": "https://github.com/sunilaleti/hx",
+    "HTTP-Referer": "https://github.com/aletisunil/hx",
     "X-Title": "HX",
 }
 
