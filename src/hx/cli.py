@@ -17,7 +17,7 @@ import contextlib
 import getpass
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +156,8 @@ class Runtime:
     agents: Any = None
     mcp: Any = None
     tools: Any = None
+    notices: list[str] = field(default_factory=list)
+    """Startup messages for the user - shown once, in the transcript."""
 
     @property
     def sandbox_active(self) -> bool:
@@ -220,7 +222,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     from hx.mcp.manager import MCPManager
     from hx.mcp.manager import load_configs as load_mcp_configs
     from hx.paths import ensure_user_dirs, session_outputs_dir
-    from hx.permissions.engine import PermissionEngine, load_rules
+    from hx.permissions.engine import PermissionEngine, load_rules, migrate_legacy_rules
     from hx.permissions.sandbox import Sandbox, default_policy
     from hx.providers.models import ModelRegistry
     from hx.providers.openrouter import OpenRouterProvider, load_api_key
@@ -260,12 +262,13 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     injections.register("todos", todo_injector(todos))
     injections.register("stale_files", _stale_files_injector(tracker, Injection))
 
+    # Rules come from the settings files only, read once here: `settings`
+    # already merges those same files, and loading both would list and match
+    # every rule twice.
+    notices = migrate_legacy_rules(settings.cwd)
     permissions = PermissionEngine(
         mode=settings.permissions.mode,
-        rules=[
-            *load_rules(settings.cwd),
-            *_rules_from_settings(settings.permissions),
-        ],
+        rules=load_rules(settings.cwd),
         cwd=settings.cwd,
     )
 
@@ -330,6 +333,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         agents=agents,
         mcp=MCPManager(load_mcp_configs(settings.cwd)),
         tools=tools,
+        notices=notices,
     )
 
 
@@ -356,20 +360,6 @@ def _stale_files_injector(tracker: Any, injection_cls: Any) -> Any:
         )
 
     return inject
-
-
-def _rules_from_settings(permissions: Any) -> list[Any]:
-    """Rules passed on the command line or via env, layered on top of the files."""
-    from hx.permissions.engine import Decision, parse_rule
-
-    rules: list[Any] = []
-    for texts, decision in (
-        (permissions.deny, Decision.DENY),
-        (permissions.ask, Decision.ASK),
-        (permissions.allow, Decision.ALLOW),
-    ):
-        rules.extend(parse_rule(str(text), "settings", decision) for text in texts)
-    return rules
 
 
 def prompt_for_api_key() -> bool:
@@ -431,6 +421,7 @@ def run_tui_command(parsed: ParsedArgs) -> int:
                 skills=runtime.skills,
                 agents=runtime.agents,
                 mcp=runtime.mcp,
+                notices=runtime.notices,
             )
         finally:
             runtime.bus.close()
@@ -469,6 +460,8 @@ def run_print_command(parsed: ParsedArgs) -> int:
 
         renderer = asyncio.create_task(render())
         await asyncio.sleep(0)
+        for notice in runtime.notices:
+            print(f"[hx] {notice}", file=sys.stderr)
         for status in await runtime.connect_mcp():
             if not status.connected:
                 print(f"[mcp] {status.name} unavailable: {status.error}", file=sys.stderr)

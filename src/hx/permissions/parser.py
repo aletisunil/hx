@@ -11,6 +11,7 @@ command with confidence it says so, and the caller must treat that as "ask".
 
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import dataclass
 
@@ -21,6 +22,19 @@ DYNAMIC_EXECUTABLES = frozenset({"eval", "exec", "source", ".", "env"})
 so a command invoking one is reported unparseable rather than guessed at."""
 
 REDIRECT_TOKENS = (">>", ">", "<")
+
+_FD_DUP_RE = re.compile(r"^\d*>&\d*-?$")
+"""``2>&1``, ``>&2``, ``>&-`` - duplicating a descriptor, never a file write."""
+
+_OUT_OP_RE = re.compile(r"^(?:\d*>>?|&>>?)$")
+_IN_OP_RE = re.compile(r"^\d*<<?-?$")
+_OUT_ATTACHED_RE = re.compile(r"^(?:\d*>>?|&>>?)(?P<target>.+)$")
+_IN_ATTACHED_RE = re.compile(r"^\d*<<?-?(?P<target>.+)$")
+
+DISCARD_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
+"""Redirect targets that discard or re-route output rather than writing a file.
+``cmd 2>/dev/null`` is the most common shape an agent emits; prompting for it
+teaches users to approve without reading."""
 
 READ_ONLY_COMMANDS = frozenset(
     {
@@ -116,7 +130,7 @@ def parse(command: str) -> ParsedCommand:
     return ParsedCommand(
         raw=command,
         segments=tuple(segments),
-        has_redirect_out=bool(redirects),
+        has_redirect_out=any(target not in DISCARD_TARGETS for target in redirects),
         redirect_targets=tuple(redirects),
         unparseable=unparseable or not segments,
     )
@@ -134,29 +148,7 @@ def _to_segment(text: str, in_sub: bool) -> tuple[CommandSegment | None, list[st
     if not tokens:
         return None, [], True
 
-    words: list[str] = []
-    redirects: list[str] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token in REDIRECT_TOKENS or (token[:1].isdigit() and token[1:] in REDIRECT_TOKENS):
-            index += 1
-            if index < len(tokens):
-                redirects.append(tokens[index])
-            index += 1
-            continue
-        for marker in REDIRECT_TOKENS:
-            if marker in token and not token.startswith(marker):
-                head, _, tail = token.partition(marker)
-                words.append(head)
-                if tail:
-                    redirects.append(tail)
-                break
-        else:
-            words.append(token)
-        index += 1
-
-    words = [word for word in words if word]
+    words, redirects = _split_redirections(tokens)
     if not words:
         return None, redirects, True
 
@@ -173,6 +165,69 @@ def _to_segment(text: str, in_sub: bool) -> tuple[CommandSegment | None, list[st
         redirects,
         ok,
     )
+
+
+def _split_redirections(tokens: list[str]) -> tuple[list[str], list[str]]:
+    """Separate the words that make up the command from its redirections.
+
+    A redirection contributes no word - ``ls -la 2>err`` is ``ls -la``, not
+    ``ls -la 2`` - and only an *output* redirection is reported: ``2>&1``
+    duplicates a descriptor and ``< in`` reads, so neither writes anything.
+
+    Returns ``(words, output_targets)``.
+    """
+    words: list[str] = []
+    targets: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+
+        if _FD_DUP_RE.match(token):
+            continue
+
+        if _OUT_OP_RE.match(token) or _IN_OP_RE.match(token):
+            # `2> err`: the target is the next token, and only `>` forms write.
+            if index < len(tokens):
+                if _OUT_OP_RE.match(token):
+                    targets.append(tokens[index])
+                index += 1
+            continue
+
+        if attached := _OUT_ATTACHED_RE.match(token):
+            targets.append(attached.group("target"))
+            continue
+
+        if _IN_ATTACHED_RE.match(token):
+            continue
+
+        if (embedded := _embedded_redirect(token)) is not None:
+            head, target, writes = embedded
+            words.append(head)
+            if writes:
+                targets.append(target)
+            continue
+
+        words.append(token)
+
+    return [word for word in words if word], targets
+
+
+def _embedded_redirect(token: str) -> tuple[str, str, bool] | None:
+    """``echo hi>out`` - a redirection glued to the end of a word.
+
+    Returns ``(word, target, writes)``, or ``None`` when the token holds no
+    redirection. Leading forms such as ``2>err`` are matched earlier and never
+    reach here.
+    """
+    position = min((token.find(char) for char in "<>" if char in token), default=-1)
+    if position <= 0:
+        return None
+    head, rest = token[:position], token[position:]
+    target = rest.lstrip("<>")
+    if not target:
+        return None
+    return head, target, rest.startswith(">")
 
 
 class _ScanError(Exception):
@@ -235,6 +290,10 @@ def _scan(text: str) -> tuple[list[str], list[str], bool]:
             continue
 
         operator = next((op for op in OPERATORS if text.startswith(op, index)), None)
+        if operator == "&" and _is_redirect_ampersand(text, index, buffer):
+            buffer.append(char)
+            index += 1
+            continue
         if operator:
             pieces.append("".join(buffer))
             buffer.clear()
@@ -248,6 +307,17 @@ def _scan(text: str) -> tuple[list[str], list[str], bool]:
         ok = False
     pieces.append("".join(buffer))
     return [piece for piece in pieces if piece.strip()], substitutions, ok
+
+
+def _is_redirect_ampersand(text: str, index: int, buffer: list[str]) -> bool:
+    """True for the ``&`` in ``2>&1``, ``>&2`` or ``&>log``.
+
+    Splitting there would invent a phantom command (``1``) out of a descriptor
+    number and make an obviously read-only command look unrecognisable.
+    """
+    if "".join(buffer).rstrip().endswith(">"):
+        return True
+    return text.startswith("&>", index)
 
 
 def _recurse(body: str, seen: list[str]) -> list[str]:

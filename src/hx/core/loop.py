@@ -397,21 +397,30 @@ class AgentLoop:
             detail=_permission_detail(call),
             origin=self.origin,
         )
-        self.bus.publish(
-            PermissionRequested(
-                request_id=call.id,
-                tool_name=call.name,
-                description=request.description,
-                detail=request.detail,
-            )
+        allowed, reason = await self.permissions.request(
+            request, on_ask=lambda: self._announce_ask(call.id, request)
         )
-        allowed, reason = await self.permissions.request(request)
         if allowed:
             return None
         return ToolResultBlock(
             tool_use_id=call.id,
             content=f"{call.name} was not permitted: {reason}",
             is_error=True,
+        )
+
+    def _announce_ask(self, call_id: str, request: Any) -> None:
+        """Announce only the calls that actually stop for approval.
+
+        Publishing on every check made the headless renderer print a permission
+        line for calls that were auto-allowed and never asked about.
+        """
+        self.bus.publish(
+            PermissionRequested(
+                request_id=call_id,
+                tool_name=request.tool_name,
+                description=request.description,
+                detail=request.detail,
+            )
         )
 
     def _emit_progress(self, tool_use_id: str, chunk: str) -> None:

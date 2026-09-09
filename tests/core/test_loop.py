@@ -257,3 +257,49 @@ async def test_mutating_tools_run_serially_in_emission_order(hx_home: Path, tmp_
         await h.loop.run("go")
 
     assert order == ["start:A", "end:A", "start:B", "end:B"]
+
+
+async def test_permission_events_announce_only_what_actually_prompts(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """Publishing on every check made headless runs report a permission prompt
+    for calls that were auto-allowed and never asked about."""
+    from hx.config import PermissionMode
+    from hx.core.events import PermissionRequested
+    from hx.permissions.engine import PermissionAnswer, PermissionEngine, PermissionRequest
+
+    class Writer(Tool):
+        name = "Write"
+        description = "writes"
+        mutating = True
+
+        def schema(self) -> dict[str, Any]:
+            return {"type": "object", "properties": {}}
+
+        async def run(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+            return ToolResult(content="ok")
+
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    registry.register(Writer())
+
+    async def asker(request: PermissionRequest) -> PermissionAnswer:
+        return PermissionAnswer(allowed=True)
+
+    script = [
+        [
+            StreamDelta(tool_use_id="1", tool_name="Echo", tool_input_json='{"text": "hi"}'),
+            StreamEnd(stop_reason=StopReason.TOOL_USE),
+        ],
+        [
+            StreamDelta(tool_use_id="2", tool_name="Write", tool_input_json="{}"),
+            StreamEnd(stop_reason=StopReason.TOOL_USE),
+        ],
+        text_turn("done"),
+    ]
+    async with build_loop(script, tmp_path, registry) as h:
+        h.loop.permissions = PermissionEngine(PermissionMode.DEFAULT, [], tmp_path, asker=asker)
+        await h.loop.run("go")
+
+    announced = [e.tool_name for e in h.events if isinstance(e, PermissionRequested)]
+    assert announced == ["Write"], "the read-only Echo call never stopped for approval"

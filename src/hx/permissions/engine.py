@@ -103,6 +103,12 @@ class PermissionEngine:
         if denial := self._match(request, Decision.DENY):
             return PermissionOutcome(Decision.DENY, "matched a deny rule", denial)
 
+        # Before the decomposition check, not after: an exact grant is the only
+        # thing that can cover a command we cannot decompose, and it is safe
+        # precisely because the approved string is byte-identical to what runs.
+        if (request.tool_name, request.specifier) in self._session_grants:
+            return PermissionOutcome(Decision.ALLOW, "granted for this session")
+
         if request.tool_name == "Bash" and request.specifier:
             parsed = parse(request.specifier)
             if parsed.unparseable:
@@ -110,9 +116,6 @@ class PermissionEngine:
                     Decision.ASK,
                     "command could not be decomposed; approving it blind is not safe",
                 )
-
-        if (request.tool_name, request.specifier) in self._session_grants:
-            return PermissionOutcome(Decision.ALLOW, "granted for this session")
 
         if ask_rule := self._match(request, Decision.ASK):
             return PermissionOutcome(Decision.ASK, "matched an ask rule", ask_rule)
@@ -178,6 +181,13 @@ class PermissionEngine:
                     return rule
             return None
 
+        # A rule holding the whole command verbatim: exact, so it grants no more
+        # than the string it names. This is what covers a command that cannot be
+        # decomposed, and what keeps hand-written full-command rules working.
+        for rule in candidates:
+            if rule.specifier == request.specifier:
+                return rule
+
         parsed = parse(request.specifier)
         if not parsed.segments or parsed.unparseable:
             return None
@@ -210,8 +220,16 @@ class PermissionEngine:
 
     # --- prompting --------------------------------------------------------
 
-    async def request(self, request: PermissionRequest) -> tuple[bool, str]:
+    async def request(
+        self,
+        request: PermissionRequest,
+        on_ask: Callable[[], None] | None = None,
+    ) -> tuple[bool, str]:
         """Evaluate and, on ASK, prompt through :attr:`asker`.
+
+        ``on_ask`` fires only when the call actually stops for approval, so a
+        frontend can announce the prompt without announcing every auto-allowed
+        call as well.
 
         Returns ``(allowed, reason)``. The reason is handed to the model on a
         denial so it can adapt, instead of guessing why a tool went silent.
@@ -229,6 +247,8 @@ class PermissionEngine:
                 "(non-interactive). Run hx interactively, or add a permission rule."
             )
 
+        if on_ask is not None:
+            on_ask()
         answer = await self.asker(request)
         if answer.allowed:
             self.grant(request, answer.scope)
@@ -236,37 +256,22 @@ class PermissionEngine:
         return False, "the user declined"
 
     def grant(self, request: PermissionRequest, scope: GrantScope) -> None:
-        """Record an approval. ``ALWAYS`` writes a rule into project settings."""
+        """Record an approval.
+
+        ``SESSION`` keeps the rules in memory; ``ALWAYS`` also writes them to
+        project settings. Both record the exact request as well, so a command
+        that could not be decomposed is still covered for the rest of the
+        session.
+        """
         if scope is GrantScope.ONCE:
             return
 
         self._session_grants.add((request.tool_name, request.specifier))
-        if scope is not GrantScope.ALWAYS:
-            return
-
-        specifier = self._persistable_specifier(request)
-        rule_text = f"{request.tool_name}({specifier})" if specifier else request.tool_name
-        self.rules.append(parse_rule(rule_text, "project settings", Decision.ALLOW))
-        persist_allow_rule(rule_text, self.cwd)
-
-    def _persistable_specifier(self, request: PermissionRequest) -> str | None:
-        """Generalise a one-off approval into a rule worth keeping.
-
-        A Bash approval becomes a prefix rule for that executable and
-        subcommand, never the exact argument vector - otherwise "always allow"
-        would be useless on the very next invocation.
-        """
-        if not request.specifier:
-            return None
-        if request.tool_name != "Bash":
-            return request.specifier
-
-        parsed = parse(request.specifier)
-        if len(parsed.segments) != 1:
-            return request.specifier
-        segment = parsed.segments[0]
-        head = _rule_prefix(segment)
-        return f"{head}:*"
+        source = "session grant" if scope is GrantScope.SESSION else "project settings"
+        for rule_text in persistable_rules(request.tool_name, request.specifier):
+            self.rules.append(parse_rule(rule_text, source, Decision.ALLOW))
+            if scope is GrantScope.ALWAYS:
+                persist_allow_rule(rule_text, self.cwd)
 
     # --- modes ------------------------------------------------------------
 
@@ -282,11 +287,51 @@ class PermissionEngine:
         return {name for name in all_tools if name not in mutating_set}
 
 
-def _rule_prefix(segment: CommandSegment) -> str:
-    """``git commit -m x`` -> ``git commit``; ``ls -la`` -> ``ls``."""
+def persistable_rules(tool_name: str, specifier: str | None) -> list[str]:
+    """Generalise one approval into the rule texts worth keeping.
+
+    A Bash approval becomes one prefix rule per executed segment, never the
+    exact argument vector: a whole-command specifier is matched against each
+    segment on its own, so ``cd /repo && pytest -q`` stored verbatim would only
+    ever match again as that same string - an "always allow" that allows almost
+    nothing. Each segment therefore contributes ``executable subcommand:*``.
+
+    Widening is only safe where there is a subcommand to anchor it to. A
+    command that cannot be decomposed, and one whose segments carry nothing but
+    flags, keep their exact text; guessing a prefix for either would grant more
+    than the user saw.
+    """
+    if not specifier:
+        return [tool_name]
+    if tool_name != "Bash":
+        return [f"{tool_name}({specifier})"]
+
+    parsed = parse(specifier)
+    if parsed.unparseable or not parsed.segments:
+        return [f"Bash({specifier})"]
+
+    rules: list[str] = []
+    for segment in parsed.segments:
+        prefix = _rule_prefix(segment)
+        if prefix is None:
+            return [f"Bash({specifier})"]
+        text = f"Bash({prefix}:*)"
+        if text not in rules:
+            rules.append(text)
+    return rules
+
+
+def _rule_prefix(segment: CommandSegment) -> str | None:
+    """``git commit -m x`` -> ``git commit``; ``rm -rf build`` -> ``None``.
+
+    The subcommand is what keeps a prefix rule narrow. Falling back to the bare
+    executable when there is none looks harmless on ``ls -la`` and is not:
+    approving ``rm -rf build`` would write ``Bash(rm:*)`` and quietly cover
+    every ``rm`` the user never saw. Those segments are not widened at all.
+    """
     if segment.args and not segment.args[0].startswith("-"):
         return f"{segment.executable} {segment.args[0]}"
-    return segment.executable
+    return None
 
 
 _RULE_RE = re.compile(r"^(?P<tool>[A-Za-z_][\w-]*|\*)(?:\((?P<spec>.*)\))?$", re.DOTALL)
@@ -386,6 +431,80 @@ def load_rules(cwd: Path) -> list[Rule]:
             for text in permissions.get(key) or []:
                 rules.append(parse_rule(str(text), source, decision))
     return rules
+
+
+def migrate_legacy_rules(cwd: Path) -> list[str]:
+    """Widen allow rules that only ever match one exact command string.
+
+    Until grants were generalised, "always allow" on a compound command stored
+    the whole command as the specifier - ``Bash(cd /repo && pytest -x -q)``.
+    Such a rule matches that string and nothing else, so changing a single flag
+    prompts again, which is not what the user was offered when they pressed
+    "always". Those rules are rewritten in place, once, into the per-segment
+    prefix rules the same approval produces today.
+
+    Single-segment rules are left alone: they are already usable, and widening
+    a hand-written ``Bash(git status)`` would grant more than its author asked.
+
+    Returns one line per rule rewritten, naming the rule before and after.
+    Editing a user's permission file is not something to do behind their back,
+    so every change is spelled out rather than summarised as a count: the whole
+    point of the file is that its owner can see what it grants.
+    """
+    from hx.config import ConfigError, read_settings_file, write_settings_file
+    from hx.paths import project_settings_file, user_settings_file
+
+    notices: list[str] = []
+    for path in (user_settings_file(), project_settings_file(cwd)):
+        try:
+            data = read_settings_file(path)
+        except ConfigError:
+            continue  # a broken settings file is reported elsewhere, not repaired here
+        permissions = data.get("permissions")
+        if not isinstance(permissions, dict):
+            continue
+        allow = permissions.get("allow")
+        if not isinstance(allow, list):
+            continue
+
+        widened: list[str] = []
+        changes: list[str] = []
+        for entry in allow:
+            replacements = _widen_rule(str(entry))
+            if replacements is None:
+                replacements = [str(entry)]
+            else:
+                changes.append(f"{entry} -> {', '.join(replacements)}")
+            widened.extend(text for text in replacements if text not in widened)
+
+        if not changes:
+            continue
+        permissions["allow"] = widened
+        try:
+            write_settings_file(path, data)
+        except OSError:
+            continue  # read-only settings are not worth failing startup over
+        listed = "\n".join(f"  {change}" for change in changes)
+        notices.append(f"Rewrote whole-command permission rules in {path}:\n{listed}")
+    return notices
+
+
+def _widen_rule(text: str) -> list[str] | None:
+    """The per-segment rewrite for a whole-command rule, or ``None`` to keep it."""
+    try:
+        rule = parse_rule(text, "settings", Decision.ALLOW)
+    except InvalidRule:
+        return None
+    if rule.tool != "Bash" or not rule.specifier:
+        return None
+    parsed = parse(rule.specifier)
+    if parsed.unparseable or len(parsed.segments) < 2:
+        return None
+    replacements = persistable_rules("Bash", rule.specifier)
+    # A rule with an unwidenable segment comes back as itself. That is not a
+    # change, and reporting it as one would describe a rewrite that never
+    # happened.
+    return None if replacements == [text] else replacements
 
 
 def persist_allow_rule(rule_text: str, cwd: Path) -> None:

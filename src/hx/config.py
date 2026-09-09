@@ -87,6 +87,8 @@ class Settings:
     context: ContextSettings = field(default_factory=ContextSettings)
     bash: BashSettings = field(default_factory=BashSettings)
     theme: str = "dark"
+    quiet_startup: bool = False
+    """Skip the startup header. For anyone who has read it already."""
     telemetry: bool = False
 
 
@@ -177,6 +179,7 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
             shell=bash.get("shell"),
         ),
         theme=data.get("theme", "dark"),
+        quiet_startup=bool(data.get("quietStartup", data.get("quiet_startup", False))),
         telemetry=bool(data.get("telemetry", False)),
     )
 
@@ -241,6 +244,7 @@ _ENV_MAP: dict[str, tuple[str, ...]] = {
     "HX_SANDBOX": ("permissions", "sandbox"),
     "HX_COMPACT_AT": ("context", "compact_at"),
     "HX_THEME": ("theme",),
+    "HX_QUIET_STARTUP": ("quietStartup",),
 }
 
 

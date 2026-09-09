@@ -141,3 +141,180 @@ def test_malformed_rules_are_rejected_loudly() -> None:
 
     with pytest.raises(InvalidRule):
         parse_rule("Bash(unclosed", "test", Decision.ALLOW)
+
+
+async def test_always_allow_covers_every_segment_of_a_compound_command(project: Path) -> None:
+    """A compound command stored verbatim matches nothing: a specifier is
+    compared against each segment on its own, so the rule is dead on arrival
+    and the user is asked again on the very next call."""
+    import json
+
+    from hx.permissions.engine import GrantScope, PermissionAnswer
+
+    async def asker(request: PermissionRequest) -> PermissionAnswer:
+        return PermissionAnswer(True, GrantScope.ALWAYS)
+
+    engine = PermissionEngine(PermissionMode.DEFAULT, [], project, asker=asker)
+    await engine.request(_request("cd /repo && uv run pytest tests/ -x -q"))
+
+    saved = json.loads((project / ".hx" / "settings.json").read_text())
+    assert saved["permissions"]["allow"] == ["Bash(cd /repo:*)", "Bash(uv run:*)"]
+    assert engine.evaluate(_request("cd /repo && uv run pytest tests/tui -q")).decision is (
+        Decision.ALLOW
+    )
+
+
+async def test_session_grant_covers_a_sibling_invocation(project: Path) -> None:
+    """ "Allow for this session" that only matched a byte-identical command
+    prompted again for every changed flag."""
+    from hx.permissions.engine import GrantScope, PermissionAnswer
+
+    async def asker(request: PermissionRequest) -> PermissionAnswer:
+        return PermissionAnswer(True, GrantScope.SESSION)
+
+    engine = PermissionEngine(PermissionMode.DEFAULT, [], project, asker=asker)
+    await engine.request(_request("uv run pytest tests/tui -q"))
+
+    assert engine.evaluate(_request("uv run pytest tests/core -x")).decision is Decision.ALLOW
+    assert not (project / ".hx" / "settings.json").exists(), "session scope must not persist"
+
+
+async def test_a_grant_on_an_undecomposable_command_is_honoured(project: Path) -> None:
+    """The exact string the user approved is the exact string that runs, so it
+    can be allowed - what may not be guessed at is a prefix rule for it."""
+    from hx.permissions.engine import GrantScope, PermissionAnswer
+
+    calls: list[str] = []
+
+    async def asker(request: PermissionRequest) -> PermissionAnswer:
+        calls.append(request.description)
+        return PermissionAnswer(True, GrantScope.SESSION)
+
+    engine = PermissionEngine(PermissionMode.DEFAULT, [], project, asker=asker)
+    command = 'eval "$(rbenv init -)"'
+    assert (await engine.request(_request(command)))[0]
+    assert (await engine.request(_request(command)))[0]
+    assert len(calls) == 1
+    assert engine.evaluate(_request('eval "$(something else)"')).decision is Decision.ASK
+
+
+def test_a_whole_command_rule_matches_that_command_exactly(project: Path) -> None:
+    command = "cd /repo && uv run pytest -q"
+    rules = [parse_rule(f"Bash({command})", "test", Decision.ALLOW)]
+    engine = PermissionEngine(PermissionMode.DEFAULT, rules, project)
+    assert engine.evaluate(_request(command)).decision is Decision.ALLOW
+    assert engine.evaluate(_request("cd /repo && rm -rf /")).decision is Decision.ASK
+
+
+def test_read_only_commands_with_redirections_do_not_prompt(project: Path) -> None:
+    engine = PermissionEngine(PermissionMode.DEFAULT, [], project)
+    for command in ("ls -la 2>&1", "cat < notes.txt", "grep foo bar 2>/dev/null"):
+        assert engine.evaluate(_request(command)).decision is Decision.ALLOW, command
+    assert engine.evaluate(_request("cat notes.txt > copy.txt")).decision is Decision.ASK
+
+
+def test_legacy_whole_command_rules_are_widened_in_place(project: Path) -> None:
+    import json
+
+    from hx.permissions.engine import migrate_legacy_rules
+
+    path = project / ".hx" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "permissions": {
+                    "allow": [
+                        "Bash(cd /repo && uv run pytest tests/ -x -q)",
+                        "Bash(clear:*)",
+                        "Bash(git status)",
+                        "Edit(src/hx/tui/commands.py)",
+                    ]
+                }
+            }
+        )
+    )
+
+    notices = migrate_legacy_rules(project)
+
+    assert len(notices) == 1 and str(path) in notices[0]
+    saved = json.loads(path.read_text())["permissions"]["allow"]
+    assert saved == [
+        "Bash(cd /repo:*)",
+        "Bash(uv run:*)",
+        "Bash(clear:*)",
+        # Single-segment rules are already usable; widening them would grant
+        # more than their author asked for.
+        "Bash(git status)",
+        "Edit(src/hx/tui/commands.py)",
+    ]
+    assert migrate_legacy_rules(project) == [], "migration must be idempotent"
+
+
+async def test_a_grant_never_widens_past_the_command_it_was_given(project: Path) -> None:
+    """A segment with no subcommand has nothing to anchor a prefix rule to.
+
+    Widening to the bare executable reads as harmless on ``ls -la`` and is not:
+    approving ``rm -rf build`` once would cover every other ``rm`` the user was
+    never shown.
+    """
+    from hx.permissions.engine import GrantScope, PermissionAnswer
+
+    async def asker(request: PermissionRequest) -> PermissionAnswer:
+        return PermissionAnswer(True, GrantScope.SESSION)
+
+    engine = PermissionEngine(PermissionMode.DEFAULT, [], project, asker=asker)
+    await engine.request(_request("rm -rf build"))
+
+    assert engine.evaluate(_request("rm -rf build")).decision is Decision.ALLOW
+    for unapproved in ("rm -rf /Users/me/photos", "rm -rf ~", "rm -rf /"):
+        assert engine.evaluate(_request(unapproved)).decision is Decision.ASK, unapproved
+
+
+def test_persistable_rules_widen_only_where_a_subcommand_anchors_them() -> None:
+    from hx.permissions.engine import persistable_rules
+
+    assert persistable_rules("Bash", "git commit -m x") == ["Bash(git commit:*)"]
+    assert persistable_rules("Bash", "uv run pytest tests/tui -q") == ["Bash(uv run:*)"]
+    # Nothing but flags after the executable: kept exactly as approved.
+    assert persistable_rules("Bash", "rm -rf build") == ["Bash(rm -rf build)"]
+    # One unwidenable segment keeps the whole command exact, so the rule can
+    # never grant a segment the user did not see.
+    assert persistable_rules("Bash", "cd /repo && rm -rf dist") == ["Bash(cd /repo && rm -rf dist)"]
+
+
+def test_migration_leaves_unwidenable_rules_alone_and_names_what_it_changed(
+    project: Path,
+) -> None:
+    import json
+
+    from hx.permissions.engine import migrate_legacy_rules
+
+    path = project / ".hx" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "permissions": {
+                    "allow": [
+                        "Bash(cd /repo && rm -rf dist)",
+                        "Bash(cd /repo && uv run pytest -x)",
+                    ]
+                }
+            }
+        )
+    )
+
+    notices = migrate_legacy_rules(project)
+
+    saved = json.loads(path.read_text())["permissions"]["allow"]
+    assert saved == [
+        # Not widened: `rm -rf dist` has no subcommand to anchor a rule to.
+        "Bash(cd /repo && rm -rf dist)",
+        "Bash(cd /repo:*)",
+        "Bash(uv run:*)",
+    ]
+    assert len(notices) == 1
+    assert "Bash(cd /repo && uv run pytest -x) -> Bash(cd /repo:*), Bash(uv run:*)" in notices[0]
+    # The rule it left alone is not reported as a rewrite that never happened.
+    assert "Bash(cd /repo && rm -rf dist) ->" not in notices[0]
