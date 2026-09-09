@@ -24,9 +24,13 @@ def _pin(app: Any) -> None:
     """Fix everything that would otherwise differ run to run.
 
     The status bar shows the working directory, which is a fresh tmp_path on
-    every run; without this the snapshot would never match itself twice.
+    every run. The startup header shows the package version, which changes on
+    every release but has its own behavioural tests. Neither belongs in a
+    layout snapshot.
     """
     app._status.set_location("~/project", "main")
+    app._header.version = "0.0.0"
+    app._header.refresh()
 
 
 def _pin_clock(monkeypatch: Any) -> None:
