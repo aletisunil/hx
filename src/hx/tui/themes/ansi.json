@@ -1,0 +1,69 @@
+{
+	"name": "ansi",
+	"dark": true,
+	"vars": {
+		"default": "ansi_default",
+		"faint": "ansi_bright_black"
+	},
+	"colors": {
+		"background": "default",
+		"surface": "default",
+		"panel": "default",
+
+		"accent": "ansi_cyan",
+		"border": "ansi_blue",
+		"borderAccent": "ansi_bright_cyan",
+		"borderMuted": "faint",
+		"success": "ansi_green",
+		"error": "ansi_red",
+		"warning": "ansi_yellow",
+		"muted": "faint",
+		"dim": "faint",
+		"text": "default",
+		"thinkingText": "faint",
+
+		"selectedBg": "ansi_blue",
+		"scrollbarTrack": "faint",
+		"scrollbarThumb": "default",
+		"searchMatchBg": "ansi_blue",
+		"searchMatchText": "default",
+		"userMessageBg": "default",
+		"userMessageText": "default",
+		"customMessageBg": "default",
+		"customMessageText": "default",
+		"customMessageLabel": "ansi_magenta",
+		"toolPendingBg": "default",
+		"toolSuccessBg": "default",
+		"toolErrorBg": "default",
+		"toolTitle": "default",
+		"toolOutput": "faint",
+
+		"mdHeading": "ansi_yellow",
+		"mdLink": "ansi_blue",
+		"mdLinkUrl": "faint",
+		"mdCode": "ansi_cyan",
+		"mdCodeBlock": "ansi_green",
+		"mdCodeBlockBorder": "faint",
+		"mdQuote": "faint",
+		"mdQuoteBorder": "faint",
+		"mdHr": "faint",
+		"mdListBullet": "ansi_cyan",
+
+		"toolDiffAdded": "ansi_green",
+		"toolDiffRemoved": "ansi_red",
+		"toolDiffContext": "faint",
+		"toolDiffHunk": "ansi_blue",
+
+		"syntaxComment": "ansi_green",
+		"syntaxKeyword": "ansi_blue",
+		"syntaxFunction": "ansi_yellow",
+		"syntaxVariable": "ansi_cyan",
+		"syntaxString": "ansi_red",
+		"syntaxNumber": "ansi_magenta",
+		"syntaxType": "ansi_bright_cyan",
+		"syntaxOperator": "default",
+		"syntaxPunctuation": "default",
+
+		"bashMode": "ansi_green"
+	}
+}

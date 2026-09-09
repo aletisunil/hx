@@ -395,15 +395,16 @@ async def cmd_configure(ctx: CommandContext, args: str) -> None:
 
 async def cmd_theme(ctx: CommandContext, args: str) -> None:
     """``/theme [dark|light|ansi]`` - switch palette for this session."""
-    from hx.tui.theme import PALETTES, THEME
+    from hx.tui.theme import THEME, palettes
 
+    available = palettes()
     if not args:
-        options = ", ".join(sorted(PALETTES))
+        options = ", ".join(sorted(available))
         ctx.app.notice(f"Theme is {THEME.palette.name}. Options: {options}")
         return
 
     wanted = args.strip().lower()
-    if wanted not in PALETTES:
+    if wanted not in available:
         ctx.app.notice(f"Unknown theme {wanted!r}. Try /theme with no argument.", "error")
         return
 

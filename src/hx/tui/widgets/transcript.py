@@ -19,7 +19,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Static
 
 from hx.tui.renderers import ToolCall, renderer_for
-from hx.tui.theme import STYLES, THEME
+from hx.tui.theme import THEME, syntax_style
 
 
 class _PlainHeading(Heading):
@@ -53,10 +53,11 @@ class _ThemedMarkdown(Markdown):
 
 def markdown(source: str) -> Markdown:
     """Assistant prose, themed to match the rest of the app."""
+    style = syntax_style()
     return _ThemedMarkdown(
         source,
-        code_theme="github-dark" if THEME.palette.dark else "sas",
-        inline_code_theme="github-dark" if THEME.palette.dark else "sas",
+        code_theme=style,
+        inline_code_theme=style,
         style=THEME.fg("text"),
         hyperlinks=True,
     )
@@ -87,7 +88,7 @@ class MessageBlock(Static):
                 style=THEME.bg("user_bg"),
             )
         if self.role == "thinking":
-            return Padding(Text(self.buffer, style=STYLES.thinking), (0, 1))
+            return Padding(Text(self.buffer, style=THEME.fg("thinking", italic=True)), (0, 1))
         return Padding(markdown(self.buffer or ""), (0, 1))
 
 
