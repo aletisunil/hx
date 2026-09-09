@@ -9,6 +9,7 @@ but does nothing is worse than one that is not there yet.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -89,15 +90,15 @@ class CommandRegistry:
 
 
 async def cmd_model(ctx: CommandContext, args: str) -> None:
-    """``/model [query]`` - fuzzy picker over the OpenRouter catalogue showing
-    context window, price per Mtok, and cache support."""
+    """``/model [query]`` - fuzzy picker over the models this machine can reach,
+    showing route, context window, price per Mtok, and cache support."""
     from hx.providers.models import ModelRegistry
     from hx.tui.widgets.palette import ModelPicker
 
     registry: ModelRegistry = ctx.app.models
-    models = registry.all()
+    models = _reachable(ctx, registry.all())
     if not models:
-        ctx.app.notice("No model catalogue cached yet. Run /models refresh.", "warning")
+        ctx.app.notice("No models available. Run /models refresh, or /login to sign in.", "warning")
         return
 
     query = args.strip()
@@ -107,7 +108,7 @@ async def cmd_model(ctx: CommandContext, args: str) -> None:
         # variants (…-flash, …-flash-0731), so matching alone never narrows it.
         exact = next((m for m in matches if m.id.lower() == query.lower()), None)
         if exact is not None or len(matches) == 1:
-            _switch_model(ctx, exact.id if exact is not None else matches[0].id)
+            await _switch_model(ctx, exact.id if exact is not None else matches[0].id)
             return
         if not matches:
             # Falling back to the whole catalogue silently looks like the filter
@@ -121,18 +122,42 @@ async def cmd_model(ctx: CommandContext, args: str) -> None:
         ModelPicker(models, ctx.session.meta.model, initial=query)
     )
     if chosen:
-        _switch_model(ctx, chosen)
+        await _switch_model(ctx, chosen)
 
 
-def _switch_model(ctx: CommandContext, model_id: str) -> None:
+def _reachable(ctx: CommandContext, models: list[Any]) -> list[Any]:
+    """Only models on a route this machine has a credential for.
+
+    Offering a model that cannot be called turns a picker choice into a failed
+    turn several seconds later, with the cause a screen away.
+    """
+    from hx.providers import registry
+
+    allowed = {spec.id for spec in registry.available(ctx.app.auth)}
+    # The route this session is already running on stays listed whatever the
+    # credential store says: it is demonstrably working, and hiding the current
+    # model from its own picker is never the right answer.
+    allowed.add(registry.provider_for(ctx.app.loop.model).id)
+    return [model for model in models if model.provider_id in allowed]
+
+
+async def _switch_model(ctx: CommandContext, model_id: str) -> None:
     """Switching resets the cached prefix - the new model has its own cache."""
+    from hx.auth.resolve import ExpiredCredential, MissingCredential
+
     info = ctx.app.models.get_or_default(model_id)
+    try:
+        await ctx.app.use_route_for(model_id)
+    except (MissingCredential, ExpiredCredential) as exc:
+        ctx.app.notice(str(exc), "error")
+        return
     ctx.app.loop.set_model(model_id, info)
-    ctx.app.query_one_status().set_model(model_id)
+    ctx.app.query_one_status().set_model(model_id, subscription=info.is_subscription)
     ctx.app.query_one_status().set_context(0, info.context_window)
+    billing = "subscription" if info.is_subscription else f"via {info.provider_id}"
     ctx.app.notice(
         f"Model set to {model_id} ({format_tokens(info.context_window)} context, "
-        f"cache: {info.cache_mode})",
+        f"cache: {info.cache_mode}, {billing})",
         "success",
     )
     _persist_model_choice(ctx, model_id)
@@ -186,7 +211,7 @@ async def cmd_models(ctx: CommandContext, args: str) -> None:
         ctx.app.notice("Usage: /models refresh", "warning")
         return
     try:
-        await ctx.app.models.refresh(ctx.app.api_key)
+        await ctx.app.models.refresh(ctx.app.auth)
     except Exception as exc:
         ctx.app.notice(f"Model refresh failed: {exc}", "error")
         return
@@ -224,6 +249,38 @@ async def cmd_resume(ctx: CommandContext, args: str) -> None:
     chosen = await ctx.app.push_screen_wait(SessionPicker(sessions))
     if chosen:
         ctx.app.resume_session(chosen)
+
+
+async def cmd_title(ctx: CommandContext, args: str) -> None:
+    """``/title [text]`` - show or set the name this session shows in ``/resume``."""
+    session = ctx.app.loop.session
+    if not args.strip():
+        current = session.meta.title
+        ctx.app.notice(
+            f"Session title: {current}" if current else "This session is not named yet.",
+            "info" if current else "warning",
+        )
+        return
+    session.set_title(args.strip())
+    ctx.app.notice(f"Session title: {session.meta.title}", "success")
+
+
+async def cmd_prompt(ctx: CommandContext, args: str) -> None:
+    """``/prompt`` - the system prompt this session is actually running with."""
+    from hx.core.context import resolve_system_prompt
+
+    in_use = ctx.app.loop.context.system_prompt
+    lines = [in_use.rstrip()]
+
+    resolved = resolve_system_prompt(ctx.settings.cwd, ctx.settings.prompt)
+    lines.append(f"\nSource: {resolved.source}")
+    for append in resolved.appends:
+        lines.append(f"Appended: {append}")
+    if resolved.text.strip() != in_use.strip():
+        # The prompt is read once at startup to keep the cache prefix stable, so
+        # an override edited since then is real but not yet in force.
+        lines.append("An override has changed on disk since startup; it applies next run.")
+    ctx.app.notice("\n".join(lines))
 
 
 async def cmd_cost(ctx: CommandContext, args: str) -> None:
@@ -370,11 +427,20 @@ async def cmd_init(ctx: CommandContext, args: str) -> None:
 
 async def cmd_configure(ctx: CommandContext, args: str) -> None:
     """``/configure`` - session settings, and set or replace the OpenRouter key."""
+    from hx.auth.store import OPENROUTER
     from hx.providers.openrouter import api_key_source, mask_api_key, save_api_key
     from hx.tui.widgets.configure import ConfigureModal, build_summary
 
     source = api_key_source()
-    hint = f"{mask_api_key(ctx.app.api_key)} (from {source})" if source else "not set"
+    hint = "not set"
+    if source:
+        from hx.auth.resolve import ExpiredCredential, MissingCredential
+
+        try:
+            key = ctx.app.auth.resolve_static(OPENROUTER).token
+            hint = f"{mask_api_key(key)} (from {source})"
+        except (MissingCredential, ExpiredCredential):
+            hint = f"unusable (from {source})"
 
     warning = ""
     if source and source.startswith("environment"):
@@ -400,6 +466,85 @@ async def cmd_configure(ctx: CommandContext, args: str) -> None:
         f"API key saved ({mask_api_key(key)}) and applied to this session.",
         "success",
     )
+
+
+async def cmd_login(ctx: CommandContext, args: str) -> None:
+    """``/login [provider]`` - sign in to a model route."""
+    from hx.providers import registry
+    from hx.tui.widgets.login import ProviderPicker, provider_options
+
+    provider_id = args.strip()
+    if not provider_id:
+        chosen = await ctx.app.push_screen_wait(
+            ProviderPicker(provider_options(registry.SPECS, ctx.app.auth))
+        )
+        if not chosen:
+            return
+        provider_id = chosen
+
+    try:
+        spec = registry.get(provider_id)
+    except registry.UnknownProvider:
+        known = ", ".join(s.id for s in registry.SPECS)
+        ctx.app.notice(f"Unknown provider {provider_id!r}. Known: {known}", "error")
+        return
+
+    if not spec.is_subscription:
+        # An API key has no flow to run - /configure is already that screen.
+        await cmd_configure(ctx, "")
+        return
+
+    await _run_oauth_login(ctx, spec)
+
+
+async def _run_oauth_login(ctx: CommandContext, spec: Any) -> None:
+    from hx.auth.oauth import codex as codex_oauth
+    from hx.auth.oauth.callback import CallbackError
+    from hx.auth.store import AuthStore
+    from hx.tui.widgets.login import LoginModal
+
+    modal = LoginModal(spec.label)
+    ctx.app.push_screen(modal)
+    try:
+        credential = await codex_oauth.login_browser(modal)
+    except asyncio.CancelledError:
+        ctx.app.notice("Sign-in cancelled.", "warning")
+        return
+    except (codex_oauth.OAuthError, CallbackError) as exc:
+        ctx.app.notice(f"Sign-in failed: {exc}", "error")
+        return
+    finally:
+        if modal.is_running:
+            modal.dismiss(None)
+
+    try:
+        AuthStore().save(spec.id, credential)
+    except OSError as exc:
+        ctx.app.notice(f"Signed in, but could not save the credential: {exc}", "error")
+        return
+
+    # The tokens themselves never reach the transcript.
+    ctx.app.notice(
+        f"Signed in to {spec.label}. Pick a model with /model.",
+        "success",
+    )
+
+
+async def cmd_logout(ctx: CommandContext, args: str) -> None:
+    """``/logout <provider>`` - forget a stored credential."""
+    from hx.auth.store import AuthStore
+    from hx.providers import registry
+
+    provider_id = args.strip()
+    if not provider_id:
+        known = ", ".join(s.id for s in registry.SPECS)
+        ctx.app.notice(f"Usage: /logout <provider>. Known: {known}", "warning")
+        return
+
+    if AuthStore().delete(provider_id):
+        ctx.app.notice(f"Removed the {provider_id} credential.", "success")
+    else:
+        ctx.app.notice(f"No stored credential for {provider_id}.", "warning")
 
 
 async def cmd_theme(ctx: CommandContext, args: str) -> None:
@@ -493,6 +638,8 @@ def build_default_commands() -> CommandRegistry:
         Command("compact", "Summarise older turns now", cmd_compact, "[focus]", takes_args=True),
         Command("todos", "Toggle the todo sidebar", cmd_todos),
         Command("resume", "Resume a previous session", cmd_resume),
+        Command("title", "Show or set the session name", cmd_title, "[text]", takes_args=True),
+        Command("prompt", "Show the system prompt in force", cmd_prompt),
         Command("cost", "Token and cost breakdown", cmd_cost),
         Command("context", "What is filling the context window", cmd_context),
         Command("skills", "List installed skills", cmd_skills),
@@ -503,6 +650,8 @@ def build_default_commands() -> CommandRegistry:
         Command("init", "Generate an HX.md for this project", cmd_init),
         Command("theme", "Switch the colour palette", cmd_theme, "[name]", takes_args=True),
         Command("configure", "Settings and the OpenRouter API key", cmd_configure),
+        Command("login", "Sign in to a model route", cmd_login, "[provider]", takes_args=True),
+        Command("logout", "Forget a stored credential", cmd_logout, "<provider>", takes_args=True),
         Command("copy", "Copy the last reply to the clipboard", cmd_copy),
         Command("help", "List commands and keys", cmd_help),
         Command("quit", "Exit HX", cmd_quit, aliases=("exit", "q")),

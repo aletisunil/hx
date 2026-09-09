@@ -15,7 +15,7 @@ from hx.core.events import EventBus
 from hx.core.lateinject import InjectionRegistry
 from hx.core.loop import AgentLoop
 from hx.core.messages import StopReason
-from hx.core.session import new_session
+from hx.core.session import load_session, new_session
 from hx.core.usage import TurnUsage
 from hx.providers.base import StreamDelta, StreamEnd
 from hx.providers.fake import FakeProvider, text_turn
@@ -47,9 +47,13 @@ def _gpt5() -> Any:
 def build_app(tmp_path: Path, script: list[Any] | None = None) -> HXApp:
     bus = EventBus()
     models = ModelRegistry()
+    session = new_session(tmp_path, MODEL)
+    # Already named, so a turn here is one provider call and not two - session
+    # naming has its own tests.
+    session.set_title("app session")
     loop = AgentLoop(
         provider=FakeProvider(script if script is not None else [text_turn("hello there")]),
-        session=new_session(tmp_path, MODEL),
+        session=session,
         tools=ToolRegistry(),
         permissions=None,
         context=ContextBuilder("sys", tmp_path),
@@ -103,6 +107,80 @@ async def test_status_bar_reports_cache_and_cost_after_a_turn(
             if app.query_one(StatusBar).cache_read:
                 break
         assert app.query_one(StatusBar).cache_hit_rate == pytest.approx(0.9)
+
+
+async def _stream(app: HXApp, pilot: Any, count: int, tag: str = "") -> None:
+    transcript = app.query_one(Transcript)
+    for index in range(count):
+        transcript.append_delta(f"{tag}word{index} " + ("\n\n" if index % 10 == 9 else ""))
+        await pilot.pause()
+
+
+async def test_the_transcript_keeps_following_the_tail_after_the_layout_moves(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """Opening the sidebar or resizing must not strand the reader mid-answer.
+
+    Both make the transcript shorter without moving the scroll offset. Gating
+    the follow on "is the offset at the bottom?" answered no from then on, so
+    the rest of the answer streamed off-screen.
+    """
+    app = build_app(tmp_path)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one(Transcript)
+        transcript.add_user_message("go")
+        transcript.start_assistant_message()
+        await _stream(app, pilot, 200)
+        assert transcript.scroll_offset.y == transcript.max_scroll_y > 0
+
+        await app.action_todos_toggle()
+        await pilot.pause()
+        await _stream(app, pilot, 40, "post")
+        assert transcript.scroll_offset.y == transcript.max_scroll_y
+
+        await pilot.resize_terminal(72, 24)
+        await pilot.pause()
+        await _stream(app, pilot, 40, "resized")
+        assert transcript.scroll_offset.y == transcript.max_scroll_y
+
+
+async def test_reading_back_is_not_yanked_to_the_tail(hx_home: Path, tmp_path: Path) -> None:
+    """The other half of the bargain: scrolling up holds while a turn streams."""
+    app = build_app(tmp_path)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one(Transcript)
+        transcript.add_user_message("go")
+        transcript.start_assistant_message()
+        await _stream(app, pilot, 200)
+
+        transcript.page_up()
+        await pilot.pause()
+        parked = transcript.scroll_offset.y
+        assert parked < transcript.max_scroll_y
+        await _stream(app, pilot, 60, "more")
+        assert transcript.scroll_offset.y == parked
+
+        transcript.scroll_to_bottom()
+        await pilot.pause()
+        await _stream(app, pilot, 20, "tail")
+        assert transcript.scroll_offset.y == transcript.max_scroll_y
+
+
+async def test_a_failed_tool_call_shows_its_reason_in_the_block(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """The loop carries the failure text to the block that drew the red band."""
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        transcript = app.query_one(Transcript)
+        transcript.add_tool_block("t1", "Edit", {"file_path": "app.py"})
+        transcript.finish_tool_block("t1", "error", True, detail="String to replace was not found")
+        await pilot.pause()
+        block = transcript._tools["t1"]
+        assert "String to replace was not found" in block.output
 
 
 async def test_unknown_slash_command_is_reported_not_sent_to_the_model(
@@ -723,7 +801,6 @@ async def test_configure_saves_and_applies_a_new_key(hx_home: Path, tmp_path: Pa
         await worker.wait()
 
         assert app.loop.provider.api_key == "sk-or-v1-newkey0123456789"
-        assert app.api_key == "sk-or-v1-newkey0123456789"
 
         notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
         assert "sk-or-…6789" in notices
@@ -1159,3 +1236,47 @@ async def test_a_stale_ctrl_c_does_not_arm_the_exit(hx_home: Path, tmp_path: Pat
         await app.action_clear()
         assert app.is_running
         assert app._clear_armed, "and re-arms with its own warning first"
+
+
+async def test_title_command_shows_and_sets_the_session_name(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+
+    async with app.run_test() as pilot:
+        await app.submit("/title")
+        await pilot.pause()
+        await app.submit("/title parser rewrite")
+        await pilot.pause()
+        text = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+
+    assert "Session title: app session" in text
+    assert "Session title: parser rewrite" in text
+    assert app.loop.session.meta.title == "parser rewrite"
+    assert load_session(app.loop.session.meta.session_id).meta.title == "parser rewrite"
+
+
+async def test_title_command_says_when_a_session_is_unnamed(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    app.loop.session.meta.title = None
+
+    async with app.run_test() as pilot:
+        await app.submit("/title")
+        await pilot.pause()
+        text = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+
+    assert "not named yet" in text
+
+
+async def test_prompt_command_shows_the_prompt_in_force(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    app.loop.context.system_prompt = "You are TESTBOT."
+
+    async with app.run_test() as pilot:
+        await app.submit("/prompt")
+        await pilot.pause()
+        text = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+
+    assert "You are TESTBOT." in text
+    assert "Source: built-in" in text
+    # The built-in prompt is what a fresh resolve returns, so the in-use text
+    # differs from it and the command must say the override applies next run.
+    assert "applies next run" in text

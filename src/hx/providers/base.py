@@ -23,6 +23,11 @@ class StreamDelta:
 
     text: str | None = None
     thinking: str | None = None
+    thinking_signature: str | None = None
+    """Opaque provider payload for the turn's reasoning, emitted once at the
+    end of the stream. Providers whose reasoning must be replayed verbatim on
+    the next turn (OpenAI Responses) put it here; it is stored on the
+    :class:`~hx.core.messages.ThinkingBlock` and never shown to the user."""
     tool_use_id: str | None = None
     tool_name: str | None = None
     tool_input_json: str | None = None

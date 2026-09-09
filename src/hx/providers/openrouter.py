@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import random
 import time
 from collections.abc import AsyncIterator
@@ -24,6 +23,8 @@ from typing import Any, ClassVar
 
 import httpx
 
+from hx.auth.resolve import MissingCredential
+from hx.auth.store import OPENROUTER, ApiKeyCredential, AuthStore, mask
 from hx.core.messages import (
     Message,
     StopReason,
@@ -33,7 +34,6 @@ from hx.core.messages import (
     ToolUseBlock,
 )
 from hx.core.usage import TurnUsage
-from hx.paths import auth_file
 from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, StreamEnd, StreamItem
 
 API_BASE = "https://openrouter.ai/api/v1"
@@ -393,29 +393,17 @@ async def fetch_models(api_key: str, base_url: str = API_BASE) -> list[dict[str,
 
 
 def load_api_key() -> str:
-    """Resolve the key: ``HX_OPENROUTER_API_KEY``, then ``OPENROUTER_API_KEY``,
-    then ``~/.hx/auth.json``.
+    """Resolve the OpenRouter key.
+
+    Thin wrapper over :class:`~hx.auth.resolve.AuthResolver` kept because the
+    CLI, the TUI and the tests all reach for this name.
 
     Raises:
         MissingAPIKey: so the TUI can show the onboarding prompt.
     """
-    for name in ("HX_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"):
-        if key := os.environ.get(name):
-            return key
+    from hx.auth.resolve import AuthResolver
 
-    path = auth_file()
-    if path.is_file():
-        try:
-            stored = json.loads(path.read_text()).get("openrouter_api_key")
-        except (OSError, json.JSONDecodeError):
-            stored = None
-        if stored:
-            return str(stored)
-
-    raise MissingAPIKey(
-        "No OpenRouter API key found. Set OPENROUTER_API_KEY, or run `hx` interactively "
-        "to save one. Get a key at https://openrouter.ai/keys"
-    )
+    return AuthResolver().resolve_static(OPENROUTER).token
 
 
 def api_key_source() -> str | None:
@@ -424,45 +412,21 @@ def api_key_source() -> str | None:
     The environment wins over the saved file, so this is what stops a user
     saving a new key through the UI and wondering why nothing changed.
     """
-    for name in ("HX_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"):
-        if os.environ.get(name):
-            return f"environment ({name})"
+    from hx.auth.resolve import AuthResolver
 
-    path = auth_file()
-    if path.is_file():
-        try:
-            if json.loads(path.read_text()).get("openrouter_api_key"):
-                return str(path)
-        except (OSError, json.JSONDecodeError):
-            return None
-    return None
+    return AuthResolver().source(OPENROUTER)
 
 
 def mask_api_key(key: str) -> str:
     """A key fragment safe to display. Never the whole thing."""
-    if len(key) <= 12:
-        return "…"
-    return f"{key[:6]}…{key[-4:]}"
+    return mask(key)
 
 
 def save_api_key(key: str) -> None:
     """Persist to ``~/.hx/auth.json`` with mode 0600."""
-    path = auth_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            data = {}
-    data["openrouter_api_key"] = key
-
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    # Restrict before the rename so the key is never briefly world-readable.
-    tmp.chmod(0o600)
-    tmp.replace(path)
+    AuthStore().save(OPENROUTER, ApiKeyCredential(key=key))
 
 
-class MissingAPIKey(Exception):
-    pass
+#: Kept as a name because the CLI and TUI catch it; the credential layer
+#: raises the provider-agnostic exception underneath.
+MissingAPIKey = MissingCredential

@@ -38,6 +38,34 @@ def test_a_tool_block_reports_its_state_before_it_is_read() -> None:
     assert "✗" in _plain(failed.render())
 
 
+def test_a_failed_block_says_why_it_failed() -> None:
+    """The reason reaches the screen, not just the model.
+
+    Tools report failures as a constant summary plus a message, so a block that
+    drew only the summary was a red band that said nothing.
+    """
+    block = _block()
+    block.finish("error", is_error=True, detail="String to replace was not found")
+    assert "String to replace was not found" in _plain(block.render())
+
+
+def test_a_failure_that_streamed_output_keeps_it() -> None:
+    """What the tool printed is the better account of the same failure."""
+    block = _block()
+    block.append("pytest: error: unrecognized arguments\n")
+    block.finish("error", is_error=True, detail="exit code 2")
+    rendered = _plain(block.render())
+    assert "unrecognized arguments" in rendered
+    assert "exit code 2" not in rendered
+
+
+def test_a_failure_with_nothing_to_show_costs_no_blank_row() -> None:
+    """An empty body under the header reads as a rendering fault."""
+    block = _block()
+    block.finish("error", is_error=True)
+    assert len(_plain(block.render()).strip("\n").splitlines()) == 1
+
+
 def test_a_failed_block_is_tinted_differently_from_a_finished_one() -> None:
     done, failed = _block(), _block()
     done.finish("ok", is_error=False)

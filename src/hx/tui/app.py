@@ -19,6 +19,7 @@ actions are pushed back into the loop as messages.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -82,7 +83,7 @@ class HXApp(App[None]):
         bus: EventBus,
         settings: Settings,
         models: ModelRegistry | None = None,
-        api_key: str = "",
+        auth: Any = None,
         sandbox_active: bool = True,
         sandbox_backend: str = "none",
         skills: Any = None,
@@ -99,7 +100,7 @@ class HXApp(App[None]):
         self.mcp = mcp
         self.loop = loop
         self.models = models if models is not None else ModelRegistry()
-        self.api_key = api_key
+        self.auth = auth if auth is not None else _default_auth()
         self.bus = bus
         self.settings = settings
         self.commands: CommandRegistry = build_default_commands()
@@ -153,7 +154,10 @@ class HXApp(App[None]):
         self._bottom_rule = self.query_one(BottomRule)
 
         status = self._status
-        status.set_model(self.loop.model)
+        status.set_model(
+            self.loop.model,
+            subscription=self.models.get_or_default(self.loop.model).is_subscription,
+        )
         status.set_mode(self.mode.value, self.sandbox_active, self._sandbox_backend)
         status.set_location(_home_relative(self.settings.cwd), git_branch(self.settings.cwd))
         if self.loop.model_info is not None:
@@ -216,6 +220,7 @@ class HXApp(App[None]):
                         event.is_error,
                         metadata=event.metadata,
                         duration_ms=event.duration_ms,
+                        detail=event.detail,
                     )
                     working.start("thinking")
                 case ev.UsageUpdated():
@@ -338,7 +343,12 @@ class HXApp(App[None]):
             emit_progress=lambda chunk: self._transcript.update_tool_block(tool_use_id, chunk),
         )
         result = await self.tools.call("Bash", {"command": command}, ctx)
-        self._transcript.finish_tool_block(tool_use_id, result.summary, result.is_error)
+        self._transcript.finish_tool_block(
+            tool_use_id,
+            result.summary,
+            result.is_error,
+            detail=result.content if result.is_error else "",
+        )
 
     async def _permit_shell(self, command: str) -> bool:
         from hx.permissions.engine import PermissionRequest
@@ -436,11 +446,45 @@ class HXApp(App[None]):
         Saved keys are picked up on the next start; this is what makes the
         change take effect now, without losing the session.
         """
-        self.api_key = key
         provider = getattr(self.loop, "provider", None)
         setter = getattr(provider, "set_api_key", None)
         if setter is not None:
             setter(key)
+
+    async def use_route_for(self, model_id: str) -> None:
+        """Point the session at whichever provider serves ``model_id``.
+
+        A model id carries its route, so switching from an OpenRouter model to
+        a subscription one has to replace the provider - not just the model
+        name, which would send a Codex id to OpenRouter.
+
+        Routes are compared by model id rather than by the live provider's
+        name, so an injected or wrapped provider is left alone as long as the
+        route has not actually changed.
+        """
+        from hx.providers import registry
+
+        spec = registry.provider_for(model_id)
+        if spec.id == registry.provider_for(self.loop.model).id:
+            return
+
+        provider = registry.build_provider(
+            model_id, self.auth, session_id=self.loop.session.meta.session_id
+        )
+        previous = self.loop.set_provider(provider)
+        self._retarget_subagents(provider)
+        with contextlib.suppress(Exception):
+            await previous.aclose()
+
+    def _retarget_subagents(self, provider: Any) -> None:
+        """Subagents share the parent's provider; they must follow the switch."""
+        try:
+            task_tool = self.loop.tools.get("Task")
+        except Exception:
+            return
+        runner = getattr(task_tool, "runner", None)
+        if runner is not None:
+            runner.provider = provider
 
     def last_message_text(self) -> str | None:
         """Text of the most recent assistant message, for ``/copy``."""
@@ -461,6 +505,11 @@ class HXApp(App[None]):
         from hx.core.session import new_session
 
         self.loop.session = new_session(self.settings.cwd, self.loop.model)
+        # The session id is the prompt-cache key on routes that use one; a
+        # stale id would keep the new conversation hitting the old cache.
+        setter = getattr(self.loop.provider, "set_session_id", None)
+        if setter is not None:
+            setter(self.loop.session.meta.session_id)
         self._transcript.clear_all()
         self._transcript.add_notice("New session started.", "success")
         status = self._status
@@ -479,6 +528,9 @@ class HXApp(App[None]):
             return
 
         self.loop.session = session
+        setter = getattr(self.loop.provider, "set_session_id", None)
+        if setter is not None:
+            setter(session.meta.session_id)
         transcript = self._transcript
         transcript.clear_all()
         for message in session.active_messages():
@@ -632,12 +684,19 @@ def _home_relative(path: Path) -> str:
         return str(path)
 
 
+def _default_auth() -> Any:
+    """Stand-alone apps (tests, `textual run`) still need a resolver."""
+    from hx.auth.resolve import AuthResolver
+
+    return AuthResolver()
+
+
 async def run_tui(
     loop: AgentLoop,
     bus: EventBus,
     settings: Settings,
     models: ModelRegistry | None = None,
-    api_key: str = "",
+    auth: Any = None,
     sandbox_active: bool = True,
     sandbox_backend: str = "none",
     skills: Any = None,
@@ -650,7 +709,7 @@ async def run_tui(
         bus,
         settings,
         models=models,
-        api_key=api_key,
+        auth=auth,
         sandbox_active=sandbox_active,
         sandbox_backend=sandbox_backend,
         skills=skills,

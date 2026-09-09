@@ -94,6 +94,24 @@ def project_agents_dir(cwd: Path | None = None) -> Path:
     return project_dir(cwd) / "agents"
 
 
+def user_system_prompt_file() -> Path:
+    """User-level replacement for the built-in system prompt."""
+    return user_home() / "system-prompt.md"
+
+
+def user_system_prompt_append_file() -> Path:
+    """User-level text appended to whichever system prompt is in force."""
+    return user_home() / "system-prompt-append.md"
+
+
+def project_system_prompt_file(cwd: Path | None = None) -> Path:
+    return project_dir(cwd) / "system-prompt.md"
+
+
+def project_system_prompt_append_file(cwd: Path | None = None) -> Path:
+    return project_dir(cwd) / "system-prompt-append.md"
+
+
 def ensure_user_dirs() -> None:
     """Create the user-level directory skeleton if it does not exist."""
     for path in (user_home(), sessions_dir(), user_skills_dir(), user_agents_dir(), logs_dir()):

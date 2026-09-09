@@ -58,6 +58,12 @@ class ToolCallFinished(Event):
     is_error: bool
     duration_ms: float
     summary: str
+    detail: str = ""
+    """Why it failed, in the tool's own words.
+
+    ``summary`` is a label - often the constant ``"error"`` - so without this
+    the reason a call failed reached the model and nothing else. Empty on
+    success, where the output the tool streamed is the whole story."""
     metadata: dict[str, Any] = field(default_factory=dict)
     """Structured detail the renderer draws with - an edit's diff, a command's
     exit code. Presentation only: the model never sees it."""

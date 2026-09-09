@@ -14,7 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from hx.config import BashSettings, ContextSettings, ModelSettings, PermissionSettings, Settings
+from hx.config import (
+    BashSettings,
+    ContextSettings,
+    ModelSettings,
+    PermissionSettings,
+    PromptSettings,
+    Settings,
+)
 from hx.tui.app import HXApp
 from hx.tui.commands import build_default_commands
 
@@ -124,6 +131,7 @@ def test_documented_settings_all_exist(readme: str) -> None:
         "permissions": PermissionSettings,
         "context": ContextSettings,
         "bash": BashSettings,
+        "prompt": PromptSettings,
     }
     top_level = {f.name for f in dataclasses.fields(Settings)}
 
@@ -142,6 +150,7 @@ def test_every_setting_is_documented(readme: str) -> None:
         "permissions": PermissionSettings,
         "context": ContextSettings,
         "bash": BashSettings,
+        "prompt": PromptSettings,
     }
     for name, cls in groups.items():
         real = {f.name for f in dataclasses.fields(cls)}
@@ -157,6 +166,7 @@ def test_documented_defaults_match_the_code(readme: str) -> None:
         "permissions": PermissionSettings,
         "context": ContextSettings,
         "bash": BashSettings,
+        "prompt": PromptSettings,
     }
     for name, cls in groups.items():
         for field in dataclasses.fields(cls):
@@ -205,7 +215,13 @@ def test_documented_cli_flags_are_accepted(readme: str) -> None:
     for flag in re.findall(r"^hx (--[a-z-]+)", readme, re.M):
         if flag in {"--version", "--help"}:
             continue
-        value = {"--model": "m", "--mode": "plan", "--cwd": "."}.get(flag)
+        value = {
+            "--model": "m",
+            "--mode": "plan",
+            "--cwd": ".",
+            "--system-prompt": "be terse",
+            "--append-system-prompt": "and kind",
+        }.get(flag)
         parse_args([flag, value] if value else [flag])
 
 

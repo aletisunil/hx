@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from hx.auth.resolve import AuthResolver
 from hx.config import PermissionMode, load_settings
 from hx.core.context import ContextBuilder, load_system_prompt
 from hx.core.events import EventBus
@@ -43,7 +44,7 @@ def _key() -> str:
 async def _build(tmp_path: Path) -> tuple[AgentLoop, OpenRouterProvider]:
     provider = OpenRouterProvider(_key())
     models = ModelRegistry()
-    await models.refresh(_key())
+    await models.refresh(AuthResolver())
 
     loop = AgentLoop(
         provider=provider,

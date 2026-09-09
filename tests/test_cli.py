@@ -131,3 +131,56 @@ def test_auth_rejects_an_unknown_subcommand(
 
     assert run_auth_command(["nonsense"]) == 2
     assert "hx auth" in capsys.readouterr().err
+
+
+def test_system_prompt_flags_land_in_the_settings_layer() -> None:
+    parsed = parse_args(
+        [
+            "--system-prompt",
+            "be terse",
+            "--append-system-prompt",
+            "one",
+            "--append-system-prompt",
+            "two",
+        ]
+    )
+    assert parsed.overrides == {"prompt": {"system": "be terse", "append": ["one", "two"]}}
+
+
+def test_a_prompt_flag_reads_an_at_path(tmp_path: Path) -> None:
+    target = tmp_path / "team.md"
+    target.write_text("You are TESTBOT.")
+
+    parsed = parse_args(["--system-prompt", f"@{target}"])
+
+    assert parsed.overrides is not None
+    assert parsed.overrides["prompt"]["system"] == "You are TESTBOT."
+
+
+def test_a_missing_prompt_file_is_a_usage_error(tmp_path: Path) -> None:
+    """Falling back to the built-in prompt silently is the worse failure."""
+    with pytest.raises(UsageError):
+        parse_args(["--system-prompt", f"@{tmp_path / 'nope.md'}"])
+
+
+def test_hx_prompt_prints_the_prompt_and_its_source(
+    hx_home: Path, project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / ".hx" / "system-prompt.md").write_text("You are TESTBOT.")
+
+    assert main(["prompt", "--cwd", str(project)]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "You are TESTBOT."
+    assert "system-prompt.md" in captured.err
+
+
+def test_hx_prompt_reports_appended_blocks(
+    hx_home: Path, project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["prompt", "--cwd", str(project), "--append-system-prompt", "be French"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out.rstrip().endswith("be French")
+    assert "[source] built-in" in captured.err
+    assert "[append] --append-system-prompt" in captured.err

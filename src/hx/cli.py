@@ -3,6 +3,7 @@
 ``hx``                 launch the TUI in the current directory
 ``hx -p "..."``        print mode: run one prompt headless, stream to stdout
 ``hx resume [id]``     resume a session
+``hx prompt``          print the resolved system prompt
 ``hx mcp ...``         manage MCP servers
 ``hx upgrade``         self-update via uv
 
@@ -15,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import getpass
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -31,6 +33,7 @@ Usage:
   hx                        Start the interactive TUI
   hx -p, --print PROMPT     Run one prompt headlessly and print the result
   hx resume [SESSION_ID]    Resume a previous session
+  hx prompt                 Print the system prompt this directory would use
   hx mcp list|add|remove    Manage MCP servers
   hx auth [set|clear]       Show or change the OpenRouter API key
   hx upgrade                Update hx to the latest version
@@ -42,6 +45,9 @@ Options:
   --mode MODE               plan | default | acceptEdits | bypass
   --cwd PATH                Run against a different project directory
   --no-sandbox              Disable OS sandboxing (permission rules still apply)
+  --system-prompt TEXT      Replace the system prompt (@path reads a file)
+  --append-system-prompt TEXT
+                            Append to the system prompt; repeatable (@path reads a file)
 """
 
 
@@ -82,6 +88,8 @@ def _dispatch(args: list[str]) -> int:
         return run_mcp_command(list(parsed.rest))
     if parsed.command == "auth":
         return run_auth_command(list(parsed.rest))
+    if parsed.command == "prompt":
+        return run_prompt_command(parsed)
     if parsed.command == "print":
         return run_print_command(parsed)
     return run_tui_command(parsed)
@@ -118,6 +126,17 @@ def parse_args(args: list[str]) -> ParsedArgs:
             parsed.cwd = Path(args[index]).expanduser()
         elif arg == "--no-sandbox":
             overrides.setdefault("permissions", {})["sandbox"] = False
+        elif arg == "--system-prompt":
+            index += 1
+            if index >= len(args):
+                raise UsageError("--system-prompt requires a value")
+            overrides.setdefault("prompt", {})["system"] = _prompt_value(args[index])
+        elif arg == "--append-system-prompt":
+            index += 1
+            if index >= len(args):
+                raise UsageError("--append-system-prompt requires a value")
+            appends = overrides.setdefault("prompt", {}).setdefault("append", [])
+            appends.append(_prompt_value(args[index]))
         elif arg.startswith("-"):
             raise UsageError(f"unknown option {arg}")
         else:
@@ -126,7 +145,7 @@ def parse_args(args: list[str]) -> ParsedArgs:
 
     if positional:
         head, *tail = positional
-        if head in {"resume", "mcp", "upgrade", "auth"}:
+        if head in {"resume", "prompt", "mcp", "upgrade", "auth"}:
             parsed.command = head
             parsed.rest = tuple(tail)
             if head == "resume" and tail:
@@ -138,6 +157,21 @@ def parse_args(args: list[str]) -> ParsedArgs:
     return parsed
 
 
+def _prompt_value(raw: str) -> str:
+    """A prompt flag's value. ``@path`` reads the file, anything else is literal.
+
+    A missing file is a usage error, not an empty prompt: silently running with
+    the built-in prompt after the user asked for theirs is the worse failure.
+    """
+    if not raw.startswith("@"):
+        return raw
+    path = Path(raw[1:]).expanduser()
+    try:
+        return path.read_text()
+    except OSError as exc:
+        raise UsageError(f"cannot read prompt file {path}: {exc}") from exc
+
+
 @dataclass(slots=True)
 class Runtime:
     """Everything one HX run needs, wired together."""
@@ -147,7 +181,8 @@ class Runtime:
     bus: Any
     loop: Any
     models: Any
-    api_key: str
+    auth: Any
+    """:class:`~hx.auth.resolve.AuthResolver` - every route's credentials."""
     provider: Any
     shell: Any = None
     jobs: Any = None
@@ -190,7 +225,7 @@ class Runtime:
         if not self.models.is_stale:
             return
         with contextlib.suppress(Exception):
-            await self.models.refresh(self.api_key)
+            await self.models.refresh(self.auth)
 
     async def aclose(self) -> None:
         if self.mcp is not None:
@@ -212,6 +247,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     """
     from hx.agents.definitions import discover as discover_agents
     from hx.agents.subagent import SubagentRunner
+    from hx.auth.resolve import AuthResolver
     from hx.config import load_settings
     from hx.core.compaction import Compactor
     from hx.core.context import ContextBuilder, build_project_context, load_system_prompt
@@ -224,8 +260,8 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     from hx.paths import ensure_user_dirs, session_outputs_dir
     from hx.permissions.engine import PermissionEngine, load_rules, migrate_legacy_rules
     from hx.permissions.sandbox import Sandbox, default_policy
+    from hx.providers import registry
     from hx.providers.models import ModelRegistry
-    from hx.providers.openrouter import OpenRouterProvider, load_api_key
     from hx.skills.loader import build_index
     from hx.skills.loader import discover as discover_skills
     from hx.skills.runtime import ActiveSkills, SkillTool
@@ -239,14 +275,19 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     settings = load_settings(parsed.cwd, parsed.overrides)
     bus_holder = EventBus()
 
-    api_key = load_api_key()
-    provider = OpenRouterProvider(api_key)
+    auth = AuthResolver()
 
     models = ModelRegistry()
     models.load_cache()
     model_info = models.get_or_default(settings.models.model)
 
     session = load_session(resume) if resume else new_session(settings.cwd, settings.models.model)
+
+    # Built after the session because a subscription route keys its prompt
+    # cache on the session id.
+    provider = registry.build_provider(
+        settings.models.model, auth, session_id=session.meta.session_id
+    )
 
     sandbox = (
         Sandbox(default_policy(settings.cwd, settings.permissions.allow_network))
@@ -273,7 +314,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     )
 
     context_builder = ContextBuilder(
-        load_system_prompt(settings.cwd),
+        load_system_prompt(settings.cwd, settings.prompt),
         settings.cwd,
         keep_recent_turns=settings.context.keep_recent_turns,
     )
@@ -324,7 +365,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         bus=bus_holder,
         loop=loop,
         models=models,
-        api_key=api_key,
+        auth=auth,
         provider=provider,
         shell=shell,
         jobs=jobs,
@@ -391,13 +432,15 @@ def prompt_for_api_key() -> bool:
 
 def run_tui_command(parsed: ParsedArgs) -> int:
     """Boot the full stack - settings, provider, tools, MCP, skills - and run the TUI."""
-    from hx.providers.openrouter import MissingAPIKey
+    from hx.auth.resolve import MissingCredential
     from hx.tui.app import run_tui
 
     try:
         runtime = build_runtime(parsed, resume=_resume_target(parsed))
-    except MissingAPIKey as exc:
-        if not prompt_for_api_key():
+    except MissingCredential as exc:
+        # Onboard for the route the configured model needs, not always for
+        # OpenRouter: a user set to a Codex model wants a sign-in, not a key.
+        if run_login(exc.provider_id) != 0:
             return _report(exc)
         try:
             runtime = build_runtime(parsed, resume=_resume_target(parsed))
@@ -415,7 +458,7 @@ def run_tui_command(parsed: ParsedArgs) -> int:
                 runtime.bus,
                 runtime.settings,
                 runtime.models,
-                runtime.api_key,
+                runtime.auth,
                 sandbox_active=runtime.sandbox_active,
                 sandbox_backend=runtime.sandbox_backend,
                 skills=runtime.skills,
@@ -454,7 +497,11 @@ def run_print_command(parsed: ParsedArgs) -> int:
                         print(f"[permission] {event.description}", file=sys.stderr)
                     case ev.ToolCallFinished():
                         marker = "error" if event.is_error else "ok"
-                        print(f"[tool] {marker} ({event.duration_ms:.0f}ms)", file=sys.stderr)
+                        reason = f" {event.detail}" if event.detail else ""
+                        print(
+                            f"[tool] {marker} ({event.duration_ms:.0f}ms){reason}",
+                            file=sys.stderr,
+                        )
                     case ev.ErrorRaised():
                         print(f"[error] {event.message}", file=sys.stderr)
 
@@ -484,6 +531,28 @@ def run_print_command(parsed: ParsedArgs) -> int:
         return 1 if result.error else 0
 
     return asyncio.run(main_async())
+
+
+def run_prompt_command(parsed: ParsedArgs) -> int:
+    """``hx prompt`` - print the system prompt this directory resolves to.
+
+    The prompt goes to stdout so it can be piped or diffed; where it came from
+    goes to stderr so it never contaminates that output.
+    """
+    from hx.config import load_settings
+    from hx.core.context import resolve_system_prompt
+
+    try:
+        settings = load_settings(parsed.cwd, parsed.overrides)
+        resolved = resolve_system_prompt(settings.cwd, settings.prompt)
+    except Exception as exc:
+        return _report(exc)
+
+    print(resolved.text)
+    print(f"[source] {resolved.source}", file=sys.stderr)
+    for append in resolved.appends:
+        print(f"[append] {append}", file=sys.stderr)
+    return 0
 
 
 def _resume_target(parsed: ParsedArgs) -> str | None:
@@ -577,35 +646,116 @@ async def _probe_servers(configs: list[Any]) -> list[Any]:
 
 
 AUTH_USAGE = """\
-hx auth              Show whether a key is set, and where it comes from
-hx auth set          Paste a new key (hidden) and save it to ~/.hx/auth.json
-hx auth clear        Remove the saved key
+hx auth                     Show which routes have a credential
+hx auth set                 Paste an OpenRouter key (hidden) and save it
+hx auth clear               Remove the saved OpenRouter key
+hx auth login [provider]    Sign in - openrouter, openai-codex
+hx auth logout <provider>   Forget a stored credential
 
-The environment (HX_OPENROUTER_API_KEY, then OPENROUTER_API_KEY) takes
-precedence over the saved file.
+Providers:
+  openrouter      API key. The environment (HX_OPENROUTER_API_KEY, then
+                  OPENROUTER_API_KEY) takes precedence over the saved file.
+  openai-codex    ChatGPT Plus/Pro subscription, signed in over OAuth.
 """
 
 
-def run_auth_command(args: list[str]) -> int:
-    """Show or change the stored OpenRouter key.
+class ConsoleLogin:
+    """Drives an OAuth flow from a plain terminal.
 
-    The TUI has /configure; this is the same thing for a headless machine,
-    where there is no interface to prompt from mid-session.
+    The paste prompt runs on a thread so the loopback callback can win the race
+    on a machine that does have a browser.
     """
-    import json
 
-    from hx.providers.openrouter import api_key_source, load_api_key, mask_api_key
+    def __init__(self) -> None:
+        self._url: str | None = None
+
+    def show_url(self, url: str, instructions: str) -> None:
+        self._url = url
+        print(f"\n{instructions}\n\n  {url}\n")
+
+    def show_device_code(self, user_code: str, verification_uri: str) -> None:
+        print(f"\nOpen {verification_uri} and enter this code:\n\n  {user_code}\n")
+
+    def progress(self, message: str) -> None:
+        print(message)
+
+    async def prompt_paste(self, message: str) -> str:
+        if not sys.stdin.isatty():
+            # Nothing to read from; let the callback server decide the outcome.
+            await asyncio.Event().wait()
+        return await asyncio.to_thread(input, f"{message} ")
+
+
+def run_login(provider_id: str) -> int:
+    """Sign in to one provider and store the credential."""
+    from hx.auth.oauth import codex as codex_oauth
+    from hx.auth.oauth.callback import CallbackError
+    from hx.auth.store import OPENROUTER, AuthStore
+    from hx.providers import registry
+
+    if provider_id == OPENROUTER:
+        return 0 if prompt_for_api_key() else 1
+
+    try:
+        spec = registry.get(provider_id)
+    except registry.UnknownProvider:
+        known = ", ".join(s.id for s in registry.SPECS)
+        print(f"Unknown provider {provider_id!r}. Known: {known}", file=sys.stderr)
+        return 2
+
+    if provider_id != codex_oauth.PROVIDER_ID:
+        print(f"{spec.label} has no interactive login.", file=sys.stderr)
+        return 2
+
+    interaction = ConsoleLogin()
+    use_device = not sys.stdin.isatty() or os.environ.get("HX_LOGIN_DEVICE_CODE") == "1"
+    flow = codex_oauth.login_device_code if use_device else codex_oauth.login_browser
+
+    try:
+        credential = asyncio.run(flow(interaction))
+    except (codex_oauth.OAuthError, CallbackError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        return 1
+
+    AuthStore().save(provider_id, credential)
+    print(f"Signed in to {spec.label}. Saved to {auth_file()} (mode 0600).")
+    print("Select a model with: hx --model openai-codex/gpt-5.3-codex")
+    return 0
+
+
+def run_auth_command(args: list[str]) -> int:
+    """Show or change stored credentials.
+
+    The TUI has /login and /configure; this is the same thing for a headless
+    machine, where there is no interface to prompt from mid-session.
+    """
+    from hx.auth.resolve import AuthResolver
+    from hx.auth.store import OPENROUTER, AuthStore
+    from hx.providers import registry
 
     action = args[0] if args else "status"
+    resolver = AuthResolver()
 
     if action == "status":
-        source = api_key_source()
-        if source is None:
-            print("No OpenRouter API key set. Run `hx auth set`.")
+        signed_in = False
+        for spec in registry.SPECS:
+            source = resolver.source(spec.id)
+            if source is None:
+                print(f"{spec.id:<14} not signed in")
+                continue
+            signed_in = True
+            print(f"{spec.id:<14} {_credential_label(resolver, spec):<20} {source}")
+            if source.startswith("environment"):
+                print(f"{'':<14} the environment overrides anything saved in {auth_file()}.")
+        if not signed_in:
+            print(
+                "\nRun `hx auth set` to save an OpenRouter key, or `hx auth login` "
+                "to sign in to a subscription."
+            )
             return 1
-        print(f"Key {mask_api_key(load_api_key())} from {source}")
-        if source.startswith("environment"):
-            print("Note: the environment overrides anything saved in ~/.hx/auth.json.")
         return 0
 
     if action == "set":
@@ -614,23 +764,63 @@ def run_auth_command(args: list[str]) -> int:
             return 1
         return 0
 
-    if action == "clear":
-        path = auth_file()
-        if not path.is_file():
-            print("No saved key to remove.")
+    if action == "login":
+        return run_login(args[1] if len(args) > 1 else _choose_provider())
+
+    if action == "logout":
+        if len(args) < 2:
+            print(AUTH_USAGE, file=sys.stderr)
+            return 2
+        if AuthStore().delete(args[1]):
+            print(f"Removed the {args[1]} credential from {auth_file()}.")
             return 0
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            data = {}
-        data.pop("openrouter_api_key", None)
-        path.write_text(json.dumps(data, indent=2))
-        path.chmod(0o600)
-        print(f"Removed the saved key from {path}.")
+        print(f"No stored credential for {args[1]}.")
+        return 0
+
+    if action == "clear":
+        if AuthStore().delete(OPENROUTER):
+            print(f"Removed the saved key from {auth_file()}.")
+        else:
+            print("No saved key to remove.")
         return 0
 
     print(AUTH_USAGE, file=sys.stderr)
     return 2
+
+
+def _credential_label(resolver: Any, spec: Any) -> str:
+    """A one-word description of the credential, never the secret itself."""
+    from hx.auth.resolve import ExpiredCredential, MissingCredential
+    from hx.auth.store import mask
+
+    if spec.is_subscription:
+        return "signed in"
+    try:
+        return f"key {mask(resolver.resolve_static(spec.id).token)}"
+    except (MissingCredential, ExpiredCredential):
+        return "unusable"
+
+
+def _choose_provider() -> str:
+    """Ask which provider to sign in to. Defaults to OpenRouter when piped."""
+    from hx.auth.store import OPENROUTER
+    from hx.providers import registry
+
+    if not sys.stdin.isatty():
+        return OPENROUTER
+
+    print("Sign in to:")
+    for index, spec in enumerate(registry.SPECS, start=1):
+        print(f"  {index}  {spec.label}")
+    try:
+        choice = input("Choice [1]: ").strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return OPENROUTER
+    try:
+        return registry.SPECS[int(choice) - 1].id
+    except (ValueError, IndexError):
+        return OPENROUTER
 
 
 def run_upgrade_command() -> int:
@@ -644,9 +834,9 @@ def run_upgrade_command() -> int:
 
 
 def _report(exc: Exception) -> int:
-    from hx.providers.openrouter import MissingAPIKey
+    from hx.auth.resolve import ExpiredCredential, MissingCredential
 
-    if isinstance(exc, MissingAPIKey | UsageError):
+    if isinstance(exc, MissingCredential | ExpiredCredential | UsageError):
         print(f"error: {exc}", file=sys.stderr)
         return 2
     raise exc

@@ -15,6 +15,7 @@ from rich.console import Group, RenderableType
 from rich.markdown import Heading, Markdown
 from rich.padding import Padding
 from rich.text import Text
+from textual import events
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
@@ -136,11 +137,18 @@ class ToolBlock(Static):
         is_error: bool,
         metadata: dict[str, Any] | None = None,
         duration_ms: float = 0.0,
+        detail: str = "",
     ) -> None:
         self.summary = summary
         self.is_error = is_error
         self.metadata = metadata or {}
         self.duration_ms = duration_ms
+        # A failure that streamed nothing has its reason in ``detail`` alone;
+        # without this the block is a red band that says only that something
+        # went wrong. A tool that did stream keeps what it printed - that is
+        # the more specific account of the same failure.
+        if is_error and detail and not self.output.strip():
+            self.output = detail
 
     @property
     def state(self) -> str:
@@ -178,6 +186,10 @@ class ToolBlock(Static):
         header.append_text(renderer.header(call))
 
         body = renderer.body(call)
+        if isinstance(body, Text) and not body.plain.strip():
+            # An empty body still costs a row, and a blank tinted line under a
+            # header reads as a rendering fault rather than as no content.
+            body = None
         content: RenderableType = Group(header, body) if body is not None else header
         return Padding(content, (0, 1), style=THEME.bg(background))
 
@@ -209,9 +221,15 @@ class Notice(Static):
 class Transcript(VerticalScroll):
     """Scrollback for the conversation.
 
-    Follows the tail only while the user is already at the bottom - yanking the
-    view down mid-scroll while they are reading earlier output is the fastest
-    way to make a TUI feel hostile.
+    Whether to follow the tail is decided when the *user* scrolls, and
+    remembered. Asking "is the offset at the bottom?" at each delta instead
+    looks equivalent and is not: opening the todo sidebar, growing the prompt
+    with a multi-line draft and resizing the terminal all make the transcript
+    shorter without moving the offset, so the answer became no and stayed no,
+    and the rest of the answer streamed off-screen.
+
+    Scrolling up stops the follow, so reading back through earlier output is
+    never yanked away; scrolling back to the bottom starts it again.
     """
 
     def __init__(self, cwd: Path | None = None) -> None:
@@ -224,16 +242,39 @@ class Transcript(VerticalScroll):
         self.expanded = False
         #: Block the keyboard is pointing at, or None while following the tail.
         self.cursor: Static | None = None
+        #: Cleared when the user scrolls away from the tail, set when they
+        #: return to it. Nothing else touches it, so a reflow cannot silently
+        #: end the follow.
+        self._following = True
 
     def _follow(self) -> None:
-        if self.is_vertical_scroll_end:
+        if self._following:
             self.scroll_end(animate=False)
 
+    def _note_scroll_position(self) -> None:
+        """Read the user's intent from where their scrolling came to rest.
+
+        Deferred to after the refresh so it sees the settled position rather
+        than the one the scroll started from.
+        """
+        self._following = self.scroll_target_y >= self.max_scroll_y
+
+    def _user_scrolled(self) -> None:
+        self.call_after_refresh(self._note_scroll_position)
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._user_scrolled()
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._user_scrolled()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """A narrower transcript reflows to more lines; keep the tail in view."""
+        self._follow()
+
     def _mount_block(self, widget: Static) -> None:
-        at_end = self.is_vertical_scroll_end
         self.mount(widget)
-        if at_end:
-            self.scroll_end(animate=False)
+        self._follow()
 
     def add_user_message(self, text: str) -> None:
         self._current = None
@@ -283,12 +324,13 @@ class Transcript(VerticalScroll):
         is_error: bool,
         metadata: dict[str, Any] | None = None,
         duration_ms: float = 0.0,
+        detail: str = "",
     ) -> None:
         """Settle the block into its final tint and one-line summary."""
         block = self._tools.get(tool_use_id)
         if block is None:
             return
-        block.finish(summary, is_error, metadata, duration_ms)
+        block.finish(summary, is_error, metadata, duration_ms, detail)
         block.refresh(layout=True)
         self._follow()
 
@@ -322,16 +364,20 @@ class Transcript(VerticalScroll):
 
     def page_up(self) -> None:
         self.scroll_page_up(animate=False)
+        self._user_scrolled()
 
     def page_down(self) -> None:
         self.scroll_page_down(animate=False)
+        self._user_scrolled()
 
     def scroll_to_top(self) -> None:
         self.scroll_home(animate=False)
+        self._user_scrolled()
 
     def scroll_to_bottom(self) -> None:
         """Back to the tail, and following it again."""
         self.set_cursor(None)
+        self._following = True
         self.scroll_end(animate=False)
 
     def _navigable(self) -> list[Static]:
@@ -352,6 +398,7 @@ class Transcript(VerticalScroll):
         self.cursor = block
         if block is not None:
             block.add_class("cursored")
+            self._following = False
             self.scroll_to_widget(block, animate=False, top=True)
 
     def move_cursor(self, delta: int) -> Static | None:

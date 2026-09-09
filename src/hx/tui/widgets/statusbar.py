@@ -45,14 +45,18 @@ class StatusBar(Static):
         self.cost_usd = 0.0
         self.latency_ms = 0.0
         self.mode = "default"
+        self.subscription = False
+        """True on a route billed to a subscription, where a per-token cost is
+        not a number the user can act on."""
         self.sandbox_active = True
         self.sandbox_backend = ""
         self.auto_compact = True
         self.cwd = ""
         self.branch: str | None = None
 
-    def set_model(self, model_id: str) -> None:
+    def set_model(self, model_id: str, *, subscription: bool = False) -> None:
         self.model = model_id
+        self.subscription = subscription
         self.refresh()
 
     def set_context(self, used: int, window: int) -> None:
@@ -145,7 +149,13 @@ class StatusBar(Static):
         if self.output_tokens:
             parts.append(Text(f"↓{format_tokens(self.output_tokens)}", style=THEME.fg("dim")))
         parts.append(self._cache_field())
-        parts.append(Text(format_cost(self.cost_usd), style=THEME.fg("muted")))
+        # A subscription turn has no per-token price, so "$0.00" would be a
+        # claim about spend rather than the absence of one.
+        parts.append(
+            Text("sub", style=THEME.fg("muted"))
+            if self.subscription
+            else Text(format_cost(self.cost_usd), style=THEME.fg("muted"))
+        )
         if self.latency_ms >= 100:
             parts.append(Text(f"{self.latency_ms / 1000:.1f}s", style=THEME.fg("dim")))
         parts.append(self._context_field())

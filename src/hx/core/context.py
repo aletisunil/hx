@@ -26,9 +26,12 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hx.core.messages import Message
+
+if TYPE_CHECKING:
+    from hx.config import PromptSettings
 
 MAX_CACHE_BREAKPOINTS = 4
 """Anthropic's per-request limit on explicit ``cache_control`` markers."""
@@ -266,6 +269,82 @@ show the output.
 """
 
 
-def load_system_prompt(cwd: Path) -> str:
-    """The base HX system prompt. Contains no volatile values (no clock, no counters)."""
-    return SYSTEM_PROMPT
+@dataclass(slots=True)
+class ResolvedPrompt:
+    """The system prompt in force, and where each part of it came from."""
+
+    text: str
+    source: str
+    """What supplied the base prompt: ``built-in``, ``--system-prompt``, or a path."""
+    appends: tuple[str, ...] = ()
+    """Sources of the appended blocks, in the order they were appended."""
+
+
+def resolve_system_prompt(cwd: Path, prompt: PromptSettings | None = None) -> ResolvedPrompt:
+    """Layer the system prompt overrides.
+
+    The base prompt is replaced by the first of these that exists::
+
+        --system-prompt / prompt.system   (settings layer, highest)
+        <cwd>/.hx/system-prompt.md
+        ~/.hx/system-prompt.md
+        the built-in SYSTEM_PROMPT
+
+    Appended text is then added in a fixed order - user file, project file, then
+    each ``--append-system-prompt`` value - so two layers can both contribute
+    without either winning.
+
+    Read once per session by the caller: this text sits above the first cache
+    breakpoint, and re-reading it mid-session would invalidate the prefix.
+    """
+    from hx.paths import (
+        project_system_prompt_append_file,
+        project_system_prompt_file,
+        user_system_prompt_append_file,
+        user_system_prompt_file,
+    )
+
+    text = SYSTEM_PROMPT
+    source = "built-in"
+    if prompt is not None and prompt.system:
+        text, source = prompt.system, "--system-prompt"
+    else:
+        for path in (project_system_prompt_file(cwd), user_system_prompt_file()):
+            body = _read_prompt_file(path)
+            if body:
+                text, source = body, str(path)
+                break
+
+    blocks: list[str] = []
+    appends: list[str] = []
+    for path in (user_system_prompt_append_file(), project_system_prompt_append_file(cwd)):
+        body = _read_prompt_file(path)
+        if body:
+            blocks.append(body)
+            appends.append(str(path))
+    for extra in prompt.append if prompt is not None else ():
+        if extra.strip():
+            blocks.append(extra.strip())
+            appends.append("--append-system-prompt")
+
+    if blocks:
+        text = "\n\n".join([text.rstrip("\n"), *blocks])
+
+    return ResolvedPrompt(text=text, source=source, appends=tuple(appends))
+
+
+def _read_prompt_file(path: Path) -> str:
+    """Contents of a prompt override file, or ``""`` when it is absent or empty.
+
+    An unreadable file is treated as absent: a permissions problem on an
+    optional override must not stop the session from starting.
+    """
+    try:
+        return path.read_text().strip() if path.is_file() else ""
+    except OSError:
+        return ""
+
+
+def load_system_prompt(cwd: Path, prompt: PromptSettings | None = None) -> str:
+    """The system prompt in force. Contains no volatile values (no clock, no counters)."""
+    return resolve_system_prompt(cwd, prompt).text

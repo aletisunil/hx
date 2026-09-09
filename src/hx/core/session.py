@@ -78,6 +78,15 @@ class Session:
         for message in kept:
             self.append(replace(message, compacted=False))
 
+    def set_title(self, title: str) -> None:
+        """Name the session for ``/resume``.
+
+        ``updated_at`` is deliberately left alone: it orders the picker and must
+        keep reflecting real activity, not the moment a name was written.
+        """
+        self.meta.title = title.strip() or None
+        self._write_meta()
+
     def record_usage(self, usage: TurnUsage) -> None:
         self.usage.record(usage)
         self._pending.append({"kind": "usage", "data": asdict(usage)})
@@ -177,7 +186,12 @@ def load_session(session_id: str) -> Session:
 
 
 def list_sessions(cwd: Path | None = None, limit: int = 20) -> list[SessionMeta]:
-    """Most-recent-first. Filtered to ``cwd`` when given - powers ``/resume``."""
+    """Most-recent-first. Filtered to ``cwd`` when given - powers ``/resume``.
+
+    Sessions that never recorded a message are skipped: they are the residue of
+    a launch that went nowhere, and resuming one is indistinguishable from
+    starting fresh.
+    """
     root = sessions_dir()
     if not root.is_dir():
         return []
@@ -192,6 +206,8 @@ def list_sessions(cwd: Path | None = None, limit: int = 20) -> list[SessionMeta]
         except (OSError, json.JSONDecodeError, TypeError):
             continue
         if cwd is not None and meta.cwd != str(cwd.resolve()):
+            continue
+        if meta.message_count <= 0:
             continue
         metas.append(meta)
 

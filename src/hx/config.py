@@ -65,8 +65,24 @@ class ModelSettings:
     model: str = "anthropic/claude-sonnet-4.5"
     subagent_model: str | None = None
     """Model used by subagents. Falls back to ``model``."""
+    title_model: str | None = None
+    """Model used to name a session. Falls back to ``model``."""
     max_tokens: int = 8192
     temperature: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PromptSettings:
+    """System prompt overrides supplied as text.
+
+    ``system`` replaces the built-in prompt outright; ``append`` is added after
+    whichever prompt is in force. Overrides that live in files on disk are
+    resolved in :mod:`hx.core.context` - only typed text reaches here, so a
+    settings layer never carries a file's contents.
+    """
+
+    system: str | None = None
+    append: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +102,7 @@ class Settings:
     permissions: PermissionSettings = field(default_factory=PermissionSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
     bash: BashSettings = field(default_factory=BashSettings)
+    prompt: PromptSettings = field(default_factory=PromptSettings)
     theme: str = "dark"
     quiet_startup: bool = False
     """Skip the startup header. For anyone who has read it already."""
@@ -130,6 +147,7 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
     permissions = data.get("permissions", {})
     context = data.get("context", {})
     bash = data.get("bash", {})
+    prompt = data.get("prompt", {})
 
     mode_raw = permissions.get("mode", PermissionMode.DEFAULT)
     try:
@@ -142,6 +160,7 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
         models=ModelSettings(
             model=models.get("model", _default(ModelSettings, "model")),
             subagent_model=models.get("subagent_model"),
+            title_model=models.get("title_model"),
             max_tokens=int(models.get("max_tokens", _default(ModelSettings, "max_tokens"))),
             temperature=models.get("temperature"),
         ),
@@ -178,10 +197,22 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
             ),
             shell=bash.get("shell"),
         ),
+        prompt=PromptSettings(
+            system=prompt.get("system"),
+            append=tuple(_as_list(prompt.get("append", ()))),
+        ),
         theme=data.get("theme", "dark"),
         quiet_startup=bool(data.get("quietStartup", data.get("quiet_startup", False))),
         telemetry=bool(data.get("telemetry", False)),
     )
+
+
+def _as_list(value: Any) -> list[str]:
+    """Accept either one string or a list of them - ``prompt.append`` reads
+    naturally both ways and a bare string is the common case."""
+    if isinstance(value, str):
+        return [value]
+    return [str(item) for item in value]
 
 
 def read_settings_file(path: Path) -> dict[str, Any]:
@@ -213,7 +244,9 @@ def write_settings_file(path: Path, data: dict[str, Any]) -> None:
 
 #: Permission rule lists are unioned across layers rather than replaced - a
 #: project must be able to add a deny rule without discarding the user's.
-_UNIONED_KEYS = frozenset({"allow", "ask", "deny"})
+#: ``prompt.append`` unions for the same reason: a project appending to the
+#: system prompt must not silently discard what the user appended.
+_UNIONED_KEYS = frozenset({"allow", "ask", "deny", "append"})
 
 
 def merge_layers(layers: list[dict[str, Any]]) -> dict[str, Any]:

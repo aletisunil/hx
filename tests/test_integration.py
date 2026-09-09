@@ -47,9 +47,13 @@ def build(
 ) -> AgentLoop:
     settings = load_settings(tmp_path, {"permissions": {"mode": mode.value}})
     jobs = BackgroundJobs(tmp_path / ".hx" / "jobs")
+    session = new_session(tmp_path, MODEL)
+    # Naming happens once per session and would consume a scripted turn; these
+    # tests are about the turns themselves, so the session arrives named.
+    session.set_title("integration session")
     return AgentLoop(
         provider=FakeProvider(script),
-        session=new_session(tmp_path, MODEL),
+        session=session,
         tools=build_default_registry(shell, jobs if shell else None, FileTracker()),
         permissions=PermissionEngine(mode, rules or [], tmp_path, asker=asker),
         context=ContextBuilder("sys", tmp_path),

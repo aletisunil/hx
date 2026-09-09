@@ -12,9 +12,12 @@ import json
 import time
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hx.paths import models_cache_file
+
+if TYPE_CHECKING:
+    from hx.auth.resolve import AuthResolver
 
 
 class CacheMode(StrEnum):
@@ -48,6 +51,41 @@ class ModelInfo:
     cache_mode: CacheMode = CacheMode.NONE
     supports_tools: bool = True
     supports_reasoning: bool = False
+    provider_id: str = "openrouter"
+    """Which route serves this model. Derived from the id's namespace."""
+    is_subscription: bool = False
+    """Billed to a subscription rather than per token, so cost display is
+    meaningless and the picker says so instead of printing $0.00."""
+
+
+#: Models reachable on a ChatGPT Plus/Pro subscription. Hard-coded because the
+#: Codex backend has no catalogue endpoint to ask; figures track models.dev.
+CODEX_MODELS: tuple[ModelInfo, ...] = (
+    ModelInfo(
+        id="openai-codex/gpt-5.3-codex",
+        name="GPT-5.3 Codex (ChatGPT subscription)",
+        context_window=400_000,
+        max_output_tokens=128_000,
+        pricing=ModelPricing(),
+        cache_mode=CacheMode.IMPLICIT,
+        supports_tools=True,
+        supports_reasoning=True,
+        provider_id="openai-codex",
+        is_subscription=True,
+    ),
+    ModelInfo(
+        id="openai-codex/gpt-5.3-codex-spark",
+        name="GPT-5.3 Codex Spark (ChatGPT subscription)",
+        context_window=128_000,
+        max_output_tokens=32_000,
+        pricing=ModelPricing(),
+        cache_mode=CacheMode.IMPLICIT,
+        supports_tools=True,
+        supports_reasoning=True,
+        provider_id="openai-codex",
+        is_subscription=True,
+    ),
+)
 
 
 class ModelRegistry:
@@ -84,6 +122,9 @@ class ModelRegistry:
         try:
             return self.get(model_id)
         except UnknownModel:
+            from hx.providers.registry import provider_for
+
+            spec = provider_for(model_id)
             return ModelInfo(
                 id=model_id,
                 name=model_id,
@@ -91,6 +132,8 @@ class ModelRegistry:
                 max_output_tokens=8192,
                 pricing=ModelPricing(),
                 cache_mode=infer_cache_mode(model_id),
+                provider_id=spec.id,
+                is_subscription=spec.is_subscription,
             )
 
     def all(self) -> list[ModelInfo]:
@@ -106,21 +149,33 @@ class ModelRegistry:
     def is_stale(self) -> bool:
         return (time.time() - self._fetched_at) > self.CACHE_TTL_SECONDS
 
-    async def refresh(self, api_key: str) -> None:
-        """Fetch the live catalogue and rewrite the cache."""
+    async def refresh(self, resolver: AuthResolver) -> None:
+        """Fetch the live OpenRouter catalogue and rewrite the cache.
+
+        Only OpenRouter has a catalogue to fetch; a user signed in to Codex
+        alone still gets that route's models, which are static.
+        """
+        from hx.auth.store import OPENROUTER
         from hx.providers.openrouter import fetch_models
 
-        raw = await fetch_models(api_key)
         self._models = {}
-        for entry in raw:
-            try:
-                info = parse_model_entry(entry)
-            except (KeyError, TypeError, ValueError):
-                # One malformed catalogue entry must not cost us the whole list.
-                continue
-            self._models[info.id] = info
+        if resolver.has_credential(OPENROUTER):
+            raw = await fetch_models(resolver.resolve_static(OPENROUTER).token)
+            for entry in raw:
+                try:
+                    info = parse_model_entry(entry)
+                except (KeyError, TypeError, ValueError):
+                    # One malformed catalogue entry must not cost us the whole list.
+                    continue
+                self._models[info.id] = info
+        self._merge_static()
         self._fetched_at = time.time()
         self.save_cache()
+
+    def _merge_static(self) -> None:
+        """Add the routes whose catalogues do not come off the wire."""
+        for info in CODEX_MODELS:
+            self._models[info.id] = info
 
     def load_cache(self) -> None:
         path = models_cache_file()
@@ -138,6 +193,7 @@ class ModelRegistry:
             except (KeyError, TypeError, ValueError):
                 continue
             self._models[info.id] = info
+        self._merge_static()
 
     def save_cache(self) -> None:
         path = models_cache_file()
@@ -161,6 +217,7 @@ class ModelRegistry:
                     + (["reasoning"] if m.supports_reasoning else []),
                 }
                 for m in self.all()
+                if not m.is_subscription
             ],
         }
         tmp = path.with_suffix(".json.tmp")
@@ -237,6 +294,9 @@ def infer_cache_mode(model_id: str) -> CacheMode:
     provider.
     """
     vendor = model_id.split("/", 1)[0].lower()
+    if vendor == "openai-codex":
+        # Responses caches implicitly off the prefix plus prompt_cache_key.
+        return CacheMode.IMPLICIT
     if vendor in ModelRegistry.EXPLICIT_CACHE_VENDORS:
         return CacheMode.EXPLICIT
     if vendor in ModelRegistry.IMPLICIT_CACHE_VENDORS:

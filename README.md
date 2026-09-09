@@ -47,22 +47,50 @@ export PATH="$(uv tool dir --bin):$PATH"
 
 Requires Python 3.11+. macOS and Linux. Update with `hx upgrade`.
 
-### The API key
+### Credentials
 
-On first run HX asks for an OpenRouter key and saves it to `~/.hx/auth.json`
-with mode 0600. Get one at <https://openrouter.ai/keys>.
+HX reaches models over two routes. Which one serves a turn is decided by the
+model id alone, so "what paid for that" is always answerable by reading it:
 
-To change it later, `/configure` inside the TUI, or from a shell:
+| Model id | Route | Billing |
+|---|---|---|
+| `anthropic/claude-sonnet-4.5`, `openai/gpt-5`, … | OpenRouter | per token, API key |
+| `openai-codex/gpt-5.3-codex` | ChatGPT Plus/Pro | your subscription |
+
+Credentials live in `~/.hx/auth.json`, mode 0600, one entry per route.
+
+**OpenRouter.** On first run HX asks for a key. Get one at
+<https://openrouter.ai/keys>. Change it later with `/configure` in the TUI, or:
 
 ```sh
-hx auth          # is a key set, and where does it come from?
-hx auth set      # paste a new one (hidden input)
+hx auth          # which routes have a credential, and where from
+hx auth set      # paste a new OpenRouter key (hidden input)
 hx auth clear    # remove the saved key
 ```
 
 Resolution order is `HX_OPENROUTER_API_KEY`, then `OPENROUTER_API_KEY`, then
 the saved file. The environment wins, and both `/configure` and `hx auth` say
 so — otherwise saving a key while a variable is set looks like a no-op.
+
+**ChatGPT Plus/Pro.** Sign in over OAuth and run Codex models against your
+subscription instead of paying per token
+([OpenAI endorses this for OSS harnesses](https://developers.openai.com/community/codex-for-oss)):
+
+```sh
+hx auth login openai-codex      # or /login inside the TUI
+hx --model openai-codex/gpt-5.3-codex
+hx auth logout openai-codex
+```
+
+The browser opens to `auth.openai.com` and redirects to a loopback listener on
+port 1455. Over SSH that redirect cannot reach your machine, so paste the final
+URL into the prompt instead — or set `HX_LOGIN_DEVICE_CODE=1` for the
+device-code flow. Access tokens are refreshed automatically; `/model` only
+offers routes you are actually signed in to.
+
+There is no Claude Pro/Max route. Anthropic rejects OAuth tokens unless the
+request impersonates Claude Code, which HX will not do. Claude models stay
+available through OpenRouter.
 
 ---
 
@@ -73,12 +101,17 @@ hx                          # interactive TUI in the current directory
 hx -p "explain this repo"   # headless: streams to stdout, tool activity to stderr
 hx resume                   # resume the last session here
 hx resume <session-id>      # resume a specific one
+hx prompt                   # print the system prompt this directory would use
 hx --model openai/gpt-5     # override the model for one run
 hx --mode plan              # start read-only
 hx --cwd ../other-project   # run against a different directory
 hx --no-sandbox             # disable OS sandboxing (rules still apply)
+hx --system-prompt @p.md    # replace the system prompt for one run
+hx --append-system-prompt "Always run the tests"   # add to it; repeatable
 hx mcp list|add|remove      # manage MCP servers
-hx auth [set|clear]         # manage the API key
+hx auth [set|clear]         # manage the OpenRouter key
+hx auth login [provider]    # sign in (openrouter, openai-codex)
+hx auth logout <provider>   # forget a stored credential
 hx upgrade                  # update to the latest release
 ```
 
@@ -160,13 +193,17 @@ than being silently resolved.
 | `/model [query]` | pick a model; shows context window, price per Mtok, cache support |
 | `/models refresh` | re-fetch the catalogue |
 | `/configure` | session settings and the API key |
+| `/login [provider]` | sign in to a model route |
+| `/logout <provider>` | forget a stored credential |
 | `/mode [name]` | `plan`, `default`, `acceptEdits`, `bypass` |
 | `/permissions` | active rules and what is enforcing them |
 | `/context` | what is filling the context window |
 | `/cost` | tokens, cache savings, spend |
 | `/compact [focus]` | summarise older turns now |
 | `/clear` | fresh session, same directory |
-| `/resume` | reopen a previous session |
+| `/resume` | reopen a previous session, listed by name |
+| `/title [text]` | show or set this session's name |
+| `/prompt` | the system prompt this session is running with |
 | `/todos` | toggle the sidebar |
 | `/skills` | installed skills |
 | `/agents` | subagent types |
@@ -194,8 +231,9 @@ Settings are JSON, merged lowest to highest:
 defaults  <  ~/.hx/settings.json  <  ./.hx/settings.json  <  HX_* env  <  CLI flags
 ```
 
-Permission rule lists are unioned across layers, so a project can add a deny
-rule without discarding yours. Everything else is replaced.
+Permission rule lists and `prompt.append` are unioned across layers, so a
+project can add a deny rule — or a line to the system prompt — without
+discarding yours. Everything else is replaced.
 
 ```jsonc
 {
@@ -206,6 +244,7 @@ rule without discarding yours. Everything else is replaced.
   "models": {
     "model": "anthropic/claude-sonnet-4.5",
     "subagent_model": null,           // defaults to "model"
+    "title_model": null,              // model that names sessions; defaults to "model"
     "max_tokens": 8192,
     "temperature": null
   },
@@ -230,6 +269,11 @@ rule without discarding yours. Everything else is replaced.
     "timeout_seconds": 120,
     "max_timeout_seconds": 600,       // ceiling; caps what the model may ask for
     "shell": null                     // defaults to $SHELL
+  },
+
+  "prompt": {
+    "system": null,                   // replaces the built-in system prompt
+    "append": []                      // added after it; unioned across layers
   }
 }
 ```
@@ -237,6 +281,42 @@ rule without discarding yours. Everything else is replaced.
 Environment overrides: `HX_MODEL`, `HX_SUBAGENT_MODEL`, `HX_MAX_TOKENS`,
 `HX_PERMISSION_MODE`, `HX_SANDBOX`, `HX_COMPACT_AT`, `HX_THEME`,
 `HX_QUIET_STARTUP`. Also `HX_HOME` to relocate user state.
+
+### The system prompt
+
+`hx prompt` prints the prompt this directory resolves to, with its source on
+stderr so stdout stays pipeable. `/prompt` shows the same thing inside a running
+session.
+
+The built-in prompt is `SYSTEM_PROMPT` in `src/hx/core/context.py`. It is
+replaced by the first of these that exists:
+
+| Source | Scope |
+|---|---|
+| `--system-prompt TEXT` or `@path`, or `prompt.system` | one run |
+| `./.hx/system-prompt.md` | this project |
+| `~/.hx/system-prompt.md` | you, everywhere |
+| the built-in prompt | fallback |
+
+Appended text is added after whichever prompt won, in this order:
+`~/.hx/system-prompt-append.md`, `./.hx/system-prompt-append.md`, then each
+`--append-system-prompt` value (and `prompt.append`) in the order given. Nothing
+appended is ever discarded by a later layer.
+
+This is a different lever from `HX.md`: `HX.md` describes *the project* and is
+injected as its own context section, while these files change *the agent's
+instructions*. Both are read once at startup and frozen, because they sit above
+the first cache breakpoint — an override edited mid-session applies on the next
+run, and `/prompt` says so when it spots one.
+
+### Sessions are named
+
+After the first exchange, HX asks the model for a short name for the session and
+writes it to `~/.hx/sessions/<id>/meta.json`, so `/resume` lists work rather
+than timestamps. It is one small call — cap 32 output tokens, `models.title_model`
+if you want a cheaper model for it — and it is counted in `/cost` like any other.
+If the call fails the session is still named, from your first message. `/title
+<text>` renames it.
 
 ### Themes
 
@@ -270,10 +350,13 @@ files load here unchanged. `src/hx/tui/themes/dark.json` is the reference.
 | `~/.hx/models.json` | cached model catalogue, refreshed daily |
 | `~/.hx/themes/` | your themes, one JSON file each |
 | `~/.hx/keybindings.json` | your key overrides |
+| `~/.hx/system-prompt.md` | your system prompt, replacing the built-in one |
+| `~/.hx/system-prompt-append.md` | text appended to whichever prompt is in force |
 | `~/.hx/sessions/` | transcripts, spilled tool output, subagent sessions |
 | `~/.hx/skills/`, `~/.hx/agents/` | your skills and agents |
 | `./.hx/settings.json` | project settings, checked in if you like |
 | `./.hx/mcp.json` | project MCP servers |
+| `./.hx/system-prompt.md`, `./.hx/system-prompt-append.md` | project prompt overrides |
 | `./.hx/skills/`, `./.hx/agents/` | project skills and agents |
 | `./HX.md` | project instructions, loaded into every session |
 
@@ -401,11 +484,19 @@ uv run mypy                  # strict
 uv run hx                    # run from the checkout
 ```
 
-Tests marked `live` hit the real OpenRouter API and cost money:
+Tests marked `live` hit a real API. The OpenRouter ones cost money:
 
 ```sh
-OPENROUTER_API_KEY=... uv run pytest -m live
+OPENROUTER_API_KEY=... uv run pytest -m live tests/test_live.py
+
+# the Codex route draws on your ChatGPT subscription instead
+hx auth login openai-codex
+uv run pytest -m live tests/test_live_codex.py
 ```
+
+They are the only place the wire formats, streaming, tool use and a genuine
+cache hit are proven against a real service; everything else runs against the
+scripted provider.
 
 Tests marked `sandbox` exercise the real OS sandbox and are skipped where no
 backend exists.
@@ -423,7 +514,8 @@ uv run pytest tests/tui/test_snapshots.py --snapshot-update
 src/hx/
   cli.py config.py paths.py frontmatter.py
   core/         loop, context assembly, compaction, late injection, sessions, usage
-  providers/    OpenRouter, the model catalogue, a scripted provider for tests
+  auth/         credential store, OAuth flows, per-route resolution
+  providers/    OpenRouter, Codex, the model catalogue, a scripted provider for tests
   tools/        Bash, Read, Write, Edit, Glob, Grep, TodoWrite, Task, output capping
   permissions/  rule engine, shell decomposition, Seatbelt/bubblewrap
   skills/ agents/ mcp/
@@ -477,9 +569,12 @@ streaming with prefix caching and accurate cost accounting, session persistence
 and resume, the tool suite, the permission engine and OS sandbox, late
 injection, compaction, output capping, skills, subagents, MCP, and the TUI.
 
+Two routes to a model: an OpenRouter API key, or a ChatGPT Plus/Pro
+subscription over OAuth. The model id decides which.
+
 Published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/), released
 from CI on a tag.
 
-The one thing still unproven is a live OpenRouter call: the `live` tests exist
-and cover the wire format, tool use and a genuine cache hit, but they need a
-key and are deselected by default.
+The one thing still unproven in CI is a live call on either route: the `live`
+tests exist and cover both wire formats, tool use, reasoning replay and a
+genuine cache hit, but they need a credential and are deselected by default.

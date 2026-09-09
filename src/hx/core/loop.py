@@ -115,6 +115,22 @@ class AgentLoop:
     def model(self) -> str:
         return self.session.meta.model
 
+    def set_provider(self, provider: Provider) -> Provider:
+        """Swap the provider mid-session, returning the one replaced.
+
+        Switching to a model on a different route changes which service is
+        called, not just which model. The compactor holds its own reference and
+        would otherwise keep summarising through the old, possibly now
+        unauthenticated, connection.
+
+        The caller owns closing the returned provider.
+        """
+        previous = self.provider
+        self.provider = provider
+        if self.compactor is not None:
+            self.compactor.provider = provider
+        return previous
+
     def set_model(self, model_id: str, model_info: ModelInfo | None = None) -> None:
         self.session.meta.model = model_id
         self.model_info = model_info
@@ -159,6 +175,7 @@ class AgentLoop:
 
             calls = message.tool_uses()
             if not calls or self._cancelled:
+                await self._name_session()
                 return TurnResult(stop_reason, produced)
 
             results = await self._execute_tools(calls)
@@ -171,12 +188,45 @@ class AgentLoop:
         )
         return TurnResult(stop_reason, produced, error="turn limit reached")
 
+    async def _name_session(self) -> None:
+        """Give the session a title once, after its first completed exchange.
+
+        Awaited rather than detached: ``TurnFinished`` has already been
+        published so the UI is idle, and in print mode the process exits the
+        moment ``run`` returns - a background task would simply be killed.
+
+        Naming must never cost the user a turn, so every failure falls back to
+        the first thing they said.
+        """
+        if self.origin is not None or self.session.meta.title or self._cancelled:
+            return
+
+        messages = [m for m in self.session.messages if not m.ephemeral]
+        if not any(m.role == "user" for m in messages):
+            return
+
+        from hx.core.title import fallback_title, generate_title
+
+        title: str | None = None
+        try:
+            model = self.settings.models.title_model or self.model
+            title, usage = await generate_title(self.provider, model, messages)
+            if usage.prompt_tokens or usage.output_tokens:
+                self._record_usage(usage, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            title = None
+
+        self.session.set_title(title or fallback_title(messages))
+
     async def _stream_turn(self) -> tuple[Message, StopReason]:
         """One provider call. Publishes deltas and the usage update."""
         request = self._build_request()
 
         text_parts: list[str] = []
         thinking_parts: list[str] = []
+        thinking_signature: str | None = None
         tool_calls: list[ToolUseBlock] = []
         stop_reason = StopReason.END_TURN
         usage = TurnUsage()
@@ -202,6 +252,8 @@ class AgentLoop:
                     thinking_parts.append(item.thinking)
                     if self.origin is None:
                         self.bus.publish(ThinkingDelta(text=item.thinking))
+                if item.thinking_signature:
+                    thinking_signature = item.thinking_signature
                 if item.tool_use_id and item.tool_name:
                     tool_calls.append(
                         ToolUseBlock(
@@ -214,14 +266,19 @@ class AgentLoop:
             # Keep whatever streamed before the interrupt: the next turn must
             # reflect what the user actually saw.
             if text_parts or tool_calls:
-                self.session.append(self._assemble(text_parts, thinking_parts, []))
+                self.session.append(
+                    self._assemble(text_parts, thinking_parts, [], thinking_signature)
+                )
             raise
 
         if not usage.latency_ms:
             usage.latency_ms = (time.monotonic() - started) * 1000
         self._record_usage(usage, request)
 
-        return self._assemble(text_parts, thinking_parts, tool_calls), stop_reason
+        return (
+            self._assemble(text_parts, thinking_parts, tool_calls, thinking_signature),
+            stop_reason,
+        )
 
     def _build_request(self) -> ProviderRequest:
         messages = self.injections.apply(self.session.active_messages())
@@ -270,16 +327,17 @@ class AgentLoop:
         text_parts: list[str],
         thinking_parts: list[str],
         tool_calls: list[ToolUseBlock],
+        thinking_signature: str | None = None,
     ) -> Message:
         blocks: list[ContentBlock] = []
-        if thinking_parts:
-            blocks.append(ThinkingBlock(text="".join(thinking_parts)))
+        if thinking_parts or thinking_signature:
+            blocks.append(ThinkingBlock(text="".join(thinking_parts), signature=thinking_signature))
         if text_parts:
             blocks.append(TextBlock(text="".join(text_parts)))
         blocks.extend(tool_calls)
         return assistant_message(blocks, model=self.model)
 
-    def _record_usage(self, usage: TurnUsage, request: ProviderRequest) -> None:
+    def _record_usage(self, usage: TurnUsage, request: ProviderRequest | None) -> None:
         if usage.cost_usd is None and self.model_info is not None:
             usage.cost_usd = compute_cost(usage, self.model_info.pricing)
         self.session.record_usage(usage)
@@ -351,6 +409,7 @@ class AgentLoop:
                     is_error=True,
                     duration_ms=(time.monotonic() - started) * 1000,
                     summary="denied",
+                    detail=denied.content,
                 )
             )
             return denied
@@ -370,6 +429,7 @@ class AgentLoop:
                 is_error=result.is_error,
                 duration_ms=(time.monotonic() - started) * 1000,
                 summary=result.summary or ("error" if result.is_error else "done"),
+                detail=result.content if result.is_error else "",
                 metadata=dict(result.metadata),
             )
         )

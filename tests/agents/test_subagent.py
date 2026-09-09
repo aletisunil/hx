@@ -144,9 +144,11 @@ async def test_events_bracket_the_run(hx_home: Path, tmp_path: Path) -> None:
 
 async def test_subagent_transcript_nests_under_the_parent(hx_home: Path, tmp_path: Path) -> None:
     """Subagent sessions must not clutter the /resume listing."""
+    from hx.core.messages import user_message
     from hx.core.session import list_sessions, new_session
 
     parent = new_session(tmp_path, "m")
+    parent.append(user_message("task"))
     runner = SubagentRunner(
         definitions={a.name: a for a in discover(tmp_path)},
         provider=FakeProvider([text_turn("done")]),

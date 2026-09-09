@@ -15,6 +15,7 @@ from hx.core.lateinject import Injection, InjectionRegistry
 from hx.core.loop import AgentLoop
 from hx.core.messages import StopReason
 from hx.core.session import new_session
+from hx.core.title import TITLE_MAX_TOKENS
 from hx.core.usage import TurnUsage
 from hx.providers.base import StreamDelta, StreamEnd, StreamItem
 from hx.providers.fake import FakeProvider, text_turn, tool_turn
@@ -65,10 +66,16 @@ def build_loop(
     script: list[list[StreamItem]],
     tmp_path: Path,
     tools: ToolRegistry | None = None,
+    title: str | None = "scripted session",
 ) -> Harness:
     provider = FakeProvider(script)
     bus = EventBus()
     session = new_session(tmp_path, "anthropic/claude-sonnet-4.5")
+    # An already-named session does not ask the model for a name, so the script
+    # a test writes is exactly the turns it gets. The naming call itself is
+    # exercised in the tests that pass ``title=None``.
+    if title:
+        session.set_title(title)
     loop = AgentLoop(
         provider=provider,
         session=session,
@@ -303,3 +310,65 @@ async def test_permission_events_announce_only_what_actually_prompts(
 
     announced = [e.tool_name for e in h.events if isinstance(e, PermissionRequested)]
     assert announced == ["Write"], "the read-only Echo call never stopped for approval"
+
+
+async def test_a_finished_turn_names_the_session(hx_home: Path, tmp_path: Path) -> None:
+    """Without this, /resume lists timestamps instead of work."""
+    script = [text_turn("done"), text_turn("Parser bug fix")]
+    async with build_loop(script, tmp_path, title=None) as h:
+        await h.loop.run("fix the parser")
+
+    assert h.loop.session.meta.title == "Parser bug fix"
+    assert h.provider.requests[-1].max_tokens == TITLE_MAX_TOKENS
+
+
+async def test_a_session_is_named_once(hx_home: Path, tmp_path: Path) -> None:
+    script = [text_turn("done"), text_turn("Parser bug fix"), text_turn("done again")]
+    async with build_loop(script, tmp_path, title=None) as h:
+        await h.loop.run("fix the parser")
+        await h.loop.run("thanks")
+
+    assert h.loop.session.meta.title == "Parser bug fix"
+    assert len(h.provider.requests) == 3  # two turns, one naming call
+
+
+async def test_naming_falls_back_to_the_first_message(hx_home: Path, tmp_path: Path) -> None:
+    """The script runs out before the naming call, so the provider errors."""
+    async with build_loop([text_turn("done")], tmp_path, title=None) as h:
+        result = await h.loop.run("fix the parser")
+
+    assert result.stop_reason is StopReason.END_TURN
+    assert result.error is None
+    assert h.loop.session.meta.title == "fix the parser"
+
+
+async def test_the_naming_call_is_counted_in_the_ledger(hx_home: Path, tmp_path: Path) -> None:
+    script = [
+        text_turn("done", usage=TurnUsage(input_tokens=10, output_tokens=5)),
+        text_turn("Parser bug fix", usage=TurnUsage(input_tokens=20, output_tokens=4)),
+    ]
+    async with build_loop(script, tmp_path, title=None) as h:
+        await h.loop.run("fix the parser")
+
+    assert h.loop.session.usage.total_input == 30
+    assert h.loop.session.usage.total_output == 9
+
+
+async def test_a_subagent_session_is_not_named(hx_home: Path, tmp_path: Path) -> None:
+    """Subagent transcripts never appear in /resume, so naming them is spend
+    with nothing behind it."""
+    async with build_loop([text_turn("done")], tmp_path, title=None) as h:
+        h.loop.origin = "reviewer subagent"
+        await h.loop.run("fix the parser")
+
+    assert h.loop.session.meta.title is None
+    assert len(h.provider.requests) == 1
+
+
+async def test_a_title_model_override_is_used(hx_home: Path, tmp_path: Path) -> None:
+    async with build_loop([text_turn("done"), text_turn("Named")], tmp_path, title=None) as h:
+        h.loop.settings = load_settings(tmp_path, {"models": {"title_model": "cheap/model"}})
+        await h.loop.run("fix the parser")
+
+    assert h.provider.requests[-1].model == "cheap/model"
+    assert h.provider.requests[0].model == "anthropic/claude-sonnet-4.5"

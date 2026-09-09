@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hx.core.context import MAX_CACHE_BREAKPOINTS, ContextBuilder, build_project_context
+from hx.core.context import (
+    MAX_CACHE_BREAKPOINTS,
+    SYSTEM_PROMPT,
+    ContextBuilder,
+    build_project_context,
+    load_system_prompt,
+    resolve_system_prompt,
+)
 from hx.core.messages import TextBlock, assistant_message, user_message
 
 
@@ -76,3 +83,63 @@ def test_compacted_messages_are_excluded(project: Path) -> None:
 
 def test_project_context_reports_cwd(project: Path) -> None:
     assert str(project) in build_project_context(project)
+
+
+def test_the_built_in_prompt_is_used_when_nothing_overrides_it(
+    hx_home: Path, project: Path
+) -> None:
+    resolved = resolve_system_prompt(project)
+    assert resolved.text == SYSTEM_PROMPT
+    assert resolved.source == "built-in"
+    assert resolved.appends == ()
+
+
+def test_a_project_file_replaces_the_built_in_prompt(hx_home: Path, project: Path) -> None:
+    (project / ".hx" / "system-prompt.md").write_text("You are TESTBOT.\n")
+
+    resolved = resolve_system_prompt(project)
+
+    assert resolved.text == "You are TESTBOT."
+    assert resolved.source.endswith(".hx/system-prompt.md")
+
+
+def test_a_project_file_wins_over_the_user_file(hx_home: Path, project: Path) -> None:
+    (hx_home / "system-prompt.md").write_text("user prompt")
+    (project / ".hx" / "system-prompt.md").write_text("project prompt")
+
+    assert resolve_system_prompt(project).text == "project prompt"
+
+
+def test_the_flag_wins_over_every_file(hx_home: Path, project: Path) -> None:
+    from hx.config import PromptSettings
+
+    (hx_home / "system-prompt.md").write_text("user prompt")
+    (project / ".hx" / "system-prompt.md").write_text("project prompt")
+
+    resolved = resolve_system_prompt(project, PromptSettings(system="flag prompt"))
+
+    assert resolved.text == "flag prompt"
+    assert resolved.source == "--system-prompt"
+
+
+def test_appends_stack_user_then_project_then_flags(hx_home: Path, project: Path) -> None:
+    from hx.config import PromptSettings
+
+    (hx_home / "system-prompt-append.md").write_text("from the user")
+    (project / ".hx" / "system-prompt-append.md").write_text("from the project")
+
+    resolved = resolve_system_prompt(project, PromptSettings(append=("from the flag",)))
+
+    assert resolved.text.startswith(SYSTEM_PROMPT.rstrip("\n"))
+    assert resolved.text.endswith("from the user\n\nfrom the project\n\nfrom the flag")
+    assert len(resolved.appends) == 3
+
+
+def test_an_empty_override_file_is_treated_as_absent(hx_home: Path, project: Path) -> None:
+    (project / ".hx" / "system-prompt.md").write_text("   \n")
+    assert resolve_system_prompt(project).source == "built-in"
+
+
+def test_load_system_prompt_returns_the_resolved_text(hx_home: Path, project: Path) -> None:
+    (project / ".hx" / "system-prompt.md").write_text("You are TESTBOT.")
+    assert load_system_prompt(project) == "You are TESTBOT."
