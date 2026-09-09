@@ -223,9 +223,11 @@ class HXApp(App[None]):
             return
 
         if text.startswith("/"):
-            handled = await self.commands.dispatch(self._command_context(), text)
-            if handled:
-                return
+            # A command may open a modal, and push_screen_wait is only valid
+            # inside worker context; run every command in one so they all
+            # behave the same.
+            self.run_worker(self._run_command(text), name="command", exclusive=False)
+            return
 
         if text.startswith("!"):
             await self.run_shell_passthrough(text[1:].strip())
@@ -241,6 +243,16 @@ class HXApp(App[None]):
         # A Textual worker, not a bare task: the permission modal uses
         # push_screen_wait, which is only valid inside worker context.
         self._turn_worker = self.run_worker(self._run_turn(text), name="turn", exclusive=False)
+
+    async def _run_command(self, text: str) -> None:
+        """Run one slash command, reporting failures instead of tearing the app down.
+
+        A command that raises would otherwise take the whole session with it.
+        """
+        try:
+            await self.commands.dispatch(self._command_context(), text)
+        except Exception as exc:  # a bad command must not kill the app
+            self.notice(f"{text.split(' ')[0]} failed: {exc!r}", "error")
 
     async def submit_to_model(self, text: str) -> None:
         """Send a prompt to the model without echoing it as user input.
@@ -359,6 +371,11 @@ class HXApp(App[None]):
         Textual ships a built-in palette on the same key; it is disabled above
         so ctrl+p reaches the slash commands the user actually has.
         """
+        # push_screen_wait needs worker context, and a binding action does not
+        # run in one.
+        self.run_worker(self._open_command_palette(), name="palette", exclusive=True)
+
+    async def _open_command_palette(self) -> None:
         from hx.tui.widgets.palette import CommandPalette
 
         chosen = await self.push_screen_wait(CommandPalette(self.commands.all()))

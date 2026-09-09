@@ -33,18 +33,23 @@ class Command:
     handler: Handler
     args_hint: str = ""
     takes_args: bool = False
+    aliases: tuple[str, ...] = ()
+    """Other spellings users reach for. They resolve, but only ``name`` is listed."""
 
 
 class CommandRegistry:
     def __init__(self) -> None:
         self._commands: dict[str, Command] = {}
+        self._aliases: dict[str, str] = {}
 
     def register(self, command: Command) -> None:
         self._commands[command.name] = command
+        for alias in command.aliases:
+            self._aliases[alias] = command.name
 
     def get(self, name: str) -> Command:
         try:
-            return self._commands[name]
+            return self._commands[self._aliases.get(name, name)]
         except KeyError:
             raise UnknownCommand(name) from None
 
@@ -53,7 +58,11 @@ class CommandRegistry:
 
     def complete(self, prefix: str) -> list[Command]:
         needle = prefix.lstrip("/").lower()
-        return [c for c in self.all() if c.name.startswith(needle)]
+        return [
+            c
+            for c in self.all()
+            if c.name.startswith(needle) or any(a.startswith(needle) for a in c.aliases)
+        ]
 
     async def dispatch(self, ctx: CommandContext, line: str) -> bool:
         """Run a ``/command``. Returns False when the line is not a command and
@@ -93,8 +102,11 @@ async def cmd_model(ctx: CommandContext, args: str) -> None:
 
     if args:
         matches = registry.search(args)
-        if len(matches) == 1:
-            _switch_model(ctx, matches[0].id)
+        # An id typed in full is a choice, not a query: it prefixes its own
+        # variants (…-flash, …-flash-0731), so matching alone never narrows it.
+        exact = next((m for m in matches if m.id.lower() == args.strip().lower()), None)
+        if exact is not None or len(matches) == 1:
+            _switch_model(ctx, exact.id if exact is not None else matches[0].id)
             return
         models = matches or models
 
@@ -357,7 +369,10 @@ async def cmd_theme(ctx: CommandContext, args: str) -> None:
 
 async def cmd_help(ctx: CommandContext, args: str) -> None:
     lines = ["Commands:"]
-    lines += [f"  /{c.name:<12} {c.summary}" for c in ctx.registry.all()]
+    lines += [
+        f"  /{c.name:<12} {c.summary}" + (f" (also /{', /'.join(c.aliases)})" if c.aliases else "")
+        for c in ctx.registry.all()
+    ]
     lines.append("")
     lines.append("Keys: enter send · ctrl+j newline · esc interrupt · shift+tab mode")
     lines.append("      ctrl+p command palette · ctrl+r expand output · ctrl+t todos · ctrl+d quit")
@@ -389,7 +404,7 @@ def build_default_commands() -> CommandRegistry:
         Command("theme", "Switch the colour palette", cmd_theme, "[name]", takes_args=True),
         Command("configure", "Settings and the OpenRouter API key", cmd_configure),
         Command("help", "List commands and keys", cmd_help),
-        Command("quit", "Exit HX", cmd_quit),
+        Command("quit", "Exit HX", cmd_quit, aliases=("exit", "q")),
     ):
         registry.register(command)
     return registry

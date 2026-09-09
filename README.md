@@ -125,7 +125,7 @@ model, not the safety layers.
 | `/theme [name]` | `dark`, `light`, `ansi` |
 | `/init` | generate an `HX.md` for the project |
 | `/help` | list commands and keys |
-| `/quit` | exit |
+| `/quit` | exit (also `/exit`, `/q`) |
 
 ### The status bar
 
@@ -369,8 +369,8 @@ One-time setup:
 Each release:
 
 ```sh
-# bump version in pyproject.toml, commit
-git tag v0.1.0 && git push origin main --tags
+# bump __version__ in src/hx/__init__.py, commit
+git tag v$(uv run hx --version | cut -d' ' -f2) && git push origin main --tags
 ```
 
 The `publish` job runs only on `refs/tags/v*` and only after lint, the test

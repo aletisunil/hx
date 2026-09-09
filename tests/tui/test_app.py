@@ -22,6 +22,7 @@ from hx.providers.fake import FakeProvider, text_turn
 from hx.providers.models import ModelRegistry
 from hx.tools.registry import ToolRegistry
 from hx.tui.app import HXApp
+from hx.tui.commands import Command
 from hx.tui.widgets.input import PromptInput
 from hx.tui.widgets.statusbar import StatusBar
 from hx.tui.widgets.transcript import Transcript
@@ -447,6 +448,109 @@ async def test_model_command_reports_an_empty_catalogue(hx_home: Path, tmp_path:
         await pilot.pause()
         text = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
     assert "/models refresh" in text
+
+
+async def test_model_command_opens_the_picker_from_a_submission(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """An ambiguous /model typed at the prompt has to reach the picker.
+
+    Submissions run outside worker context, where push_screen_wait raises.
+    """
+    from hx.providers.models import CacheMode, ModelInfo, ModelPricing
+    from hx.tui.widgets.palette import ModelPicker
+
+    def info(model_id: str) -> ModelInfo:
+        return ModelInfo(
+            id=model_id,
+            name=model_id,
+            context_window=400_000,
+            max_output_tokens=8192,
+            pricing=ModelPricing(prompt=1e-6, completion=2e-6),
+            cache_mode=CacheMode.IMPLICIT,
+        )
+
+    app = build_app(tmp_path)
+    app.models._models = {
+        "openai/gpt-5": info("openai/gpt-5"),
+        "openai/gpt-5-mini": info("openai/gpt-5-mini"),
+        MODEL: app.models.get_or_default(MODEL),
+    }
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one(PromptInput)
+        prompt.focus()
+        prompt.text = "/model gpt-5"
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+
+        assert isinstance(app.screen, ModelPicker)
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+    notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+    assert "failed" not in notices
+
+
+async def test_model_command_takes_an_id_that_prefixes_others(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A full id is a choice, not a query - it must not open the picker."""
+    from hx.providers.models import CacheMode, ModelInfo, ModelPricing
+
+    def info(model_id: str) -> ModelInfo:
+        return ModelInfo(
+            id=model_id,
+            name=model_id,
+            context_window=400_000,
+            max_output_tokens=8192,
+            pricing=ModelPricing(prompt=1e-6, completion=2e-6),
+            cache_mode=CacheMode.IMPLICIT,
+        )
+
+    app = build_app(tmp_path)
+    app.models._models = {
+        "openai/gpt-5": info("openai/gpt-5"),
+        "openai/gpt-5-mini": info("openai/gpt-5-mini"),
+        MODEL: app.models.get_or_default(MODEL),
+    }
+
+    async with app.run_test() as pilot:
+        await app.submit("/model openai/gpt-5")
+        await pilot.pause(0.1)
+
+        assert app.screen is app.screen_stack[0], "the picker should not have opened"
+        assert app.loop.model == "openai/gpt-5"
+
+
+async def test_a_failing_command_does_not_kill_the_app(hx_home: Path, tmp_path: Path) -> None:
+    """A crash in one command used to take the whole session with it."""
+
+    async def boom(ctx: object, args: str) -> None:
+        raise RuntimeError("kaboom")
+
+    app = build_app(tmp_path)
+    app.commands.register(Command("boom", "Explodes", boom))
+
+    async with app.run_test() as pilot:
+        await app.submit("/boom")
+        await pilot.pause(0.1)
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        assert app.is_running, "the app should survive a command that raises"
+
+    assert "kaboom" in notices
+
+
+async def test_exit_is_an_alias_for_quit(hx_home: Path, tmp_path: Path) -> None:
+    """Users type /exit; it should quit, not report an unknown command."""
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        await app.submit("/exit")
+        await pilot.pause(0.1)
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+
+    assert "Unknown command" not in notices
+    assert app.commands.get("exit").name == "quit"
 
 
 async def test_configure_saves_and_applies_a_new_key(hx_home: Path, tmp_path: Path) -> None:
