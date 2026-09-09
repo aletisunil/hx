@@ -126,6 +126,49 @@ def _switch_model(ctx: CommandContext, model_id: str) -> None:
         f"cache: {info.cache_mode})",
         "success",
     )
+    _persist_model_choice(ctx, model_id)
+
+
+def _persist_model_choice(ctx: CommandContext, model_id: str) -> None:
+    """Record the choice in the user settings file so new sessions reuse it.
+
+    The switch itself has already happened, so a failure here is a warning, not
+    an error - the session keeps running on the new model either way.
+    """
+    import os
+
+    from hx.config import ConfigError, read_settings_file, write_settings_file
+    from hx.paths import project_settings_file, user_settings_file
+
+    path = user_settings_file()
+    try:
+        data = read_settings_file(path)
+        models = data.get("models")
+        if not isinstance(models, dict):
+            models = {}
+            data["models"] = models
+        models["model"] = model_id
+        write_settings_file(path, data)
+    except (ConfigError, OSError) as exc:
+        ctx.app.notice(f"Could not save the model choice to {path}: {exc}", "warning")
+        return
+
+    # A higher layer setting models.model would quietly win next session, so say so
+    # rather than letting the user believe the choice stuck.
+    if os.environ.get("HX_MODEL"):
+        ctx.app.notice("$HX_MODEL overrides this on the next start.", "warning")
+        return
+    project = project_settings_file(ctx.settings.cwd)
+    try:
+        project_models = read_settings_file(project).get("models")
+    except ConfigError:
+        return
+    project_model = project_models.get("model") if isinstance(project_models, dict) else None
+    if project_model:
+        ctx.app.notice(
+            f"{project} pins models.model to {project_model} and overrides this on the next start.",
+            "warning",
+        )
 
 
 async def cmd_models(ctx: CommandContext, args: str) -> None:

@@ -30,6 +30,20 @@ from hx.tui.widgets.transcript import Transcript
 MODEL = "anthropic/claude-sonnet-4.5"
 
 
+def _gpt5() -> Any:
+    """A second catalogue entry, so ``/model`` has something to switch to."""
+    from hx.providers.models import CacheMode, ModelInfo, ModelPricing
+
+    return ModelInfo(
+        id="openai/gpt-5",
+        name="GPT-5",
+        context_window=400_000,
+        max_output_tokens=8192,
+        pricing=ModelPricing(prompt=1e-6, completion=2e-6),
+        cache_mode=CacheMode.IMPLICIT,
+    )
+
+
 def build_app(tmp_path: Path, script: list[Any] | None = None) -> HXApp:
     bus = EventBus()
     models = ModelRegistry()
@@ -438,6 +452,74 @@ async def test_model_command_switches_the_model(hx_home: Path, tmp_path: Path) -
         assert app.loop.session.meta.model == "openai/gpt-5"
         assert app.query_one_status().model == "openai/gpt-5"
         assert app.query_one_status().context_window == 400_000
+
+
+async def test_model_command_persists_the_choice_for_the_next_session(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """The switch outlives the session, and unrelated settings survive the write."""
+    import json
+
+    from hx.paths import user_settings_file
+
+    settings_file = user_settings_file()
+    settings_file.write_text(json.dumps({"theme": "light", "models": {"max_tokens": 4096}}))
+
+    app = build_app(tmp_path)
+    app.models._models = {"openai/gpt-5": _gpt5(), MODEL: app.models.get_or_default(MODEL)}
+
+    async with app.run_test() as pilot:
+        await app.submit("/model gpt-5")
+        await pilot.pause()
+
+    saved = json.loads(settings_file.read_text())
+    assert saved["models"]["model"] == "openai/gpt-5"
+    assert saved["models"]["max_tokens"] == 4096
+    assert saved["theme"] == "light"
+    assert load_settings(tmp_path).models.model == "openai/gpt-5"
+
+
+async def test_model_command_survives_an_unwritable_settings_file(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A broken settings file warns; it must not undo the in-session switch."""
+    from hx.paths import user_settings_file
+
+    app = build_app(tmp_path)
+    app.models._models = {"openai/gpt-5": _gpt5(), MODEL: app.models.get_or_default(MODEL)}
+
+    # Corrupted after startup - load_settings would refuse to boot the app otherwise.
+    user_settings_file().write_text("{ not json")
+
+    async with app.run_test() as pilot:
+        await app.submit("/model gpt-5")
+        await pilot.pause()
+
+        assert app.loop.model == "openai/gpt-5"
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        assert "Could not save the model choice" in notices
+
+
+async def test_model_command_warns_when_the_project_pins_the_model(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A project-level models.model wins next session, so the user is told."""
+    import json
+
+    (tmp_path / ".hx").mkdir(exist_ok=True)
+    (tmp_path / ".hx" / "settings.json").write_text(
+        json.dumps({"models": {"model": "anthropic/claude-opus-4.1"}})
+    )
+
+    app = build_app(tmp_path)
+    app.models._models = {"openai/gpt-5": _gpt5(), MODEL: app.models.get_or_default(MODEL)}
+
+    async with app.run_test() as pilot:
+        await app.submit("/model gpt-5")
+        await pilot.pause()
+
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        assert "overrides this on the next start" in notices
 
 
 async def test_model_command_reports_an_empty_catalogue(hx_home: Path, tmp_path: Path) -> None:

@@ -12,3 +12,4 @@ build/
 htmlcov/
 .DS_Store
 .hx/sessions/
+.hx/settings.json
