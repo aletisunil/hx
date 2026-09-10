@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.1.6] - 2026-09-10
+
 ### Added
 
 - **Web search, over Tavily.** `WebSearch` returns ranked results with a
