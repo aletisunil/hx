@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from textual.widgets import Button
@@ -53,6 +55,21 @@ def build_app(tmp_path: Path, model: str = MODEL) -> HXApp:
         model_info=models.get_or_default(model),
     )
     return HXApp(loop, bus, load_settings(tmp_path), models=models)
+
+
+async def settle(pilot: Any, until: Callable[[], bool], *, steps: int = 200) -> None:
+    """Pump the app until ``until`` holds, instead of waiting a fixed delay.
+
+    A login runs across several tasks - the flow, the modal's mount, the token
+    exchange - and how many event-loop turns that takes is a property of the
+    machine, not of the code under test. A tenth of a second was enough
+    locally and not enough on a loaded CI runner.
+    """
+    for _ in range(steps):
+        if until():
+            return
+        await pilot.pause()
+    raise AssertionError("the app never reached the state the test was waiting for")
 
 
 def signed_in_to_codex() -> None:
@@ -269,13 +286,20 @@ async def test_the_whole_login_flow_reaches_the_paste_field(
     async with app.run_test() as pilot:
         await pilot.pause()
         await app.submit("/login openai-codex")
-        await pilot.pause(0.1)
+
+        def waiting_for_a_paste() -> bool:
+            screen = app.screen
+            return isinstance(screen, LoginModalType) and screen._paste is not None
+
+        # Not just "the modal is up": until the flow has asked for a paste there
+        # is nothing to hand the code to, and submitting into that gap is the
+        # one case the modal deliberately refuses.
+        await settle(pilot, waiting_for_a_paste)
 
         pasted = "http://localhost:1455/auth/callback?code=CODE"
         app.screen.query_one("#login-input", Input).value = pasted
         await pilot.press("enter")
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot, lambda: bool(exchanged))
 
         assert exchanged == ["CODE"], "the pasted code never reached the token exchange"
         assert AuthStore().read("openai-codex") is not None
@@ -297,11 +321,13 @@ async def test_a_flow_that_fails_early_still_tears_the_modal_down(
     async with app.run_test() as pilot:
         await pilot.pause()
         await app.submit("/login openai-codex")
-        await pilot.pause(0.1)
+
+        def reported_the_failure() -> bool:
+            return "boom" in " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+
+        await settle(pilot, reported_the_failure)
 
         assert not isinstance(app.screen, LoginModalType)
-        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
-        assert "boom" in notices
 
 
 async def test_opening_the_browser_never_blocks_the_event_loop(
