@@ -9,7 +9,7 @@ card whose tint says pending / done / failed without a word being read.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.console import Group, RenderableType
 from rich.markdown import Heading, Markdown
@@ -21,6 +21,9 @@ from textual.widgets import Static
 
 from hx.tui.renderers import ToolCall, renderer_for
 from hx.tui.theme import THEME, syntax_style
+
+if TYPE_CHECKING:
+    from hx.tui.widgets.permission import PermissionPrompt
 
 
 class _PlainHeading(Heading):
@@ -443,7 +446,7 @@ class Transcript(VerticalScroll):
         self._following = True
         self._mount_block(prompt)
 
-    def pending_permission_prompts(self) -> list[Static]:
+    def pending_permission_prompts(self) -> list[PermissionPrompt]:
         """Unanswered prompts, oldest first - the order they must be answered in."""
         from hx.tui.widgets.permission import PermissionPrompt
 
