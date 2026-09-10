@@ -24,6 +24,9 @@ dependencies = [
   "pydantic>=2.7",
   "pyyaml>=6.0",
   "click>=8.1",
+  # System trust store, so a corporate proxy CA the machine already trusts is
+  # enough - certifi alone is why `hx` fails on networks where browsers work.
+  "truststore>=0.10",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +57,14 @@ path = "src/hx/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/hx"]
 
+# The manual and the release record ship inside the wheel, so `hx docs` and
+# `hx changelog` answer from the version that is installed. One copy at the
+# repository root - GitHub and PyPI render it there - included here rather
+# than duplicated under src/.
+[tool.hatch.build.targets.wheel.force-include]
+"README.md" = "hx/_docs/README.md"
+"CHANGELOG.md" = "hx/_docs/CHANGELOG.md"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -83,8 +94,11 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-q --strict-markers"
+# `live` is deselected here, not only in CI: a bare `uv run pytest` is what a
+# contributor runs, and a suite that quietly reaches the network fails on a
+# plane and passes on a desk. `-m live` on the command line overrides this.
+addopts = "-q --strict-markers -m 'not live'"
 markers = [
-  "live: hits the real OpenRouter API (requires OPENROUTER_API_KEY)",
+  "live: hits a real API (OpenRouter, or Tavily for the web search tools)",
   "sandbox: requires sandbox-exec (macOS) or bwrap (Linux)",
 ]

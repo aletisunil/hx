@@ -87,7 +87,7 @@ def test_injector_is_silent_while_the_list_is_empty() -> None:
     assert todo_injector(TodoList())() is None
 
 
-def test_updating_todos_replaces_rather_than_accumulates() -> None:
+async def test_updating_todos_replaces_rather_than_accumulates() -> None:
     """Six turns of updates must leave one copy in context, not six."""
     todos = TodoList()
     registry = InjectionRegistry()
@@ -96,7 +96,7 @@ def test_updating_todos_replaces_rather_than_accumulates() -> None:
     messages = [user_message("go")]
     for step in range(6):
         todos.replace([Todo(f"step {step}", TodoStatus.IN_PROGRESS)])
-        messages = registry.apply(messages)
+        messages = await registry.apply(messages)
 
     text = messages[-1].text()
     assert text.count("<hx-reminder>") == 1

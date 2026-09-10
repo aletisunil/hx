@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from hx import __version__
+from hx.net import async_client
 
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "hx", "version": __version__}
@@ -146,7 +147,7 @@ class HTTPTransport(Transport):
         self._inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     async def connect(self) -> None:
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0))
+        self._client = async_client(timeout=httpx.Timeout(120.0, connect=15.0))
 
     async def send(self, message: dict[str, Any]) -> None:
         if self._client is None:

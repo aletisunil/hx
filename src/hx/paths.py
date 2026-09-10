@@ -51,6 +51,12 @@ def session_outputs_dir(session_id: str) -> Path:
     return session_dir(session_id) / "outputs"
 
 
+def session_checkpoints_dir(session_id: str) -> Path:
+    """Content-addressed pre-images of the files HX changed (see
+    :mod:`hx.core.checkpoints`)."""
+    return session_dir(session_id) / "checkpoints"
+
+
 def user_themes_dir() -> Path:
     """User-supplied theme files (``*.json``, see :mod:`hx.tui.theme_json`)."""
     return user_home() / "themes"

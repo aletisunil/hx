@@ -13,6 +13,7 @@ rolling cache breakpoint is ever rewritten.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -52,7 +53,12 @@ class InjectionRegistry:
 
     def collect(self) -> list[Injection]:
         """Run every injector, drop ``None`` results, sort by priority then name
-        so output is deterministic (a reordered prefix is a cache miss)."""
+        so output is deterministic (a reordered prefix is a cache miss).
+
+        Blocking by nature - injectors stat files, hash them, and shell out to
+        git - so it is called off the event loop by :meth:`apply`. Callers
+        inside a coroutine must await that rather than reaching in here.
+        """
         collected: list[Injection] = []
         for name in sorted(self._injectors):
             try:
@@ -64,16 +70,22 @@ class InjectionRegistry:
                 collected.append(injection)
         return sorted(collected, key=lambda i: (i.priority, i.source))
 
-    def apply(self, messages: list[Message]) -> list[Message]:
+    async def apply(self, messages: list[Message]) -> list[Message]:
         """Return a copy of ``messages`` with stale ephemeral content stripped and
         fresh injections appended to the final user message.
 
         The input list is never mutated: the caller keeps the clean transcript
         and only the assembled request carries injections.
+
+        :meth:`collect` runs in a worker thread. Every injector does real I/O -
+        the git watcher spawns ``git status`` under a two-second timeout, the
+        stale-file injector hashes each file it is tracking - and this runs
+        once per provider call, not once per user turn. On the event loop a
+        turn with ten tool calls would freeze the TUI ten times over.
         """
         cleaned = [strip_injections(m) if m.role == "user" else m for m in messages]
 
-        injections = self.collect()
+        injections = await asyncio.to_thread(self.collect)
         if not injections:
             return cleaned
 

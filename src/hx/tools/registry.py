@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from hx.auth.store import TAVILY
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 
 
@@ -110,11 +111,16 @@ def build_default_registry(
     tracker: Any | None = None,
     todos: Any | None = None,
     bus: Any | None = None,
+    auth: Any | None = None,
+    checkpoints: Any | None = None,
 ) -> ToolRegistry:
     """Registry with the builtin tools registered.
 
     Bash is registered only when a shell is supplied, so a headless caller that
-    does not want command execution simply does not pass one.
+    does not want command execution simply does not pass one. The web tools
+    follow the same rule against ``auth``: without a Tavily key they are left
+    out entirely rather than advertised and failing, because their schemas sit
+    in the cached prefix and a model told "no key" simply tries again.
     """
     from hx.tools.bash import BashOutputTool, BashTool, KillShellTool
     from hx.tools.edit import EditTool
@@ -132,12 +138,19 @@ def build_default_registry(
         registry.register(BashOutputTool(jobs))
         registry.register(KillShellTool(jobs))
     registry.register(ReadTool(file_tracker))
-    registry.register(WriteTool(file_tracker))
-    registry.register(EditTool(file_tracker))
+    registry.register(WriteTool(file_tracker, checkpoints))
+    registry.register(EditTool(file_tracker, checkpoints))
     registry.register(GlobTool())
     registry.register(GrepTool())
     if todos is not None:
         registry.register(TodoWriteTool(todos, bus))
+    if auth is not None and auth.has_credential(TAVILY):
+        from hx.tools.websearch import CreditLedger, WebFetchTool, WebSearchTool
+
+        # One ledger between them: the bill is per key, not per tool.
+        ledger = CreditLedger()
+        registry.register(WebSearchTool(auth, ledger))
+        registry.register(WebFetchTool(auth, ledger))
     return registry
 
 

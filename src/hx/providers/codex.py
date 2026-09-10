@@ -24,6 +24,7 @@ import httpx
 from hx import __version__
 from hx.auth.oauth.codex import ORIGINATOR
 from hx.auth.resolve import ResolvedAuth
+from hx.net import async_client
 from hx.providers.base import ProviderError, ProviderRequest, StreamItem
 from hx.providers.responses_codec import StreamState, build_body, stream_end
 
@@ -56,7 +57,7 @@ class CodexProvider:
         self.session_id = session_id
         self.reasoning_effort = reasoning_effort
         self.max_retries = max_retries
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15.0))
+        self._client = async_client(timeout=httpx.Timeout(timeout, connect=15.0))
 
     def set_session_id(self, session_id: str) -> None:
         """The session id is the prompt-cache key, so it must follow /clear."""

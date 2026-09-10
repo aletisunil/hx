@@ -102,10 +102,18 @@ class ModelRegistry:
     def __init__(self) -> None:
         self._models: dict[str, ModelInfo] = {}
         self._fetched_at: float = 0.0
+        self._loaded = False
+        self.refresh_error: str | None = None
+        """Why the last refresh failed, in one line, or ``None``.
+
+        Kept so ``/model`` can say *why* the catalogue is empty: startup
+        refreshes deliberately do not interrupt the session, and a silent
+        failure there is indistinguishable from having no credential at all.
+        """
 
     def get(self, model_id: str) -> ModelInfo:
         """Raises :class:`UnknownModel` if absent even after a cache refresh."""
-        if not self._models:
+        if not self._loaded:
             self.load_cache()
         try:
             return self._models[model_id]
@@ -137,7 +145,7 @@ class ModelRegistry:
             )
 
     def all(self) -> list[ModelInfo]:
-        if not self._models:
+        if not self._loaded:
             self.load_cache()
         return sorted(self._models.values(), key=lambda m: m.id)
 
@@ -156,19 +164,30 @@ class ModelRegistry:
         alone still gets that route's models, which are static.
         """
         from hx.auth.store import OPENROUTER
+        from hx.net import describe
         from hx.providers.openrouter import fetch_models
 
-        self._models = {}
+        fetched: dict[str, ModelInfo] = {}
         if resolver.has_credential(OPENROUTER):
-            raw = await fetch_models(resolver.resolve_static(OPENROUTER).token)
+            try:
+                raw = await fetch_models(resolver.resolve_static(OPENROUTER).token)
+            except Exception as exc:
+                # Recorded and re-raised, and the catalogue we already had is
+                # left alone: a refresh that cannot reach the network is no
+                # reason to lose yesterday's models.
+                self.refresh_error = describe(exc)
+                raise
             for entry in raw:
                 try:
                     info = parse_model_entry(entry)
                 except (KeyError, TypeError, ValueError):
                     # One malformed catalogue entry must not cost us the whole list.
                     continue
-                self._models[info.id] = info
+                fetched[info.id] = info
+        self._models = fetched
         self._merge_static()
+        self._loaded = True
+        self.refresh_error = None
         self._fetched_at = time.time()
         self.save_cache()
 
@@ -178,15 +197,22 @@ class ModelRegistry:
             self._models[info.id] = info
 
     def load_cache(self) -> None:
-        path = models_cache_file()
-        if not path.exists():
-            return
-        try:
-            payload = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return
-        self._fetched_at = payload.get("fetched_at", 0.0)
+        """Read the cache, and register the static routes either way.
+
+        The static routes are merged even when there is no cache file, so a
+        machine whose first fetch failed still sees the models it can reach
+        without the network.
+        """
+        self._loaded = True
         self._models = {}
+        payload: dict[str, Any] = {}
+        path = models_cache_file()
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+        self._fetched_at = payload.get("fetched_at", 0.0)
         for entry in payload.get("models", []):
             try:
                 info = parse_model_entry(entry)

@@ -88,6 +88,69 @@ URL into the prompt instead — or set `HX_LOGIN_DEVICE_CODE=1` for the
 device-code flow. Access tokens are refreshed automatically; `/model` only
 offers routes you are actually signed in to.
 
+**Web search.** Optional, and the one credential that is not a model route.
+It powers two tools:
+
+| Tool | Does |
+|---|---|
+| `WebSearch` | search the web, returning ranked results with a snippet each |
+| `WebFetch` | read up to 5 URLs, returned as markdown |
+
+[Tavily](https://app.tavily.com) bills per search rather than per token, so it
+works identically on both routes — including the ChatGPT subscription one,
+where a provider-native search tool is not on offer.
+
+Get a key at <https://app.tavily.com> — the free tier is 1000 searches a month
+and takes no card — then save it:
+
+```sh
+hx auth set tavily      # paste the key, hidden input, saved to ~/.hx/auth.json
+hx auth                 # confirm: `tavily  key tvly-a…f3d9  …/auth.json`
+hx auth clear tavily    # remove it again
+```
+
+Or keep it in the environment instead, which wins only when nothing is saved:
+
+```sh
+export TAVILY_API_KEY=tvly-...     # HX_TAVILY_API_KEY is read first
+```
+
+**Without a key, HX works exactly as before** — `WebSearch` and `WebFetch` are
+simply not registered, and `hx auth` says so:
+
+```
+tavily         not configured      WebSearch and WebFetch are off
+```
+
+There is no nag, no failing tool and no startup warning. Leaving them out is
+deliberate: an advertised tool that always fails still costs cached-prefix
+tokens every turn, and a model told "no key" just calls it again. Adding a key
+turns both on from the next `hx`; no other setting changes.
+
+Credits are reported per call and per session at the foot of every result —
+`[Tavily: 1 credit, 4 this session]`. A search costs 1 credit, `search_depth:
+"advanced"` costs 2, and fetching costs 1 per 5 URLs. Tavily's docs describe a
+`usage` field for this, but the live API does not send one, so HX prices every
+call from those published rates and marks the figure `~1` rather than passing
+an estimate off as measured. Check `app.tavily.com` for the authoritative
+number.
+
+Credits are *not* in the status bar's cost, which prices tokens: `/cost`
+under-reports a session that searched.
+
+**Behind a TLS-inspecting proxy.** HX verifies certificates against the
+operating system's trust store, so a corporate CA the machine already trusts
+needs no setup. When the CA lives only in a file, name it:
+
+```sh
+export HX_CA_BUNDLE=/path/to/corp-ca.pem   # SSL_CERT_FILE and REQUESTS_CA_BUNDLE also work
+```
+
+`HX_SSL_NO_VERIFY=1` turns verification off entirely; it prints a warning at
+startup every session, because it is not a fix. A TLS failure is reported in
+one line - `/model` and the startup notice both name the certificate problem
+rather than reporting an empty catalogue with no cause.
+
 There is no Claude Pro/Max route. Anthropic rejects OAuth tokens unless the
 request impersonates Claude Code, which HX will not do. Claude models stay
 available through OpenRouter.
@@ -112,11 +175,42 @@ hx mcp list|add|remove      # manage MCP servers
 hx auth [set|clear]         # manage the OpenRouter key
 hx auth login [provider]    # sign in (openrouter, openai-codex)
 hx auth logout <provider>   # forget a stored credential
+hx docs [section]           # the manual; no argument lists its sections
+hx changelog [version]      # what shipped in each version
 hx upgrade                  # update to the latest release
 ```
 
 Print mode is the scriptable one: stdout carries only the assistant's text, so
 it pipes cleanly.
+
+### The docs ship with the binary
+
+`README.md` and [`CHANGELOG.md`](CHANGELOG.md) are included in the wheel, so
+the installed tool can print the manual and the release record for the version
+you are actually running:
+
+```sh
+hx docs                     # the section titles
+hx docs credentials         # one section, printed whole
+hx docs --all               # the entire manual
+hx changelog                # every release, newest first
+hx changelog 0.1.5          # one release
+hx changelog unreleased     # what has landed since the last tag
+```
+
+The system prompt points a session at these two commands, so "how do I set the
+API key?" or "what changed in the last release?" is answered from the shipped
+documentation rather than from the model's recollection of some other version.
+The call still goes through the permission engine like any other command;
+allowlist it if you would rather not be asked:
+
+```jsonc
+{ "permissions": { "allow": ["Bash(hx docs:*)", "Bash(hx changelog:*)"] } }
+```
+
+`CHANGELOG.md` lists what each version added, and a release cannot skip it:
+`tests/test_docs.py` fails when `__version__` has no section (see
+[Releasing](#releasing)).
 
 ### Keys
 
@@ -202,6 +296,7 @@ than being silently resolved.
 | `/compact [focus]` | summarise older turns now |
 | `/clear` | fresh session, same directory |
 | `/resume` | reopen a previous session, listed by name |
+| `/rewind` | go back to an earlier prompt, restoring the files HX changed |
 | `/title [text]` | show or set this session's name |
 | `/prompt` | the system prompt this session is running with |
 | `/todos` | toggle the sidebar |
@@ -262,7 +357,8 @@ discarding yours. Everything else is replaced.
     "compact_at": 0.80,               // fraction of the window that triggers compaction
     "keep_recent_turns": 6,           // turns kept verbatim across a compaction
     "tool_output_char_cap": 25000,
-    "tool_output_line_cap": 2000
+    "tool_output_line_cap": 2000,
+    "git_notices": true               // late-inject the branch and outside file changes
   },
 
   "bash": {
@@ -279,8 +375,10 @@ discarding yours. Everything else is replaced.
 ```
 
 Environment overrides: `HX_MODEL`, `HX_SUBAGENT_MODEL`, `HX_MAX_TOKENS`,
-`HX_PERMISSION_MODE`, `HX_SANDBOX`, `HX_COMPACT_AT`, `HX_THEME`,
-`HX_QUIET_STARTUP`. Also `HX_HOME` to relocate user state.
+`HX_PERMISSION_MODE`, `HX_SANDBOX`, `HX_COMPACT_AT`, `HX_GIT_NOTICES`,
+`HX_THEME`, `HX_QUIET_STARTUP`. Also `HX_HOME` to relocate user state, `HX_TAVILY_API_KEY`
+for web search, and `HX_CA_BUNDLE` / `HX_SSL_NO_VERIFY` for TLS (see
+[Credentials](#credentials)).
 
 ### The system prompt
 
@@ -346,7 +444,7 @@ files load here unchanged. `src/hx/tui/themes/dark.json` is the reference.
 | Path | What |
 |---|---|
 | `~/.hx/settings.json` | your settings |
-| `~/.hx/auth.json` | API key, mode 0600 |
+| `~/.hx/auth.json` | API keys and logins, mode 0600 |
 | `~/.hx/models.json` | cached model catalogue, refreshed daily |
 | `~/.hx/themes/` | your themes, one JSON file each |
 | `~/.hx/keybindings.json` | your key overrides |
@@ -398,10 +496,31 @@ assembled in a fixed order and never mutated mid-session. Cache breakpoints sit
 at the end of that static block and at a rolling point before the recent turns,
 which only advances once enough tokens have accumulated behind it.
 
-**Late injection** carries everything that changes per turn — the todo list,
-files that changed on disk since HX read them — on the tail of the newest user
-message rather than in the prefix. Stale copies are stripped and regenerated
-each turn, so six todo updates leave one copy in context, not six.
+**Late injection** carries everything that changes per turn - the todo list,
+files that changed on disk since HX read them, the git branch and any file the
+working tree gained or lost outside the session - on the tail of the newest
+user message rather than in the prefix. Stale copies are stripped and
+regenerated each turn, so six todo updates leave one copy in context, not six.
+
+**Working-tree notices** come from one `git status --porcelain=v2 --branch -z`
+per provider call, run without a shell and bounded by a two-second timeout. It
+runs in a worker thread, as every injector does: a turn makes one of these per
+tool round-trip, and on the event loop a slow repository would freeze the UI
+each time. A file HX has already read is left to the stale-file notice, so no
+path is reported twice; outside a repository the watcher disables itself for
+the session. Turn it off with `"context": {"git_notices": false}`.
+
+**Rewind** (`/rewind`) picks an earlier prompt and takes the session back to
+it: the transcript is cut there and every file HX wrote after it is restored
+from a content-addressed snapshot taken before each Write and Edit. A file
+someone else changed in the meantime is reported and left alone, and shell
+commands are outside the scheme - the report says so rather than implying the
+tree was fully returned. The prompt that was cut comes back in the input box,
+because a rewind is usually the first half of saying it differently. Nothing is
+deleted from the session file: the rewind is one more append, and replaying the
+file reproduces the state - which is also how an undone compaction gives its
+messages back. The cost ledger is deliberately not rewound; those tokens were
+spent.
 
 **Compaction** fires at 80% of the window, or on `/compact [focus]`. Older
 turns are replaced by a structured summary; the recent turns and the todo list
@@ -512,11 +631,12 @@ uv run pytest tests/tui/test_snapshots.py --snapshot-update
 
 ```
 src/hx/
-  cli.py config.py paths.py frontmatter.py
+  cli.py config.py paths.py frontmatter.py git.py
   core/         loop, context assembly, compaction, late injection, sessions, usage
   auth/         credential store, OAuth flows, per-route resolution
   providers/    OpenRouter, Codex, the model catalogue, a scripted provider for tests
-  tools/        Bash, Read, Write, Edit, Glob, Grep, TodoWrite, Task, output capping
+  tools/        Bash, Read, Write, Edit, Glob, Grep, TodoWrite, Task, WebSearch,
+                WebFetch, output capping
   permissions/  rule engine, shell decomposition, Seatbelt/bubblewrap
   skills/ agents/ mcp/
   keys.py       keybinding registry: ids, defaults, descriptions, user overrides
@@ -546,9 +666,17 @@ One-time setup:
 Each release:
 
 ```sh
-# bump __version__ in src/hx/__init__.py, commit
+# 1. move CHANGELOG.md's [Unreleased] entries under the new version, dated,
+#    and leave a fresh empty [Unreleased] behind
+# 2. bump __version__ in src/hx/__init__.py
+# 3. uv run pytest tests/test_docs.py     # the version must have a section
+git commit -am "release: X.Y.Z"
 git tag v$(uv run hx --version | cut -d' ' -f2) && git push origin main --tags
 ```
+
+Step 1 is not optional and is not a convention: `tests/test_docs.py` fails the
+whole suite when `__version__` has no `CHANGELOG.md` section, so a release that
+skips it cannot get past CI to the `publish` job.
 
 The `publish` job runs only on `refs/tags/v*` and only after lint, the test
 matrix, and an install-script run in a clean Debian container have passed. It

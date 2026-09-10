@@ -58,6 +58,8 @@ class ContextSettings:
     """Turns kept verbatim across a compaction."""
     tool_output_char_cap: int = 25_000
     tool_output_line_cap: int = 2_000
+    git_notices: bool = True
+    """Late-inject the branch and files that changed on disk outside the session."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +189,7 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
                     "tool_output_line_cap", _default(ContextSettings, "tool_output_line_cap")
                 )
             ),
+            git_notices=bool(context.get("git_notices", _default(ContextSettings, "git_notices"))),
         ),
         bash=BashSettings(
             timeout_seconds=int(
@@ -276,6 +279,7 @@ _ENV_MAP: dict[str, tuple[str, ...]] = {
     "HX_PERMISSION_MODE": ("permissions", "mode"),
     "HX_SANDBOX": ("permissions", "sandbox"),
     "HX_COMPACT_AT": ("context", "compact_at"),
+    "HX_GIT_NOTICES": ("context", "git_notices"),
     "HX_THEME": ("theme",),
     "HX_QUIET_STARTUP": ("quietStartup",),
 }

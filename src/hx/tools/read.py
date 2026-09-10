@@ -109,6 +109,14 @@ class FileTracker:
         known = self._hashes.get(resolved)
         return known is not None and known != _digest(path)
 
+    def forget(self, path: Path) -> None:
+        """Drop the record of a read.
+
+        Used after a rewind puts a file back: the read that justified editing
+        it may itself have been rewound away, so the model has to look again.
+        """
+        self._hashes.pop(path.resolve(), None)
+
     def stale_files(self) -> list[Path]:
         return [path for path in self._hashes if self.changed_since_read(path)]
 

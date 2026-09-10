@@ -98,7 +98,14 @@ async def cmd_model(ctx: CommandContext, args: str) -> None:
     registry: ModelRegistry = ctx.app.models
     models = _reachable(ctx, registry.all())
     if not models:
-        ctx.app.notice("No models available. Run /models refresh, or /login to sign in.", "warning")
+        # A recorded failure replaces the remedy rather than trailing it:
+        # "run /models refresh" is not advice when refresh is what failed.
+        ctx.app.notice(
+            f"No models available. {registry.refresh_error}"
+            if registry.refresh_error
+            else "No models available. Run /models refresh, or /login to sign in.",
+            "warning",
+        )
         return
 
     query = args.strip()
@@ -210,10 +217,12 @@ async def cmd_models(ctx: CommandContext, args: str) -> None:
     if args.strip() != "refresh":
         ctx.app.notice("Usage: /models refresh", "warning")
         return
+    from hx.net import describe
+
     try:
         await ctx.app.models.refresh(ctx.app.auth)
     except Exception as exc:
-        ctx.app.notice(f"Model refresh failed: {exc}", "error")
+        ctx.app.notice(f"Model refresh failed: {describe(exc)}", "error")
         return
     ctx.app.notice(f"Refreshed {len(ctx.app.models.all())} models.", "success")
 
@@ -249,6 +258,35 @@ async def cmd_resume(ctx: CommandContext, args: str) -> None:
     chosen = await ctx.app.push_screen_wait(SessionPicker(sessions))
     if chosen:
         ctx.app.resume_session(chosen)
+
+
+async def cmd_rewind(ctx: CommandContext, args: str) -> None:
+    """``/rewind`` - take the session back to an earlier prompt, files and all."""
+    from hx.tui.widgets.palette import RewindPicker
+
+    if ctx.app.is_busy:
+        ctx.app.notice("Interrupt the running turn before rewinding.", "warning")
+        return
+
+    points = ctx.app.loop.session.rewind_points()
+    if not points:
+        ctx.app.notice("Nothing to rewind to yet.", "warning")
+        return
+
+    chosen = await ctx.app.push_screen_wait(RewindPicker(points))
+    if chosen is None:
+        return
+
+    report = ctx.app.rewind_to(int(chosen))
+    if report is None:
+        ctx.app.notice("Rewound. No file checkpoints in this session.", "success")
+        return
+
+    ctx.app.notice(f"Rewound. {report.summary()}.", "success")
+    for path in report.conflicted:
+        ctx.app.notice(f"{path} changed since HX wrote it - left as it is.", "warning")
+    for path, reason in report.skipped:
+        ctx.app.notice(f"{path} not restored: {reason}.", "warning")
 
 
 async def cmd_title(ctx: CommandContext, args: str) -> None:
@@ -638,6 +676,7 @@ def build_default_commands() -> CommandRegistry:
         Command("compact", "Summarise older turns now", cmd_compact, "[focus]", takes_args=True),
         Command("todos", "Toggle the todo sidebar", cmd_todos),
         Command("resume", "Resume a previous session", cmd_resume),
+        Command("rewind", "Go back to an earlier prompt", cmd_rewind),
         Command("title", "Show or set the session name", cmd_title, "[text]", takes_args=True),
         Command("prompt", "Show the system prompt in force", cmd_prompt),
         Command("cost", "Token and cost breakdown", cmd_cost),

@@ -34,6 +34,7 @@ from hx.core.messages import (
     ToolUseBlock,
 )
 from hx.core.usage import TurnUsage
+from hx.net import async_client
 from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, StreamEnd, StreamItem
 
 API_BASE = "https://openrouter.ai/api/v1"
@@ -73,7 +74,7 @@ class OpenRouterProvider:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.max_retries = max_retries
-        self._client = httpx.AsyncClient(
+        self._client = async_client(
             timeout=httpx.Timeout(timeout, connect=15.0),
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -380,7 +381,7 @@ def _error_message(status: int, body: str) -> str:
 
 async def fetch_models(api_key: str, base_url: str = API_BASE) -> list[dict[str, Any]]:
     """GET ``/models``. Used by :class:`~hx.providers.models.ModelRegistry`."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with async_client(timeout=30.0) as client:
         response = await client.get(
             f"{base_url.rstrip('/')}/models",
             headers={"Authorization": f"Bearer {api_key}", **DEFAULT_HEADERS},

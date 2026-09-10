@@ -27,6 +27,7 @@ import httpx
 from hx.auth.oauth.callback import CallbackError, CallbackResult, LoopbackCallback, parse_redirect
 from hx.auth.oauth.pkce import PKCE, generate_pkce, random_state
 from hx.auth.store import OAuthCredential
+from hx.net import async_client
 
 PROVIDER_ID = "openai-codex"
 
@@ -152,7 +153,7 @@ async def _post_form(client: httpx.AsyncClient, url: str, form: dict[str, str]) 
 
 
 async def _exchange(code: str, verifier: str, redirect_uri: str) -> OAuthCredential:
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+    async with async_client(timeout=HTTP_TIMEOUT) as client:
         token = await _post_form(
             client,
             TOKEN_URL,
@@ -174,7 +175,7 @@ async def refresh(credential: OAuthCredential) -> OAuthCredential:
     over - a refresh after an account switch would otherwise keep addressing
     the old workspace.
     """
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+    async with async_client(timeout=HTTP_TIMEOUT) as client:
         token = await _post_form(
             client,
             TOKEN_URL,
@@ -256,7 +257,7 @@ def _open_browser(url: str) -> bool:
 
 async def login_device_code(interaction: LoginInteraction) -> OAuthCredential:
     """Headless flow: show a short code, poll until the user enters it elsewhere."""
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+    async with async_client(timeout=HTTP_TIMEOUT) as client:
         response = await client.post(DEVICE_USER_CODE_URL, json={"client_id": CLIENT_ID})
         if response.status_code == 404:
             raise OAuthError(

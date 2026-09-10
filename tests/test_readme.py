@@ -117,8 +117,15 @@ def test_app_bindings_all_come_from_the_registry() -> None:
 
 
 def _documented_settings(readme: str) -> dict:
-    """Parse the jsonc block under Configuration, minus its comments."""
-    block = re.search(r"```jsonc\n(.*?)```", readme, re.S)
+    """Parse the jsonc block under Configuration, minus its comments.
+
+    Anchored to the heading, not to the first ``jsonc`` fence in the file: the
+    README grew other jsonc examples above this one, and matching the first
+    fence silently pointed these assertions at a snippet that documents nothing.
+    """
+    section = readme.split("\n## Configuration", 1)
+    assert len(section) == 2, "the README lost its Configuration section"
+    block = re.search(r"```jsonc\n(.*?)```", section[1], re.S)
     assert block is not None, "the Configuration section lost its example"
     stripped = re.sub(r"//.*", "", block.group(1))
     return json.loads(stripped)
@@ -183,10 +190,19 @@ def test_documented_defaults_match_the_code(readme: str) -> None:
 
 
 def test_documented_env_vars_exist(readme: str) -> None:
+    """Credential variables come from the resolver, not a second list here -
+    one that drifts is exactly the failure this file exists to catch."""
+    from hx.auth.resolve import PROVIDER_ENV
     from hx.config import _ENV_MAP
+    from hx.net import CA_BUNDLE_VARS, NO_VERIFY_VAR
 
+    credential_vars = {name for names in PROVIDER_ENV.values() for name in names}
     documented = set(re.findall(r"`(HX_[A-Z_]+)`", readme))
-    known = set(_ENV_MAP) | {"HX_HOME", "HX_OPENROUTER_API_KEY"}
+    known = (
+        set(_ENV_MAP)
+        | credential_vars
+        | {"HX_HOME", "HX_LOGIN_DEVICE_CODE", NO_VERIFY_VAR, *CA_BUNDLE_VARS}
+    )
     assert documented - known == set(), "README documents env vars that do nothing"
 
 

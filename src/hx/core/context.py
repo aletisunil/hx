@@ -169,6 +169,12 @@ class ContextBuilder:
         candidate = len(messages) - self.keep_recent_turns
         if self._breakpoint_b is None:
             self._breakpoint_b = candidate
+        elif self._breakpoint_b > candidate:
+            # The history got shorter - a rewind, /clear, or a resumed session.
+            # B has to come back with it: left where it was it would sit past
+            # the end of the payload, and the hysteresis window below it would
+            # be empty forever, so it could never move again.
+            self._breakpoint_b = candidate
         else:
             below = sum(
                 self.estimate_tokens(_message_text(m))
@@ -266,6 +272,12 @@ direct answers and code over prose. Reference files as `path/to/file.py:42`.
 When a task takes several steps, track them so the user can see the plan and
 what remains. Report what actually happened: if a command failed, say so and
 show the output.
+
+Questions about HX itself - a command, a setting, how to add an API key, what
+changed in a release - are answered from the documentation shipped with this
+build, not from memory: `hx docs` lists the manual's sections, `hx docs
+<section>` prints one, and `hx changelog [version]` prints what each version
+added. Read the relevant one before answering.
 """
 
 

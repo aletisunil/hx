@@ -1,4 +1,4 @@
-"""Modal pickers: slash commands, model selection, session resume."""
+"""Modal pickers: slash commands, model selection, session resume, rewind."""
 
 from __future__ import annotations
 
@@ -220,3 +220,35 @@ class SessionPicker(FilteredPicker):
             label.append(meta.title or meta.session_id, style=THEME.fg("text"))
             rows.append((meta.session_id, label))
         return rows
+
+
+class RewindPicker(FilteredPicker):
+    """Pick the prompt to take the session back to.
+
+    Newest first: a rewind is nearly always undoing the last thing that
+    happened, and that should be the row Enter is already on.
+    """
+
+    def __init__(self, points: list[Any]) -> None:
+        super().__init__("Rewind to", "Filter prompts…")
+        self.points = list(reversed(points))
+
+    def rows(self, query: str) -> list[tuple[str, Text]]:
+        def plain(point: Any) -> str:
+            return f"{_one_line(point.text)} {point.index}"
+
+        rows: list[tuple[str, Text]] = []
+        for point in filter_items(self.points, query, key=plain):
+            when = time.strftime("%H:%M", time.localtime(point.timestamp))
+            label = Text(f"{when}  ", style=THEME.fg("dim"))
+            label.append(_one_line(point.text) or "(empty prompt)", style=THEME.fg("text"))
+            if point.compacted:
+                label.append("  compacted", style=THEME.fg("muted"))
+            rows.append((str(point.index), label))
+        return rows
+
+
+def _one_line(text: str, width: int = 72) -> str:
+    """Prompts are multiline; a picker row is not."""
+    collapsed = " ".join(text.split())
+    return collapsed if len(collapsed) <= width else collapsed[: width - 1] + "…"

@@ -31,6 +31,8 @@ from hx.paths import auth_file
 
 LEGACY_OPENROUTER_KEY = "openrouter_api_key"
 OPENROUTER = "openrouter"
+TAVILY = "tavily"
+"""Web search. Not a model route - it never appears in ``providers.registry``."""
 
 
 @dataclass(frozen=True, slots=True)

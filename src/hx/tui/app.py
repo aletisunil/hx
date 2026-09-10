@@ -90,6 +90,8 @@ class HXApp(App[None]):
         agents: Any = None,
         mcp: Any = None,
         notices: list[str] | None = None,
+        checkpoints: Any = None,
+        tracker: Any = None,
     ) -> None:
         super().__init__()
         self._startup_notices = list(notices or ())
@@ -98,6 +100,9 @@ class HXApp(App[None]):
         self.skills = skills or {}
         self.agents = agents or {}
         self.mcp = mcp
+        self.checkpoints = checkpoints
+        """:class:`~hx.core.checkpoints.CheckpointStore` - what ``/rewind`` restores."""
+        self.tracker = tracker
         self.loop = loop
         self.models = models if models is not None else ModelRegistry()
         self.auth = auth if auth is not None else _default_auth()
@@ -282,7 +287,7 @@ class HXApp(App[None]):
             await self.run_shell_passthrough(text[1:].strip())
             return
 
-        if self._turn_worker is not None and not self._turn_worker.is_finished:
+        if self.is_busy:
             # Do not interleave turns: queue and run it when the current one ends.
             self._queued.append(text)
             self._transcript.add_notice("queued", "info")
@@ -500,6 +505,12 @@ class HXApp(App[None]):
     def last_context(self) -> Any:
         return self.loop.last_context
 
+    @property
+    def is_busy(self) -> bool:
+        """A turn is in flight. Commands that rewrite the session refuse while
+        it is, rather than pulling the transcript out from under it."""
+        return self._turn_worker is not None and not self._turn_worker.is_finished
+
     def start_new_session(self) -> None:
         """Fresh transcript, same directory. The old session stays on disk."""
         from hx.core.session import new_session
@@ -510,6 +521,7 @@ class HXApp(App[None]):
         setter = getattr(self.loop.provider, "set_session_id", None)
         if setter is not None:
             setter(self.loop.session.meta.session_id)
+        self._attach_checkpoints()
         self._transcript.clear_all()
         self._transcript.add_notice("New session started.", "success")
         status = self._status
@@ -531,18 +543,57 @@ class HXApp(App[None]):
         setter = getattr(self.loop.provider, "set_session_id", None)
         if setter is not None:
             setter(session.meta.session_id)
+        self._attach_checkpoints()
+        self._replay_transcript()
+        self._transcript.add_notice(f"Resumed {session_id}.", "success")
+
+    def rewind_to(self, index: int) -> Any:
+        """Take the session back to just before message ``index``.
+
+        Files first, then the transcript: if the restore fails the session
+        still describes the tree as it actually is. The prompt that was cut is
+        handed back to the input box rather than dropped - a rewind is nearly
+        always the first half of "say that differently".
+
+        Returns the :class:`~hx.core.checkpoints.RestoreReport`, or ``None``
+        when this app has no checkpoint store.
+        """
+        session = self.loop.session
+        prompt = session.messages[index].text() if index < len(session.messages) else ""
+        report = None
+        if self.checkpoints is not None:
+            report = self.checkpoints.restore_to(index, self.tracker)
+        session.rewind_to(index)
+        self._replay_transcript()
+        if prompt:
+            self._prompt.text = prompt
+            self._prompt.move_cursor(self._prompt.document.end)
+            self._prompt.focus()
+        return report
+
+    def _attach_checkpoints(self) -> None:
+        """Point the store at whichever session the tools are now writing to."""
+        if self.checkpoints is None:
+            return
+        from hx.paths import session_checkpoints_dir
+
+        session = self.loop.session
+        self.checkpoints.attach(session, session_checkpoints_dir(session.meta.session_id))
+
+    def _replay_transcript(self) -> None:
+        """Redraw the transcript from the session - the screen no longer matches
+        the history, so it is rebuilt rather than patched."""
         transcript = self._transcript
         transcript.clear_all()
-        for message in session.active_messages():
+        for message in self.loop.session.active_messages():
             if message.role == "user":
                 transcript.add_user_message(message.text())
             elif text := message.text():
                 transcript.start_assistant_message()
                 transcript.append_delta(text)
-        transcript.add_notice(f"Resumed {session_id}.", "success")
 
     async def action_interrupt(self) -> None:
-        if self._turn_worker is None or self._turn_worker.is_finished:
+        if not self.is_busy:
             return
         self.loop.cancel()
         self._turn_worker.cancel()
@@ -562,7 +613,7 @@ class HXApp(App[None]):
             self._prompt.clear()
             self._clear_armed = False
             return
-        if self._turn_worker is not None and not self._turn_worker.is_finished:
+        if self.is_busy:
             await self.action_interrupt()
             return
         if self._clear_armed:
@@ -703,6 +754,8 @@ async def run_tui(
     agents: Any = None,
     mcp: Any = None,
     notices: list[str] | None = None,
+    checkpoints: Any = None,
+    tracker: Any = None,
 ) -> None:
     app = HXApp(
         loop,
@@ -716,5 +769,7 @@ async def run_tui(
         agents=agents,
         mcp=mcp,
         notices=notices,
+        checkpoints=checkpoints,
+        tracker=tracker,
     )
     await app.run_async()

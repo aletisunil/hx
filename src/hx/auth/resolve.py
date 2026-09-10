@@ -24,6 +24,7 @@ from typing import Any
 from hx.auth.oauth import codex as codex_oauth
 from hx.auth.store import (
     OPENROUTER,
+    TAVILY,
     ApiKeyCredential,
     AuthStore,
     Credential,
@@ -33,6 +34,7 @@ from hx.auth.store import (
 #: Environment variables consulted per provider, highest priority first.
 PROVIDER_ENV: dict[str, tuple[str, ...]] = {
     OPENROUTER: ("HX_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"),
+    TAVILY: ("HX_TAVILY_API_KEY", "TAVILY_API_KEY"),
 }
 
 #: Providers whose environment variable wins over the saved credential.
@@ -235,5 +237,11 @@ def missing_message(provider_id: str) -> str:
         return (
             "Not signed in to ChatGPT. Run `hx auth login openai-codex`, or `/login` "
             "inside HX. Requires a ChatGPT Plus or Pro subscription."
+        )
+    if provider_id == TAVILY:
+        return (
+            "No Tavily API key found, so WebSearch and WebFetch are off. Run "
+            "`hx auth set tavily` or set TAVILY_API_KEY. The free tier at "
+            "https://app.tavily.com is 1000 searches a month."
         )
     return f"No credential for {provider_id}. Run `hx auth login {provider_id}`."

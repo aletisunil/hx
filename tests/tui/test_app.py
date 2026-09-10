@@ -441,11 +441,58 @@ async def test_every_planned_command_is_registered(hx_home: Path, tmp_path: Path
         "mcp",
         "agents",
         "todos",
+        "rewind",
         "init",
         "help",
         "quit",
     }
     assert planned <= registered
+
+
+async def test_rewind_redraws_the_transcript_and_hands_the_prompt_back(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A rewind is nearly always the first half of "say that differently", so
+    the prompt that was cut goes back in the box rather than being lost."""
+    app = build_app(tmp_path, [text_turn("first answer")])
+    async with app.run_test() as pilot:
+        await app.submit("first prompt")
+        await pilot.pause()
+        for _ in range(20):
+            await pilot.pause(0.02)
+            if len(app.loop.session.messages) >= 2:
+                break
+
+        point = app.loop.session.rewind_points()[-1]
+        app.rewind_to(point.index)
+        await pilot.pause()
+
+        assert app.loop.session.active_messages() == []
+        assert not app.query_one(Transcript).query("MessageBlock")
+        assert app.query_one(PromptInput).text == "first prompt"
+
+
+async def test_rewind_is_refused_while_a_turn_is_running(hx_home: Path, tmp_path: Path) -> None:
+    """Cutting the transcript out from under a streaming turn would leave the
+    reply landing in a session that no longer has its prompt."""
+    app = build_app(tmp_path, [text_turn("answer")])
+    async with app.run_test() as pilot:
+        await app.submit("a prompt")
+        app._turn_worker = _Unfinished()
+        await app.submit("/rewind")
+        await pilot.pause()
+
+        assert "Interrupt the running turn" in _last_notice(app)
+
+
+class _Unfinished:
+    """A worker that never finishes, so ``is_busy`` stays true."""
+
+    is_finished = False
+
+
+def _last_notice(app: HXApp) -> str:
+    return " ".join(str(node.render()) for node in app.query_one(Transcript).query(Static))
 
 
 async def test_mode_command_changes_the_permission_mode(hx_home: Path, tmp_path: Path) -> None:
@@ -663,6 +710,21 @@ async def test_model_command_reports_an_empty_catalogue(hx_home: Path, tmp_path:
         await pilot.pause()
         text = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
     assert "/models refresh" in text
+
+
+async def test_model_command_says_why_the_catalogue_is_empty(hx_home: Path, tmp_path: Path) -> None:
+    """A remedy is not advice when the remedy is the thing that keeps failing."""
+    app = build_app(tmp_path)
+    app.models._models = {}
+    app.models._loaded = True
+    app.models.refresh_error = "TLS certificate verification failed (self signed certificate)."
+
+    async with app.run_test() as pilot:
+        await app.submit("/model")
+        await pilot.pause()
+        text = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+
+    assert "TLS certificate verification failed" in text
 
 
 async def test_model_command_opens_the_picker_from_a_submission(

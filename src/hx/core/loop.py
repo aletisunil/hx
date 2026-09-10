@@ -222,7 +222,7 @@ class AgentLoop:
 
     async def _stream_turn(self) -> tuple[Message, StopReason]:
         """One provider call. Publishes deltas and the usage update."""
-        request = self._build_request()
+        request = await self._build_request()
 
         text_parts: list[str] = []
         thinking_parts: list[str] = []
@@ -280,8 +280,8 @@ class AgentLoop:
             stop_reason,
         )
 
-    def _build_request(self) -> ProviderRequest:
-        messages = self.injections.apply(self.session.active_messages())
+    async def _build_request(self) -> ProviderRequest:
+        messages = await self.injections.apply(self.session.active_messages())
         cache_mode = self.model_info.cache_mode.value if self.model_info else "none"
         assembled = self.context.build(
             messages=messages,

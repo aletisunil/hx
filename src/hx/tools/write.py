@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 from hx.tools.read import FileTracker, resolve_path
+
+if TYPE_CHECKING:
+    from hx.core.checkpoints import CheckpointStore
 
 DESCRIPTION = """Write a file, overwriting it if it exists.
 
@@ -20,11 +23,15 @@ class WriteTool(Tool):
     description = DESCRIPTION
     mutating = True
 
-    def __init__(self, tracker: FileTracker) -> None:
+    def __init__(self, tracker: FileTracker, checkpoints: CheckpointStore | None = None) -> None:
         """Args:
         tracker: ``hx.tools.read.FileTracker``, used to enforce read-before-write.
+        checkpoints: ``hx.core.checkpoints.CheckpointStore``, given the file's
+            previous bytes so ``/rewind`` can put them back. Optional: a
+            headless caller with no session has nothing to rewind to.
         """
         self.tracker = tracker
+        self.checkpoints = checkpoints
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -64,8 +71,12 @@ class WriteTool(Tool):
 
         existed = path.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
+        if self.checkpoints is not None:
+            self.checkpoints.capture(path)
         write_atomic(path, content)
         self.tracker.mark_read(path)
+        if self.checkpoints is not None:
+            self.checkpoints.settle(path)
 
         verb = "updated" if existed else "created"
         lines = content.count("\n") + 1 if content else 0

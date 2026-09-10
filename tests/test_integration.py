@@ -7,6 +7,8 @@ mode does not merely refuse writes but never offers them.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,7 @@ def build(
     rules: list[Any] | None = None,
     asker: Any = None,
     shell: PersistentShell | None = None,
+    auth: Any = None,
 ) -> AgentLoop:
     settings = load_settings(tmp_path, {"permissions": {"mode": mode.value}})
     jobs = BackgroundJobs(tmp_path / ".hx" / "jobs")
@@ -54,7 +57,7 @@ def build(
     return AgentLoop(
         provider=FakeProvider(script),
         session=session,
-        tools=build_default_registry(shell, jobs if shell else None, FileTracker()),
+        tools=build_default_registry(shell, jobs if shell else None, FileTracker(), auth=auth),
         permissions=PermissionEngine(mode, rules or [], tmp_path, asker=asker),
         context=ContextBuilder("sys", tmp_path),
         compactor=None,
@@ -360,6 +363,140 @@ async def test_a_file_changed_on_disk_is_flagged_to_the_model(
     assert "changed on disk" in loop.provider.requests[0].context.messages[-1].text()
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+async def test_the_branch_and_outside_edits_reach_the_model(hx_home: Path, tmp_path: Path) -> None:
+    """A file the user edited in their editor is invisible to HX otherwise: it
+    was never read, so the stale-file notice has nothing to say about it."""
+    from hx.git import GitWatcher, git_injector
+
+    _init_repo(tmp_path)
+    tracker = FileTracker()
+    loop = build(tmp_path, [text_turn("first")])
+    loop.tools = build_default_registry(None, None, tracker)
+    loop.injections.register("git", git_injector(GitWatcher(tmp_path), seen=tracker.was_read))
+
+    await loop.run("hello")
+    (tmp_path / "edited_elsewhere.py").write_text("print(1)\n")
+
+    loop.provider = FakeProvider([text_turn("noted")])
+    await loop.run("what changed?")
+
+    tail = loop.provider.requests[0].context.messages[-1].text()
+    assert "Git branch:" in tail
+    assert "edited_elsewhere.py" in tail
+    assert "Git branch:" not in loop.provider.requests[0].context.system_text()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+async def test_working_tree_notices_leave_the_cached_prefix_alone(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """The branch changes rarely, the file list constantly - in the prefix,
+    either would cost a full re-read of the window on the turn it moved."""
+    from hx.git import GitWatcher, git_injector
+
+    _init_repo(tmp_path)
+    script = [
+        tool_turn("Write", {"file_path": "one.py", "content": "1"}, "w1"),
+        tool_turn("Write", {"file_path": "two.py", "content": "2"}, "w2"),
+        text_turn("done"),
+    ]
+    loop = build(tmp_path, script, mode=PermissionMode.BYPASS)
+    loop.injections.register("git", git_injector(GitWatcher(tmp_path)))
+
+    await loop.run("write two files")
+
+    assert len(set(loop.provider.prefix_fingerprints())) == 1
+
+
+def _init_repo(root: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "seed.txt").write_text("seed\n")
+    subprocess.run(["git", "add", "seed.txt"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=root,
+        check=True,
+    )
+
+
+async def test_a_rewind_undoes_the_edits_the_turn_made(hx_home: Path, tmp_path: Path) -> None:
+    """The whole point: the transcript and the working tree go back together.
+    Either one alone leaves the model reasoning about a tree that is not there."""
+    from hx.core.checkpoints import CheckpointStore
+    from hx.paths import session_checkpoints_dir
+
+    target = tmp_path / "a.py"
+    target.write_text("original\n")
+
+    script = [
+        tool_turn("Read", {"file_path": "a.py"}, "r1"),
+        tool_turn(
+            "Edit",
+            {"file_path": "a.py", "old_string": "original", "new_string": "rewritten"},
+            "e1",
+        ),
+        text_turn("done"),
+    ]
+    tracker = FileTracker()
+    loop = build(tmp_path, script, mode=PermissionMode.BYPASS)
+    checkpoints = CheckpointStore(
+        loop.session, session_checkpoints_dir(loop.session.meta.session_id)
+    )
+    loop.tools = build_default_registry(None, None, tracker, checkpoints=checkpoints)
+
+    await loop.run("rewrite it")
+    assert target.read_text() == "rewritten\n"
+
+    point = loop.session.rewind_points()[-1]
+    report = checkpoints.restore_to(point.index, tracker)
+    loop.session.rewind_to(point.index)
+
+    assert target.read_text() == "original\n"
+    assert report.restored == [str(target)]
+    assert loop.session.active_messages() == []
+
+
+async def test_the_next_turn_after_a_rewind_never_sees_the_undone_work(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A rewound turn that still reaches the provider is worse than no rewind:
+    the model would act on an edit the tree no longer has."""
+    script = [text_turn("first answer")]
+    loop = build(tmp_path, script)
+
+    await loop.run("first prompt")
+    loop.session.rewind_to(loop.session.rewind_points()[-1].index)
+
+    loop.provider = FakeProvider([text_turn("second answer")])
+    await loop.run("second prompt")
+
+    sent = loop.provider.requests[0].context.messages
+    assert [m.text() for m in sent if m.role == "user"] == ["second prompt"]
+    assert all("first answer" not in m.text() for m in sent)
+
+
+async def test_a_rewind_moves_the_rolling_breakpoint_back(hx_home: Path, tmp_path: Path) -> None:
+    """Left where it was, breakpoint B would sit past the end of a shortened
+    payload, and the window below it would be empty forever - so it could never
+    advance again."""
+    loop = build(tmp_path, [text_turn("ok")])
+    loop.context.keep_recent_turns = 1
+
+    for index in range(4):
+        loop.provider = FakeProvider([text_turn(f"answer {index}")])
+        await loop.run(f"prompt {index}")
+    assert loop.context._breakpoint_b is not None
+
+    loop.session.rewind_to(0)
+    loop.provider = FakeProvider([text_turn("fresh")])
+    await loop.run("after the rewind")
+
+    breakpoints = loop.provider.requests[0].context.breakpoints
+    payload_length = len(loop.provider.requests[0].context.messages) + 1
+    assert all(index < payload_length for index in breakpoints)
+
+
 async def _approve_everything(request: PermissionRequest) -> PermissionAnswer:
     return PermissionAnswer(True, GrantScope.SESSION)
 
@@ -476,3 +613,84 @@ async def test_mcp_tools_join_the_registry_without_disturbing_the_prefix(
         assert len(set(loop.provider.prefix_fingerprints())) == 1
     finally:
         await manager.close_all()
+
+
+def _tavily_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    from hx.auth.resolve import AuthResolver
+    from hx.auth.store import TAVILY, ApiKeyCredential, AuthStore
+
+    for name in ("HX_TAVILY_API_KEY", "TAVILY_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    store = AuthStore(tmp_path / "auth.json")
+    store.save(TAVILY, ApiKeyCredential(key="tvly-test"))
+    return AuthResolver(store)
+
+
+def _stub_tavily(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    from hx import net
+
+    body = {
+        "results": [
+            {
+                "title": "Textual 6.0 release notes",
+                "url": "https://github.com/Textualize/textual/releases",
+                "content": "Textual 6.0 drops the deprecated App.get_css.",
+            }
+        ],
+        "usage": {"credits": 1},
+    }
+
+    def client(**kwargs: Any) -> httpx.AsyncClient:
+        kwargs.pop("verify", None)
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(200, json=body)), **kwargs
+        )
+
+    monkeypatch.setattr(net, "async_client", client)
+
+
+async def test_a_web_search_reaches_the_model_as_ordinary_tool_output(
+    hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Search is a tool like any other - no route-specific handling anywhere."""
+    _stub_tavily(monkeypatch)
+    loop = build(
+        tmp_path,
+        [
+            tool_turn("WebSearch", {"query": "textual 6.0 release notes"}, "s1"),
+            text_turn("6.0 drops App.get_css."),
+        ],
+        auth=_tavily_auth(tmp_path, monkeypatch),
+    )
+
+    result = await loop.run("what changed in textual 6.0?")
+
+    assert result.error is None
+    tool_result = loop.session.messages[2].tool_results()[0]
+    assert not tool_result.is_error
+    assert "Textual 6.0 release notes" in tool_result.content
+    assert "1 credit, 1 this session" in tool_result.content
+
+
+async def test_a_deny_rule_stops_a_query_leaving_the_machine(
+    hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WebSearch is non-mutating, so only an explicit rule can hold it back -
+    and the specifier it matches on is the query itself."""
+    _stub_tavily(monkeypatch)
+    loop = build(
+        tmp_path,
+        [
+            tool_turn("WebSearch", {"query": "internal codename"}, "s1"),
+            text_turn("I will not search for that."),
+        ],
+        rules=[parse_rule("WebSearch(*)", "test", Decision.DENY)],
+        auth=_tavily_auth(tmp_path, monkeypatch),
+    )
+
+    await loop.run("look it up")
+
+    tool_result = loop.session.messages[2].tool_results()[0]
+    assert tool_result.is_error

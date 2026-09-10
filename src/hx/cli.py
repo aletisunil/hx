@@ -5,6 +5,8 @@
 ``hx resume [id]``     resume a session
 ``hx prompt``          print the resolved system prompt
 ``hx mcp ...``         manage MCP servers
+``hx docs [section]``  print the shipped manual
+``hx changelog [ver]`` print what shipped in each version
 ``hx upgrade``         self-update via uv
 
 Print mode exists so the harness is scriptable and E2E-testable without driving
@@ -14,7 +16,6 @@ a terminal UI.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import getpass
 import os
 import subprocess
@@ -36,6 +37,8 @@ Usage:
   hx prompt                 Print the system prompt this directory would use
   hx mcp list|add|remove    Manage MCP servers
   hx auth [set|clear]       Show or change the OpenRouter API key
+  hx docs [SECTION|--all]   Print the manual, or one section of it
+  hx changelog [VERSION]    Print what shipped in each version
   hx upgrade                Update hx to the latest version
   hx --version              Show version
   hx --help                 Show this message
@@ -49,6 +52,10 @@ Options:
   --append-system-prompt TEXT
                             Append to the system prompt; repeatable (@path reads a file)
 """
+
+
+DOC_COMMANDS = frozenset({"docs", "changelog"})
+"""Commands that print a shipped document and exit, taking no run options."""
 
 
 @dataclass(slots=True)
@@ -90,12 +97,22 @@ def _dispatch(args: list[str]) -> int:
         return run_auth_command(list(parsed.rest))
     if parsed.command == "prompt":
         return run_prompt_command(parsed)
+    if parsed.command == "docs":
+        return run_docs_command(list(parsed.rest))
+    if parsed.command == "changelog":
+        return run_changelog_command(list(parsed.rest))
     if parsed.command == "print":
         return run_print_command(parsed)
     return run_tui_command(parsed)
 
 
 def parse_args(args: list[str]) -> ParsedArgs:
+    # The documentation commands print and exit, so their arguments are taken
+    # verbatim: `hx docs --all` is a request for a section of the manual, not a
+    # run of HX with an unknown option.
+    if args and args[0] in DOC_COMMANDS:
+        return ParsedArgs(command=args[0], rest=tuple(args[1:]))
+
     parsed = ParsedArgs()
     overrides: dict[str, Any] = {}
     positional: list[str] = []
@@ -191,6 +208,9 @@ class Runtime:
     agents: Any = None
     mcp: Any = None
     tools: Any = None
+    checkpoints: Any = None
+    """:class:`~hx.core.checkpoints.CheckpointStore` - pre-images for ``/rewind``."""
+    tracker: Any = None
     notices: list[str] = field(default_factory=list)
     """Startup messages for the user - shown once, in the transcript."""
 
@@ -220,12 +240,18 @@ class Runtime:
         Without this the cache written on first run never updates, so /model
         would show last month's prices and context windows forever. A failure
         here is not worth interrupting the session for - the cached catalogue
-        still works.
+        still works - but it is worth one line in the transcript: swallowed
+        whole, a proxy's TLS interception or a rejected key looks exactly like
+        an empty catalogue with no cause.
         """
         if not self.models.is_stale:
             return
-        with contextlib.suppress(Exception):
+        try:
             await self.models.refresh(self.auth)
+        except Exception as exc:
+            from hx.net import describe
+
+            self.notices.append(f"Model catalogue refresh failed: {describe(exc)}")
 
     async def aclose(self) -> None:
         if self.mcp is not None:
@@ -249,15 +275,18 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     from hx.agents.subagent import SubagentRunner
     from hx.auth.resolve import AuthResolver
     from hx.config import load_settings
+    from hx.core.checkpoints import CheckpointStore
     from hx.core.compaction import Compactor
     from hx.core.context import ContextBuilder, build_project_context, load_system_prompt
     from hx.core.events import EventBus
     from hx.core.lateinject import Injection, InjectionRegistry
     from hx.core.loop import AgentLoop
     from hx.core.session import load_session, new_session
+    from hx.git import GitWatcher, git_injector
     from hx.mcp.manager import MCPManager
     from hx.mcp.manager import load_configs as load_mcp_configs
-    from hx.paths import ensure_user_dirs, session_outputs_dir
+    from hx.net import tls_notice
+    from hx.paths import ensure_user_dirs, session_checkpoints_dir, session_outputs_dir
     from hx.permissions.engine import PermissionEngine, load_rules, migrate_legacy_rules
     from hx.permissions.sandbox import Sandbox, default_policy
     from hx.providers import registry
@@ -302,11 +331,18 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     injections = InjectionRegistry()
     injections.register("todos", todo_injector(todos))
     injections.register("stale_files", _stale_files_injector(tracker, Injection))
+    if settings.context.git_notices:
+        # Registered even outside a repository: the watcher disables itself on
+        # its first call, which costs one subprocess rather than a check here
+        # that would have to run git anyway to be right.
+        injections.register("git", git_injector(GitWatcher(settings.cwd), seen=tracker.was_read))
 
     # Rules come from the settings files only, read once here: `settings`
     # already merges those same files, and loading both would list and match
     # every rule twice.
     notices = migrate_legacy_rules(settings.cwd)
+    if (tls := tls_notice()) is not None:
+        notices.append(tls)
     permissions = PermissionEngine(
         mode=settings.permissions.mode,
         rules=load_rules(settings.cwd),
@@ -319,7 +355,8 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         keep_recent_turns=settings.context.keep_recent_turns,
     )
 
-    tools = build_default_registry(shell, jobs, tracker, todos, bus_holder)
+    checkpoints = CheckpointStore(session, session_checkpoints_dir(session.meta.session_id))
+    tools = build_default_registry(shell, jobs, tracker, todos, bus_holder, auth, checkpoints)
 
     skills = {skill.name: skill for skill in discover_skills(settings.cwd)}
     if skills:
@@ -374,6 +411,8 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         agents=agents,
         mcp=MCPManager(load_mcp_configs(settings.cwd)),
         tools=tools,
+        checkpoints=checkpoints,
+        tracker=tracker,
         notices=notices,
     )
 
@@ -430,6 +469,45 @@ def prompt_for_api_key() -> bool:
     return True
 
 
+def prompt_for_tavily_key() -> bool:
+    """Save a Tavily key for WebSearch/WebFetch. Returns True once stored.
+
+    Separate from :func:`prompt_for_api_key` because it is not onboarding: HX
+    runs fine without it, and the two tools are simply absent until it exists.
+    """
+    from hx.auth.store import TAVILY, ApiKeyCredential, AuthStore
+
+    if not sys.stdin.isatty():
+        return False
+
+    print("A Tavily API key turns on the WebSearch and WebFetch tools.")
+    print("Create one at https://app.tavily.com - the free tier is 1000 searches a month.")
+    try:
+        key = getpass.getpass("Tavily API key (input hidden): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+    if not key:
+        return False
+
+    AuthStore().save(TAVILY, ApiKeyCredential(key=key))
+    print(f"Saved to {auth_file()} (mode 0600). WebSearch is on from the next `hx`.")
+    return True
+
+
+def _print_tavily_status(resolver: Any) -> None:
+    """Web search sits below the model routes: it pays for searches, not turns."""
+    from hx.auth.store import TAVILY, mask
+
+    source = resolver.source(TAVILY)
+    if source is None:
+        print(f"{TAVILY:<14} not configured      WebSearch and WebFetch are off")
+        return
+    key = mask(resolver.resolve_static(TAVILY).token)
+    print(f"{TAVILY:<14} {'key ' + key:<20} {source}")
+
+
 def run_tui_command(parsed: ParsedArgs) -> int:
     """Boot the full stack - settings, provider, tools, MCP, skills - and run the TUI."""
     from hx.auth.resolve import MissingCredential
@@ -465,6 +543,8 @@ def run_tui_command(parsed: ParsedArgs) -> int:
                 agents=runtime.agents,
                 mcp=runtime.mcp,
                 notices=runtime.notices,
+                checkpoints=runtime.checkpoints,
+                tracker=runtime.tracker,
             )
         finally:
             runtime.bus.close()
@@ -552,6 +632,41 @@ def run_prompt_command(parsed: ParsedArgs) -> int:
     print(f"[source] {resolved.source}", file=sys.stderr)
     for append in resolved.appends:
         print(f"[append] {append}", file=sys.stderr)
+    return 0
+
+
+def run_docs_command(args: list[str]) -> int:
+    """``hx docs [SECTION|--all]`` - the manual that shipped with this version.
+
+    Bare ``hx docs`` lists the sections rather than printing the whole manual:
+    it is thousands of tokens, and the caller is usually a session answering
+    one question about HX itself.
+    """
+    from hx.docs import DocsUnavailable, doc_text, manual
+
+    try:
+        if args and args[0] in {"--all", "-a"}:
+            print(doc_text("README.md").strip())
+        else:
+            print(manual(" ".join(args) if args else None))
+    except DocsUnavailable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def run_changelog_command(args: list[str]) -> int:
+    """``hx changelog [VERSION]`` - what shipped in each version.
+
+    ``VERSION`` accepts ``0.1.5``, ``v0.1.5``, ``unreleased`` or ``latest``.
+    """
+    from hx.docs import DocsUnavailable, changelog
+
+    try:
+        print(changelog(args[0] if args else None))
+    except DocsUnavailable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -647,8 +762,8 @@ async def _probe_servers(configs: list[Any]) -> list[Any]:
 
 AUTH_USAGE = """\
 hx auth                     Show which routes have a credential
-hx auth set                 Paste an OpenRouter key (hidden) and save it
-hx auth clear               Remove the saved OpenRouter key
+hx auth set [provider]      Paste an API key (hidden) and save it
+hx auth clear [provider]    Remove a saved API key
 hx auth login [provider]    Sign in - openrouter, openai-codex
 hx auth logout <provider>   Forget a stored credential
 
@@ -656,6 +771,8 @@ Providers:
   openrouter      API key. The environment (HX_OPENROUTER_API_KEY, then
                   OPENROUTER_API_KEY) takes precedence over the saved file.
   openai-codex    ChatGPT Plus/Pro subscription, signed in over OAuth.
+  tavily          API key for WebSearch and WebFetch. Not a model route:
+                  it is spent per search, not per token.
 """
 
 
@@ -733,7 +850,7 @@ def run_auth_command(args: list[str]) -> int:
     machine, where there is no interface to prompt from mid-session.
     """
     from hx.auth.resolve import AuthResolver
-    from hx.auth.store import OPENROUTER, AuthStore
+    from hx.auth.store import OPENROUTER, TAVILY, AuthStore
     from hx.providers import registry
 
     action = args[0] if args else "status"
@@ -750,6 +867,7 @@ def run_auth_command(args: list[str]) -> int:
             print(f"{spec.id:<14} {_credential_label(resolver, spec):<20} {source}")
             if source.startswith("environment"):
                 print(f"{'':<14} the environment overrides anything saved in {auth_file()}.")
+        _print_tavily_status(resolver)
         if not signed_in:
             print(
                 "\nRun `hx auth set` to save an OpenRouter key, or `hx auth login` "
@@ -759,7 +877,15 @@ def run_auth_command(args: list[str]) -> int:
         return 0
 
     if action == "set":
-        if not prompt_for_api_key():
+        target = args[1] if len(args) > 1 else OPENROUTER
+        if target not in {OPENROUTER, TAVILY}:
+            print(
+                f"{target} does not take a pasted key. Try `hx auth login {target}`.",
+                file=sys.stderr,
+            )
+            return 2
+        saved = prompt_for_tavily_key() if target == TAVILY else prompt_for_api_key()
+        if not saved:
             print("No key entered.", file=sys.stderr)
             return 1
         return 0
@@ -778,10 +904,11 @@ def run_auth_command(args: list[str]) -> int:
         return 0
 
     if action == "clear":
-        if AuthStore().delete(OPENROUTER):
-            print(f"Removed the saved key from {auth_file()}.")
+        target = args[1] if len(args) > 1 else OPENROUTER
+        if AuthStore().delete(target):
+            print(f"Removed the saved {target} key from {auth_file()}.")
         else:
-            print("No saved key to remove.")
+            print(f"No saved {target} key to remove.")
         return 0
 
     print(AUTH_USAGE, file=sys.stderr)

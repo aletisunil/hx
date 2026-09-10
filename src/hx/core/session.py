@@ -1,8 +1,12 @@
 """Session persistence: append-only JSONL transcripts.
 
-Every message, tool result, usage record and compaction boundary is appended as
-it happens, so a crashed session is fully resumable and a compaction can be
-inspected or undone after the fact.
+Every message, tool result, usage record, file checkpoint and compaction
+boundary is appended as it happens, so a crashed session is fully resumable and
+a compaction can be inspected or undone after the fact.
+
+Nothing is ever rewritten or removed - a rewind is one more record, and the
+state it produces is whatever replaying the file yields. That is what keeps
+"undo" and "resume" the same code path rather than two that must agree.
 """
 
 from __future__ import annotations
@@ -14,7 +18,8 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from hx.core.messages import Message, from_dict, to_dict
+from hx.core.checkpoints import Checkpoint
+from hx.core.messages import Message, ToolResultBlock, from_dict, to_dict
 from hx.core.usage import TurnUsage, UsageLedger
 from hx.paths import (
     session_dir,
@@ -37,6 +42,20 @@ class SessionMeta:
     """Set for subagent sessions, which nest under their parent's directory."""
 
 
+@dataclass(frozen=True, slots=True)
+class RewindPoint:
+    """A prompt the session can be taken back to."""
+
+    index: int
+    """Position in ``messages``. Rewinding here drops this prompt and
+    everything after it."""
+    text: str
+    timestamp: float
+    compacted: bool
+    """The prompt is behind a compaction summary. Rewinding to it undoes that
+    compaction too, which is the only way back to the turns it replaced."""
+
+
 @dataclass(slots=True)
 class Session:
     """In-memory session state, mirrored to ``~/.hx/sessions/<id>/transcript.jsonl``."""
@@ -44,6 +63,8 @@ class Session:
     meta: SessionMeta
     messages: list[Message] = field(default_factory=list)
     usage: UsageLedger = field(default_factory=UsageLedger)
+    checkpoints: list[Checkpoint] = field(default_factory=list)
+    """Pre-images of the files HX changed, in the order they were changed."""
     _pending: list[dict[str, Any]] = field(default_factory=list, repr=False)
 
     def append(self, message: Message) -> None:
@@ -91,6 +112,72 @@ class Session:
         self.usage.record(usage)
         self._pending.append({"kind": "usage", "data": asdict(usage)})
 
+    def record_checkpoint(self, checkpoint: Checkpoint) -> None:
+        self.checkpoints.append(checkpoint)
+        self._pending.append({"kind": "checkpoint", "data": checkpoint.as_dict()})
+        self.flush()
+
+    def rewind_points(self) -> list[RewindPoint]:
+        """The prompts in this session, oldest first.
+
+        Only things the user actually typed. Tool results ride user-role
+        messages to match the provider wire format, and cutting the transcript
+        at one would sever a tool call from its result - which no provider
+        accepts back. Late-injected reminders and compaction summaries are not
+        prompts either.
+
+        One row per prompt, at its earliest index. A compaction re-appends the
+        turns it kept, so a prompt it spanned occurs again verbatim - same text,
+        same timestamp - and listing both would offer two rows a picker cannot
+        tell apart. The original wins: rewinding there undoes the compaction
+        and gives back the turns it replaced, which is the more complete of the
+        two and the only one that can reach them at all.
+        """
+        points: list[RewindPoint] = []
+        seen: set[tuple[float, str]] = set()
+        for index, message in enumerate(self.messages):
+            if not _is_prompt(message):
+                continue
+            text = message.text().strip()
+            identity = (message.timestamp, text)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            points.append(
+                RewindPoint(
+                    index=index,
+                    text=text,
+                    timestamp=message.timestamp,
+                    compacted=message.compacted,
+                )
+            )
+        return points
+
+    def rewind_to(self, index: int) -> None:
+        """Drop the transcript from ``index`` on.
+
+        The file keeps every line: the rewind is appended as a record, and the
+        in-memory state is then whatever replaying the file produces. Replaying
+        rather than editing in place is what makes an undone compaction come
+        back correctly - the messages it superseded have to lose that flag, and
+        only the record order knows which ones.
+
+        Usage is deliberately not rewound. Those tokens were spent; a ledger
+        that forgets them would be lying about what the session cost.
+        """
+        if not 0 <= index <= len(self.messages):
+            raise ValueError(f"cannot rewind to {index}: the session has {len(self.messages)}")
+
+        self._pending.append({"kind": "rewind", "data": {"to": index}})
+        self.flush()
+
+        replayed = load_session(self.meta.session_id)
+        self.messages = replayed.messages
+        self.checkpoints = replayed.checkpoints
+        self.meta.message_count = len(self.messages)
+        self.meta.updated_at = time.time()
+        self._write_meta()
+
     def active_messages(self) -> list[Message]:
         """Messages eligible for context: not ``compacted``, not ``ephemeral``."""
         return [m for m in self.messages if not m.compacted and not m.ephemeral]
@@ -110,6 +197,15 @@ class Session:
         path = session_dir(self.meta.session_id) / "meta.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(asdict(self.meta), indent=2))
+
+
+def _is_prompt(message: Message) -> bool:
+    return (
+        message.role == "user"
+        and not message.ephemeral
+        and not message.metadata.get("compaction_summary")
+        and not any(isinstance(block, ToolResultBlock) for block in message.content)
+    )
 
 
 def new_session(cwd: Path, model: str, parent_id: str | None = None) -> Session:
@@ -156,6 +252,11 @@ def load_session(session_id: str) -> Session:
     if not path.exists():
         return session
 
+    #: ``(summary index, indices it superseded)`` per compaction still standing.
+    #: A rewind past a summary has to give those messages their content back,
+    #: and only the compaction that flagged them knows which they were.
+    compactions: list[tuple[int, list[int]]] = []
+
     with path.open(encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -171,18 +272,44 @@ def load_session(session_id: str) -> Session:
                 session.messages.append(from_dict(record["data"]))
             elif kind == "usage":
                 session.usage.record(TurnUsage(**record["data"]))
+            elif kind == "checkpoint":
+                session.checkpoints.append(Checkpoint.from_dict(record["data"]))
             elif kind == "compaction":
                 # Compaction always supersedes a prefix of the live messages,
                 # so replaying in order reproduces the same partition.
                 remaining = int(record["data"]["count"])
-                for message in session.messages:
+                flagged: list[int] = []
+                for index, message in enumerate(session.messages):
                     if remaining <= 0:
                         break
                     if not message.compacted:
                         message.compacted = True
+                        flagged.append(index)
                         remaining -= 1
+                # The summary is the next message appended, so it lands here.
+                compactions.append((len(session.messages), flagged))
+            elif kind == "rewind":
+                _rewind(session, int(record["data"]["to"]), compactions)
     session.meta.message_count = len(session.messages)
     return session
+
+
+def _rewind(session: Session, to: int, compactions: list[tuple[int, list[int]]]) -> None:
+    """Apply one rewind record while replaying.
+
+    Any compaction whose summary is being cut away is undone with it: the
+    messages it replaced are all that is left to represent those turns, and
+    leaving them flagged would rewind the session into an empty context.
+    """
+    del session.messages[to:]
+    session.checkpoints = [c for c in session.checkpoints if c.index < to]
+    while compactions and compactions[-1][0] >= to:
+        _, flagged = compactions.pop()
+        for index in flagged:
+            # A compaction can supersede messages on both sides of the cut: the
+            # ones past it went with the truncation and need nothing.
+            if index < len(session.messages):
+                session.messages[index].compacted = False
 
 
 def list_sessions(cwd: Path | None = None, limit: int = 20) -> list[SessionMeta]:

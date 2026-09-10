@@ -9,11 +9,14 @@ from __future__ import annotations
 import asyncio
 import difflib
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 from hx.tools.read import FileTracker, resolve_path
 from hx.tools.write import write_atomic
+
+if TYPE_CHECKING:
+    from hx.core.checkpoints import CheckpointStore
 
 DESCRIPTION = """Replace an exact string in a file.
 
@@ -33,8 +36,10 @@ class EditTool(Tool):
     description = DESCRIPTION
     mutating = True
 
-    def __init__(self, tracker: FileTracker) -> None:
+    def __init__(self, tracker: FileTracker, checkpoints: CheckpointStore | None = None) -> None:
         self.tracker = tracker
+        self.checkpoints = checkpoints
+        """See :class:`hx.tools.write.WriteTool` - the pre-image ``/rewind`` restores."""
 
     def schema(self) -> dict[str, Any]:
         edit_properties = {
@@ -86,8 +91,12 @@ class EditTool(Tool):
         before = path.read_text(encoding="utf-8")
         after = self.apply(before, edits)
 
+        if self.checkpoints is not None:
+            self.checkpoints.capture(path)
         write_atomic(path, after)
         self.tracker.mark_read(path)
+        if self.checkpoints is not None:
+            self.checkpoints.settle(path)
 
         diff = unified_diff(before, after, str(path))
         added, removed = count_changes(diff)
