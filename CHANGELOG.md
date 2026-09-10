@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.1.7] - 2026-09-10
+
 ### Added
 
 - **Steer a running turn.** `alt+enter` pushes a message into the turn already
@@ -219,7 +223,9 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/aletisunil/hx/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/aletisunil/hx/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/aletisunil/hx/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/aletisunil/hx/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/aletisunil/hx/compare/v0.1.2...v0.1.3
