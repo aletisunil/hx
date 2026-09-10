@@ -125,6 +125,9 @@ class HXApp(App[None]):
         self.apply_theme(settings.theme)
         self._turn_worker: Any = None
         self._queued: list[str] = []
+        self._already_echoed: list[str] = []
+        """Steers shown in the transcript before an interrupt sent them back to
+        the queue. Replaying one must not echo it a second time."""
         #: Set by a ctrl+c on an empty prompt; a second press then exits.
         self._clear_armed = False
 
@@ -142,7 +145,7 @@ class HXApp(App[None]):
         """Start the event-bus consumer task and cache the main widgets.
 
         ``query_one`` resolves against the *active* screen, so every lookup
-        would fail while a permission modal is up - killing whichever worker
+        would fail while any modal is up - killing whichever worker
         made it. The main screen's widgets are therefore looked up once, here,
         and referenced directly from then on.
         """
@@ -264,7 +267,28 @@ class HXApp(App[None]):
                     working.stop()
 
     async def on_prompt_input_submitted(self, message: PromptInput.Submitted) -> None:
+        from hx.config import EnterWhileBusy
+
+        if self.is_busy and self.settings.tui.enter_while_busy is EnterWhileBusy.STEER:
+            self.steer(message.text)
+            return
         await self.submit(message.text)
+
+    async def on_prompt_input_steered(self, message: PromptInput.Steered) -> None:
+        """Alt+Enter - the other half of whatever Enter does while busy."""
+        from hx.config import EnterWhileBusy
+
+        if self.settings.tui.enter_while_busy is EnterWhileBusy.STEER and message.text:
+            # Queueing only means something while a turn is running. With
+            # nothing in flight there is no tail to drain the queue, so the
+            # message would sit there being described as waiting on a turn that
+            # does not exist.
+            if self.is_busy:
+                self._queue(message.text)
+            else:
+                await self.submit(message.text)
+            return
+        self.steer(message.text)
 
     async def submit(self, text: str) -> None:
         """Handle a user submission: slash command, ``!`` passthrough, or a turn."""
@@ -289,14 +313,93 @@ class HXApp(App[None]):
 
         if self.is_busy:
             # Do not interleave turns: queue and run it when the current one ends.
-            self._queued.append(text)
-            self._transcript.add_notice("queued", "info")
+            self._queue(text)
+            return
+
+        if text in self._already_echoed:
+            self._already_echoed.remove(text)
+        else:
+            self._transcript.add_user_message(text)
+        # A Textual worker, not a bare task: a turn can open a modal, and
+        # push_screen_wait is only valid inside worker context.
+        self._turn_worker = self.run_worker(self._run_turn(text), name="turn", exclusive=False)
+
+    def _queue(self, text: str) -> None:
+        """Hold a message until the running turn ends.
+
+        The notice names the way out, because the queue is exactly where a user
+        who has changed their mind ends up: they typed the correction, and now
+        it is waiting behind the thing they wanted to correct.
+        """
+        text = text.strip()
+        if not text:
+            return
+        self._queued.append(text)
+        key = KEYMAP.text("tui.input.steer")
+        position = len(self._queued)
+        self._transcript.add_notice(
+            f"queued ({position}) · {key} to steer it into the running turn",
+            "info",
+        )
+        self._sync_queue_depth()
+
+    def steer(self, text: str) -> None:
+        """Put a message into the running turn - typed now, or already queued.
+
+        Empty ``text`` promotes the front of the queue, so a message that is
+        already waiting does not have to be typed again.
+        """
+        text = text.strip()
+        if not text:
+            if not self._queued:
+                self.notice("Nothing queued to steer.", "warning")
+                return
+            text = self._queued.pop(0)
+            self._sync_queue_depth()
+
+        if text.startswith(("/", "!")):
+            # A command is not something to say to the model. submit() owns the
+            # dispatch for both prefixes and runs them whether or not a turn is
+            # in flight, so steering one would only send its text as prose and
+            # leave the command itself unrun.
+            self.run_worker(self.submit(text), name="submit", exclusive=False)
+            return
+
+        if not self.is_busy:
+            # Nothing to steer into: this is simply the next thing said.
+            self.run_worker(self.submit(text), name="submit", exclusive=False)
             return
 
         self._transcript.add_user_message(text)
-        # A Textual worker, not a bare task: the permission modal uses
-        # push_screen_wait, which is only valid inside worker context.
-        self._turn_worker = self.run_worker(self._run_turn(text), name="turn", exclusive=False)
+        if self.loop.steer(text):
+            self._transcript.add_notice("steering - the model call was cut short", "info")
+        else:
+            self._transcript.add_notice("steering - lands after the running tools", "info")
+
+    @property
+    def queued(self) -> list[str]:
+        """Messages waiting for the running turn to end, oldest first."""
+        return list(self._queued)
+
+    def clear_queue(self) -> int:
+        """Drop everything queued, returning how much was dropped."""
+        count = len(self._queued)
+        self._queued.clear()
+        # Their echo suppression goes with them; left behind, it would swallow
+        # the next identical message the user types.
+        self._already_echoed.clear()
+        self._sync_queue_depth()
+        return count
+
+    def steer_queued(self, index: int) -> None:
+        """Promote one queued message into the running turn."""
+        if not 0 <= index < len(self._queued):
+            return
+        self.steer(self._queued.pop(index))
+        self._sync_queue_depth()
+
+    def _sync_queue_depth(self) -> None:
+        self._status.set_queued(len(self._queued))
 
     async def _run_command(self, text: str) -> None:
         """Run one slash command, reporting failures instead of tearing the app down.
@@ -373,15 +476,43 @@ class HXApp(App[None]):
         return allowed
 
     async def _run_turn(self, text: str) -> None:
+        from hx.config import EnterWhileBusy
+
         prompt_input = self._prompt
-        prompt_input.set_running(True)
+        prompt_input.set_running(
+            True,
+            enter_steers=self.settings.tui.enter_while_busy is EnterWhileBusy.STEER,
+        )
+        interrupted = False
         try:
             await self.loop.run(text)
         except asyncio.CancelledError:
+            interrupted = True
             self._transcript.add_notice("interrupted", "warning")
         finally:
             prompt_input.set_running(False)
             self._working.stop()
+
+        # A steer that never got delivered - an interrupt landed first - is
+        # still something the user said, so it goes back in the queue rather
+        # than disappearing with the turn. It is already on screen from when it
+        # was steered, so the replay through submit() must not echo it again.
+        returned = self.loop.take_pending_steer()
+        self._already_echoed.extend(returned)
+        self._queued[:0] = returned
+        self._sync_queue_depth()
+
+        if interrupted:
+            # An interrupt stops the agent, the queue included. Starting the
+            # next message here would mean the key the user pressed to stop
+            # everything launched another turn - most visibly for a steer, which
+            # is what they typed just before deciding to stop.
+            if self._queued:
+                self._transcript.add_notice(
+                    f"{len(self._queued)} message(s) still queued · /queue to see them",
+                    "info",
+                )
+            return
 
         if self._queued:
             # This coroutine is still the active Textual worker until it
@@ -389,6 +520,7 @@ class HXApp(App[None]):
             # the same prompt straight back on the queue.
             self._turn_worker = None
             await self.submit(self._queued.pop(0))
+            self._sync_queue_depth()
 
     def _command_context(self) -> CommandContext:
         return CommandContext(
@@ -511,10 +643,26 @@ class HXApp(App[None]):
         it is, rather than pulling the transcript out from under it."""
         return self._turn_worker is not None and not self._turn_worker.is_finished
 
+    def rename_outgoing_session(self, session: Any) -> None:
+        """Name the session being left behind for what it ended up being.
+
+        Detached: the user asked for a new session, not to wait on a name for
+        the old one. It lands in that session's ``meta.json`` when it arrives,
+        which is all ``/resume`` reads.
+        """
+        if not session.messages:
+            return
+        self.run_worker(
+            self.loop.retitle_session(session),
+            name="retitle",
+            exclusive=False,
+        )
+
     def start_new_session(self) -> None:
         """Fresh transcript, same directory. The old session stays on disk."""
         from hx.core.session import new_session
 
+        self.rename_outgoing_session(self.loop.session)
         self.loop.session = new_session(self.settings.cwd, self.loop.model)
         # The session id is the prompt-cache key on routes that use one; a
         # stale id would keep the new conversation hitting the old cache.
@@ -539,6 +687,7 @@ class HXApp(App[None]):
             self.notice(f"Could not resume {session_id}: {exc}", "error")
             return
 
+        self.rename_outgoing_session(self.loop.session)
         self.loop.session = session
         setter = getattr(self.loop.provider, "set_session_id", None)
         if setter is not None:
@@ -716,15 +865,68 @@ class HXApp(App[None]):
     async def action_transcript_next_prompt(self) -> None:
         self._transcript.move_cursor(1)
 
-    async def ask_permission(self, request: Any) -> Any:
-        """Show the approval modal and return the user's choice."""
-        from hx.permissions.engine import PermissionAnswer
-        from hx.tui.widgets.permission import PermissionModal
+    def dismiss_modal(self, screen: Any) -> None:
+        """Tear a modal down whatever state it reached.
 
-        answer = await self.push_screen_wait(
-            PermissionModal(request, origin=getattr(request, "origin", None))
-        )
-        return answer if answer is not None else PermissionAnswer(allowed=False)
+        A flow that opens a modal must be able to guarantee it closes again,
+        including when the flow itself blew up: an orphaned modal owns the
+        keyboard and answers to nothing, which costs the user the session.
+        ``dismiss`` only works on the active screen, so anything else is left
+        to whoever is on top of it.
+        """
+        try:
+            if screen in self.screen_stack and self.screen is screen:
+                screen.dismiss(None)
+        except Exception:  # a failed teardown must not mask the real error
+            pass
+
+    async def ask_permission(self, request: Any) -> Any:
+        """Ask in the transcript and wait for the answer.
+
+        Inline rather than in a modal: the model has just said what it intends
+        to do, and covering that sentence with a dialog at the moment the user
+        has to judge it is the wrong trade. Answering leaves the block behind as
+        a permanent record of what was granted.
+
+        The turn is blocked here, so the working indicator has to stop claiming
+        the tool is running - it is waiting on a person.
+        """
+        from hx.permissions.engine import PermissionAnswer
+        from hx.tui.widgets.permission import PermissionPrompt
+
+        future: asyncio.Future[PermissionAnswer] = asyncio.get_running_loop().create_future()
+        prompt = PermissionPrompt(request, future, origin=getattr(request, "origin", None))
+        self._transcript.add_permission_prompt(prompt)
+        self._focus_pending_prompt()
+
+        # Restored rather than stopped: the turn is still running, and the next
+        # thing the user sees should be the tool they just approved carrying on,
+        # not the indicator claiming the whole turn is waiting on them.
+        resumed = self._working.label
+        self._working.start("awaiting approval")
+        try:
+            return await future
+        except asyncio.CancelledError:
+            # An interrupt landed while this was still open. Nobody answered it,
+            # and a block that goes on offering keys that reach nothing is worse
+            # than one that says so.
+            prompt.abandon()
+            raise
+        finally:
+            if self._working.busy:
+                self._working.start(resumed)
+            self._focus_pending_prompt()
+
+    def _focus_pending_prompt(self) -> None:
+        """Hand the keyboard to the oldest unanswered prompt, or back to the composer.
+
+        A queue rather than a single widget, because concurrent subagents can
+        each be stopped at an approval. Answering the top one passes the keys to
+        the next; returning them to the composer in between would feed the next
+        prompt's ``y`` into a half-typed message instead.
+        """
+        pending = self._transcript.pending_permission_prompts()
+        (pending[0] if pending else self._prompt).focus()
 
 
 def _home_relative(path: Path) -> str:

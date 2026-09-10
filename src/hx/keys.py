@@ -75,6 +75,7 @@ def _defaults() -> dict[str, KeyBinding]:
         # Prompt editing. Textual's TextArea supplies the rest of the readline
         # set; these are the ones it does not bind, plus the ones we move.
         KeyBinding("tui.input.submit", ("enter",), "Send the message"),
+        KeyBinding("tui.input.steer", ("alt+enter",), "Steer the running turn"),
         KeyBinding("tui.input.newLine", ("shift+enter", "ctrl+j"), "Insert a newline"),
         KeyBinding("tui.input.complete", ("tab",), "Accept or cycle a completion"),
         KeyBinding("tui.editor.cursorLeft", ("ctrl+b",), "Move left one character"),

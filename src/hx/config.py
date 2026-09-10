@@ -2,7 +2,12 @@
 
 Precedence, lowest to highest::
 
-    defaults < ~/.hx/settings.json < <cwd>/.hx/settings.json < environment < CLI flags
+    defaults
+      < ~/.hx/settings.json
+      < <cwd>/.hx/settings.json          (shared, check it in)
+      < <cwd>/.hx/settings.local.json    (this machine only, never checked in)
+      < environment
+      < CLI flags
 
 Settings are a plain dataclass so the whole config is hashable/serialisable and
 can be diffed in tests. Permission rules are kept as raw strings here; parsing
@@ -19,7 +24,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from hx.paths import project_settings_file, user_settings_file
+from hx.paths import project_local_settings_file, project_settings_file, user_settings_file
 
 
 class PermissionMode(StrEnum):
@@ -95,6 +100,23 @@ class BashSettings:
     """Override the login shell used for the persistent Bash session."""
 
 
+class EnterWhileBusy(StrEnum):
+    """What Enter means while a turn is running."""
+
+    QUEUE = "queue"
+    """Hold the message until the turn ends. Alt+Enter steers instead."""
+
+    STEER = "steer"
+    """Put it into the running turn now. Alt+Enter queues instead."""
+
+
+@dataclass(frozen=True, slots=True)
+class TuiSettings:
+    enter_while_busy: EnterWhileBusy = EnterWhileBusy.QUEUE
+    """Queueing is the default because it cannot surprise anyone: a steer cuts
+    off the model mid-sentence, which is worth asking for deliberately."""
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Fully resolved configuration for one HX session."""
@@ -105,6 +127,7 @@ class Settings:
     context: ContextSettings = field(default_factory=ContextSettings)
     bash: BashSettings = field(default_factory=BashSettings)
     prompt: PromptSettings = field(default_factory=PromptSettings)
+    tui: TuiSettings = field(default_factory=TuiSettings)
     theme: str = "dark"
     quiet_startup: bool = False
     """Skip the startup header. For anyone who has read it already."""
@@ -125,6 +148,7 @@ def load_settings(
     layers = [
         read_settings_file(user_settings_file()),
         read_settings_file(project_settings_file(root)),
+        read_settings_file(project_local_settings_file(root)),
         settings_from_env(dict(os.environ)),
         overrides or {},
     ]
@@ -150,12 +174,19 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
     context = data.get("context", {})
     bash = data.get("bash", {})
     prompt = data.get("prompt", {})
+    tui = data.get("tui", {})
 
     mode_raw = permissions.get("mode", PermissionMode.DEFAULT)
     try:
         mode = PermissionMode(mode_raw)
     except ValueError as exc:
         raise ConfigError(f"unknown permission mode: {mode_raw!r}") from exc
+
+    busy_raw = tui.get("enterWhileBusy", tui.get("enter_while_busy", EnterWhileBusy.QUEUE))
+    try:
+        enter_while_busy = EnterWhileBusy(busy_raw)
+    except ValueError as exc:
+        raise ConfigError(f"unknown tui.enterWhileBusy: {busy_raw!r}") from exc
 
     return Settings(
         cwd=cwd,
@@ -204,6 +235,7 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
             system=prompt.get("system"),
             append=tuple(_as_list(prompt.get("append", ()))),
         ),
+        tui=TuiSettings(enter_while_busy=enter_while_busy),
         theme=data.get("theme", "dark"),
         quiet_startup=bool(data.get("quietStartup", data.get("quiet_startup", False))),
         telemetry=bool(data.get("telemetry", False)),

@@ -115,3 +115,45 @@ def test_the_completion_popup(hx_home: Path, tmp_path: Path, snap_compare: Any) 
         await pilot.pause()
 
     assert snap_compare(app, terminal_size=SIZE, run_before=run_before)
+
+
+def test_a_pending_permission_prompt(
+    hx_home: Path, tmp_path: Path, snap_compare: Any, monkeypatch: Any
+) -> None:
+    """The approval sits in the transcript, under the sentence that explains it.
+
+    That adjacency is the whole argument for asking here rather than in a modal,
+    and it is exactly the kind of thing only a layout snapshot notices losing.
+    """
+    from hx.permissions.engine import PermissionRequest
+    from hx.tui.widgets.permission import PermissionPrompt
+
+    _pin_clock(monkeypatch)
+    app = build_app(tmp_path)
+
+    async def run_before(pilot: Pilot) -> None:
+        _pin(app)
+        transcript = app._transcript
+        transcript.add_user_message("clean up the settings loader")
+        transcript.start_assistant_message()
+        transcript.append_delta("Rewriting it to go through the settings reader.")
+        request = PermissionRequest(
+            tool_name="Edit",
+            specifier="src/hx/config.py",
+            params={},
+            mutating=True,
+            description="Edit(src/hx/config.py)",
+            detail=(
+                "--- src/hx/config.py\n"
+                "+++ src/hx/config.py\n"
+                "@@ -12,3 +12,3 @@\n"
+                " def load():\n"
+                "-    return {}\n"
+                "+    return read_settings_file(path)\n"
+            ),
+        )
+        transcript.add_permission_prompt(PermissionPrompt(request))
+        app._working.start("awaiting approval")
+        await pilot.pause()
+
+    assert snap_compare(app, terminal_size=SIZE, run_before=run_before)

@@ -131,7 +131,7 @@ async def test_always_allow_persists_a_generalised_rule(project: Path) -> None:
     engine = PermissionEngine(PermissionMode.DEFAULT, [], project, asker=asker)
     await engine.request(_request("git commit -m 'first'"))
 
-    saved = json.loads((project / ".hx" / "settings.json").read_text())
+    saved = json.loads((project / ".hx" / "settings.local.json").read_text())
     assert saved["permissions"]["allow"] == ["Bash(git commit:*)"]
     assert engine.evaluate(_request("git commit -m 'second'")).decision is Decision.ALLOW
 
@@ -157,7 +157,7 @@ async def test_always_allow_covers_every_segment_of_a_compound_command(project: 
     engine = PermissionEngine(PermissionMode.DEFAULT, [], project, asker=asker)
     await engine.request(_request("cd /repo && uv run pytest tests/ -x -q"))
 
-    saved = json.loads((project / ".hx" / "settings.json").read_text())
+    saved = json.loads((project / ".hx" / "settings.local.json").read_text())
     assert saved["permissions"]["allow"] == ["Bash(cd /repo:*)", "Bash(uv run:*)"]
     assert engine.evaluate(_request("cd /repo && uv run pytest tests/tui -q")).decision is (
         Decision.ALLOW
@@ -176,7 +176,7 @@ async def test_session_grant_covers_a_sibling_invocation(project: Path) -> None:
     await engine.request(_request("uv run pytest tests/tui -q"))
 
     assert engine.evaluate(_request("uv run pytest tests/core -x")).decision is Decision.ALLOW
-    assert not (project / ".hx" / "settings.json").exists(), "session scope must not persist"
+    assert not (project / ".hx" / "settings.local.json").exists(), "session scope must not persist"
 
 
 async def test_a_grant_on_an_undecomposable_command_is_honoured(project: Path) -> None:
@@ -318,3 +318,125 @@ def test_migration_leaves_unwidenable_rules_alone_and_names_what_it_changed(
     assert "Bash(cd /repo && uv run pytest -x) -> Bash(cd /repo:*), Bash(uv run:*)" in notices[0]
     # The rule it left alone is not reported as a rewrite that never happened.
     assert "Bash(cd /repo && rm -rf dist) ->" not in notices[0]
+
+
+async def test_always_allow_leaves_the_shared_project_settings_alone(project: Path) -> None:
+    """A grant is one person's decision on one machine.
+
+    ``.hx/settings.json`` is the file a team checks in; appending grants there
+    committed one developer's absolute paths to everybody who cloned the repo.
+    """
+    import json
+
+    from hx.permissions.engine import GrantScope, PermissionAnswer
+
+    shared = project / ".hx" / "settings.json"
+    shared.write_text(json.dumps({"permissions": {"deny": ["Bash(curl:*)"]}}) + "\n")
+    before = shared.read_text()
+
+    async def asker(request: PermissionRequest) -> PermissionAnswer:
+        return PermissionAnswer(True, GrantScope.ALWAYS)
+
+    engine = PermissionEngine(PermissionMode.DEFAULT, [], project, asker=asker)
+    await engine.request(_request("git commit -m 'first'"))
+
+    assert shared.read_text() == before, "the shared file was rewritten"
+    local = json.loads((project / ".hx" / "settings.local.json").read_text())
+    assert local["permissions"]["allow"] == ["Bash(git commit:*)"]
+
+
+async def test_the_local_layer_excludes_itself_from_git(project: Path) -> None:
+    """``.hx/.gitignore`` is HX's own file; the project's belongs to the project."""
+    from hx.permissions.engine import GrantScope, PermissionAnswer
+
+    async def asker(request: PermissionRequest) -> PermissionAnswer:
+        return PermissionAnswer(True, GrantScope.ALWAYS)
+
+    engine = PermissionEngine(PermissionMode.DEFAULT, [], project, asker=asker)
+    await engine.request(_request("git commit -m 'first'"))
+    await engine.request(_request("git status"))
+
+    ignored = (project / ".hx" / ".gitignore").read_text()
+    assert ignored.split() == ["settings.local.json"], "one entry, written once"
+
+
+def test_local_settings_rules_load_and_are_named_as_such(project: Path) -> None:
+    """``/permissions`` has to be able to say which file a rule came from."""
+    import json
+
+    from hx.permissions.engine import load_rules
+
+    (project / ".hx" / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(ls:*)"]}}) + "\n"
+    )
+    (project / ".hx" / "settings.local.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(git push:*)"], "deny": ["Bash(rm:*)"]}}) + "\n"
+    )
+
+    rules = load_rules(project)
+    sources = {(rule.tool, rule.specifier): rule.source for rule in rules}
+    assert sources[("Bash", "ls:*")] == "project settings"
+    assert sources[("Bash", "git push:*")] == "local settings"
+    assert sources[("Bash", "rm:*")] == "local settings"
+
+
+def test_a_project_deny_still_beats_a_local_allow(project: Path) -> None:
+    """The local layer is where HX writes, not a way around the project's rules."""
+    import json
+
+    from hx.permissions.engine import load_rules
+
+    (project / ".hx" / "settings.json").write_text(
+        json.dumps({"permissions": {"deny": ["Bash(curl:*)"]}}) + "\n"
+    )
+    (project / ".hx" / "settings.local.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(curl:*)"]}}) + "\n"
+    )
+
+    engine = PermissionEngine(PermissionMode.BYPASS, load_rules(project), project)
+    assert engine.evaluate(_request("curl https://example.com")).decision is Decision.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd src && cat pyproject.toml",
+        "git rev-parse --show-toplevel",
+        "git ls-files 'src/**/*.py'",
+        "git branch -a",
+        "git stash list",
+        "env",
+        "test -f README.md && head -5 README.md",
+        "ls -la | grep py | wc -l",
+    ],
+)
+def test_reading_the_project_does_not_prompt(project: Path, command: str) -> None:
+    """These are what an agent runs constantly while orienting itself.
+
+    Every one of them used to ask, which is how a user learns to approve without
+    reading the command.
+    """
+    engine = PermissionEngine(PermissionMode.DEFAULT, [], project)
+    assert engine.evaluate(_request(command)).decision is Decision.ALLOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -i 's/a/b/' src/hx/config.py",
+        "find . -name '*.pyc' -delete",
+        "sort -o names.txt names.txt",
+        "git branch -D main",
+        "git tag v9.9.9",
+        "git config user.email someone@example.com",
+        "git stash",
+        "env FOO=1 rm -rf /",
+    ],
+)
+def test_a_writing_command_wearing_a_read_only_name_still_prompts(
+    project: Path, command: str
+) -> None:
+    """`sed`, `find` and `git branch` all read under one flag and write under
+    another. The read-only relaxation must not cover the writing half."""
+    engine = PermissionEngine(PermissionMode.DEFAULT, [], project)
+    assert engine.evaluate(_request(command)).decision is Decision.ASK

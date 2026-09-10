@@ -304,10 +304,27 @@ than being silently resolved.
 | `/agents` | subagent types |
 | `/mcp` | server status |
 | `/theme [name]` | `dark`, `light`, `ansi`, or any theme in `~/.hx/themes` |
+| `/queue [steer <n>\|clear]` | messages waiting for the turn to end, and what to do with them |
 | `/copy` | copy the last reply to the clipboard |
 | `/init` | generate an `HX.md` for the project |
 | `/help` | list commands and keys |
 | `/quit` | exit (also `/exit`, `/q`) |
+
+### Steering a running turn
+
+Type while HX is working and `enter` queues the message: it runs when the turn
+ends, which is what you want for "and then do this".
+
+`alt+enter` steers instead. The message goes into the turn that is running now -
+the model call is cut off mid-stream and the next one starts from what you just
+said. Tools already running are left to finish first, because cancelling a
+half-written file is worse than waiting a second for it.
+
+With nothing typed, `alt+enter` steers the message at the front of the queue, so
+a correction you already queued does not have to be typed twice. `/queue` lists
+what is waiting; `/queue steer 2` sends one of them now.
+
+Set `tui.enterWhileBusy` to `"steer"` to swap the two keys around.
 
 ### The status bar
 
@@ -323,12 +340,18 @@ collapses after an edit is the visible symptom of a broken prefix.
 Settings are JSON, merged lowest to highest:
 
 ```
-defaults  <  ~/.hx/settings.json  <  ./.hx/settings.json  <  HX_* env  <  CLI flags
+defaults  <  ~/.hx/settings.json  <  ./.hx/settings.json  <  ./.hx/settings.local.json  <  HX_* env  <  CLI flags
 ```
 
 Permission rule lists and `prompt.append` are unioned across layers, so a
 project can add a deny rule — or a line to the system prompt — without
 discarding yours. Everything else is replaced.
+
+`./.hx/settings.json` is the project's shared file, yours to check in.
+`./.hx/settings.local.json` is this machine's, and it is where HX writes
+anything it decides on your behalf - an "always allow" grant, for one. HX adds
+a `.hx/.gitignore` covering it the first time it writes there, so your grants
+stay out of the repo.
 
 ```jsonc
 {
@@ -370,6 +393,10 @@ discarding yours. Everything else is replaced.
   "prompt": {
     "system": null,                   // replaces the built-in system prompt
     "append": []                      // added after it; unioned across layers
+  },
+
+  "tui": {
+    "enterWhileBusy": "queue"         // queue | steer - what enter does mid-turn
   }
 }
 ```
@@ -453,6 +480,7 @@ files load here unchanged. `src/hx/tui/themes/dark.json` is the reference.
 | `~/.hx/sessions/` | transcripts, spilled tool output, subagent sessions |
 | `~/.hx/skills/`, `~/.hx/agents/` | your skills and agents |
 | `./.hx/settings.json` | project settings, checked in if you like |
+| `./.hx/settings.local.json` | this machine's project settings, never checked in - where "always allow" lands |
 | `./.hx/mcp.json` | project MCP servers |
 | `./.hx/system-prompt.md`, `./.hx/system-prompt-append.md` | project prompt overrides |
 | `./.hx/skills/`, `./.hx/agents/` | project skills and agents |

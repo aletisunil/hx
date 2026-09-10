@@ -144,3 +144,30 @@ def test_a_swapped_key_reaches_the_request_header(project: Path) -> None:
     provider.set_api_key("new-key")
     assert provider.api_key == "new-key"
     assert provider._client.headers["Authorization"] == "Bearer new-key"
+
+
+def test_text_alongside_tool_results_still_reaches_the_model(project: Path) -> None:
+    """Anything but the tool entries used to be dropped on the floor here.
+
+    A message carrying tool results can also carry text - a late-injected
+    reminder rides the newest user message, and that is frequently this one.
+    Encoding only the tool entries silently deleted it.
+    """
+    from hx.core.messages import Message
+
+    builder = ContextBuilder("sys prompt", project, keep_recent_turns=2)
+    messages = [
+        user_message("hi"),
+        assistant_message([TextBlock("ok"), ToolUseBlock("c1", "Read", {"file_path": "a.py"})]),
+        Message(
+            role="user",
+            content=[ToolResultBlock("c1", "contents"), TextBlock("stop and read b.py instead")],
+        ),
+    ]
+    context = builder.build(messages, [], cache_mode="explicit")
+    request = ProviderRequest(context=context, model="anthropic/claude-sonnet-4.5", max_tokens=1024)
+
+    payload = OpenRouterProvider(api_key="k").build_payload(request)
+    roles = [m["role"] for m in payload["messages"]]
+    assert roles == ["system", "user", "assistant", "tool", "user"]
+    assert "stop and read b.py instead" in json.dumps(payload["messages"][-1])

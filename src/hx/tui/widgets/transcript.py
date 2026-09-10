@@ -431,12 +431,39 @@ class Transcript(VerticalScroll):
                 return child.buffer
         return None
 
+    def add_permission_prompt(self, prompt: Static) -> None:
+        """Mount a pending approval at the tail and pin the view to it.
+
+        The follow is forced rather than respected: the user may have scrolled
+        up to read something, but a question that blocks the turn is not
+        something to leave off-screen waiting to be found.
+        """
+        self._current = None
+        self._thinking = None
+        self._following = True
+        self._mount_block(prompt)
+
+    def pending_permission_prompts(self) -> list[Static]:
+        """Unanswered prompts, oldest first - the order they must be answered in."""
+        from hx.tui.widgets.permission import PermissionPrompt
+
+        return [
+            child
+            for child in self.children
+            if isinstance(child, PermissionPrompt) and not child.answered
+        ]
+
     def add_notice(self, text: str, level: str = "info") -> None:
         """System notices: compaction, model switch, sandbox degraded."""
         self._current = None
         self._mount_block(Notice(text, level))
 
     def clear_all(self) -> None:
+        # Anything still waiting on an answer is about to be destroyed, and a
+        # destroyed prompt answers nobody: the turn blocked on it would wait
+        # for the life of the process.
+        for prompt in self.pending_permission_prompts():
+            prompt.abandon()
         self._current = None
         self._thinking = None
         self.cursor = None

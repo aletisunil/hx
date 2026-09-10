@@ -128,3 +128,44 @@ async def test_leaving_the_flow_unblocks_the_waiting_callback() -> None:
     # Resolves on teardown rather than hanging until the timeout.
     with pytest.raises(CallbackError, match="cancelled"):
         await asyncio.wait_for(waiting, timeout=2)
+
+
+async def test_cancelling_a_login_releases_the_callback_port() -> None:
+    """A leaked port costs the next attempt its browser callback, silently:
+    the flow still works by pasting, which is not what the user asked for."""
+    import asyncio
+    import contextlib
+    import socket
+
+    from hx.auth.oauth import codex
+
+    class Silent:
+        def show_url(self, url: str, instructions: str) -> None: ...
+        def show_device_code(self, user_code: str, verification_uri: str) -> None: ...
+        def progress(self, message: str) -> None: ...
+
+        async def prompt_paste(self, message: str) -> str:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    async def opened(url: str) -> bool:
+        return True
+
+    original = codex._open_browser
+    codex._open_browser = opened  # type: ignore[assignment]
+    try:
+        flow = asyncio.create_task(codex.login_browser(Silent()))
+        await asyncio.sleep(0.1)
+        flow.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await flow
+    finally:
+        codex._open_browser = original  # type: ignore[assignment]
+
+    probe = socket.socket()
+    try:
+        from hx.auth.oauth.callback import callback_host
+
+        probe.bind((callback_host(), codex.CALLBACK_PORT))
+    finally:
+        probe.close()

@@ -546,12 +546,34 @@ def run_tui_command(parsed: ParsedArgs) -> int:
                 checkpoints=runtime.checkpoints,
                 tracker=runtime.tracker,
             )
+            # The TUI is down but the provider is not, which is the one moment
+            # the whole session exists and nothing is competing for the screen.
+            await _rename_closed_session(runtime.loop)
         finally:
             runtime.bus.close()
             await runtime.provider.aclose()
 
     asyncio.run(main_async())
     return 0
+
+
+RENAME_TIMEOUT_SECONDS = 10.0
+"""A session name is not worth making the user wait for. Exit wins the tie."""
+
+
+async def _rename_closed_session(loop: Any) -> None:
+    """Re-name the session now that it is over, if the work moved on.
+
+    The first name is written after one exchange and never revisited, so
+    ``/resume`` ends up listing opening questions. Bounded and swallowed: this
+    runs while the user is waiting for their shell prompt back.
+    """
+    try:
+        await asyncio.wait_for(loop.retitle_session(), timeout=RENAME_TIMEOUT_SECONDS)
+    except Exception:
+        # Including the timeout. A rename that cannot happen is not an error the
+        # user needs at the moment they are leaving; the old name still stands.
+        return
 
 
 def run_print_command(parsed: ParsedArgs) -> int:
@@ -594,6 +616,7 @@ def run_print_command(parsed: ParsedArgs) -> int:
                 print(f"[mcp] {status.name} unavailable: {status.error}", file=sys.stderr)
         try:
             result = await runtime.loop.run(parsed.prompt)
+            await _rename_closed_session(runtime.loop)
         finally:
             await asyncio.sleep(0.05)
             runtime.bus.close()

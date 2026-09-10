@@ -1,8 +1,11 @@
 """Filesystem layout for HX state and configuration.
 
 User-level state lives under ``$HX_HOME`` (default ``~/.hx``). Project-level
-overrides live in ``<cwd>/.hx``. Nothing here touches the network or mutates
-state on import; call :func:`ensure_user_dirs` explicitly at startup.
+overrides live in ``<cwd>/.hx``, split into a shared ``settings.json`` and a
+``settings.local.json`` that stays on this machine.
+
+Nothing here touches the network or mutates state on import; call
+:func:`ensure_user_dirs` explicitly at startup.
 """
 
 from __future__ import annotations
@@ -85,7 +88,24 @@ def project_dir(cwd: Path | None = None) -> Path:
 
 
 def project_settings_file(cwd: Path | None = None) -> Path:
+    """Shared project settings. Written by hand, and safe to check in."""
     return project_dir(cwd) / "settings.json"
+
+
+def project_local_settings_file(cwd: Path | None = None) -> Path:
+    """This machine's settings for this project - never checked in.
+
+    Everything HX writes on the user's behalf lands here: an "always allow"
+    grant is a decision one person made on one machine, often naming absolute
+    paths, and appending it to a file a team shares was a way to commit
+    somebody else's permissions.
+    """
+    return project_dir(cwd) / "settings.local.json"
+
+
+def project_gitignore_file(cwd: Path | None = None) -> Path:
+    """``.hx/.gitignore``, so the local layer excludes itself."""
+    return project_dir(cwd) / ".gitignore"
 
 
 def project_mcp_file(cwd: Path | None = None) -> Path:

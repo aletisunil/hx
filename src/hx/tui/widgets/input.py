@@ -21,7 +21,8 @@ from hx.tui.widgets.autocomplete import Autocomplete, Candidate, Completion
 MAX_HISTORY = 500
 
 PLACEHOLDER = "Ask HX…  (/ for commands)"
-RUNNING_PLACEHOLDER = "Ask HX…  (Enter to queue)"
+RUNNING_PLACEHOLDER = "Ask HX…  (Enter queues · alt+enter steers)"
+STEERING_PLACEHOLDER = "Ask HX…  (Enter steers · alt+enter queues)"
 
 #: Actions that have to beat TextArea's own bindings. A focused widget wins in
 #: Textual, so ctrl+c would copy and ctrl+d would delete a character before the
@@ -44,6 +45,18 @@ class PromptInput(TextArea):
     """
 
     class Submitted(TextualMessage):
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
+
+    class Steered(TextualMessage):
+        """Send this into the turn that is already running.
+
+        Empty text is deliberate and meaningful: it means "steer whatever is at
+        the front of the queue", which is how a message already queued gets
+        promoted without retyping it.
+        """
+
         def __init__(self, text: str) -> None:
             super().__init__()
             self.text = text
@@ -91,6 +104,9 @@ class PromptInput(TextArea):
 
         if self._matches(key, "tui.input.submit"):
             self._submit()
+            return NotImplemented
+        if self._matches(key, "tui.input.steer"):
+            self._steer()
             return NotImplemented
         if self._matches(key, "tui.input.newLine"):
             self.insert("\n")
@@ -208,12 +224,24 @@ class PromptInput(TextArea):
         text = self.text.strip()
         if not text:
             return
+        self._remember(text)
+        self.post_message(self.Submitted(text))
+
+    def _steer(self) -> None:
+        """Steer the draft, or - with nothing typed - whatever is queued."""
+        self.close_completion()
+        text = self.text.strip()
+        if text:
+            self._remember(text)
+        self.post_message(self.Steered(text))
+
+    def _remember(self, text: str) -> None:
+        """File the sent text in history and clear the buffer for the next one."""
         self._history.append(text)
         del self._history[:-MAX_HISTORY]
         self._history_index = None
         self._draft = ""
         self.clear()
-        self.post_message(self.Submitted(text))
 
     def set_placeholder(self, text: str) -> None:
         self.placeholder = text
@@ -378,13 +406,16 @@ class PromptInput(TextArea):
             return
         popup.show(self.completion)
 
-    def set_running(self, running: bool) -> None:
+    def set_running(self, running: bool, *, enter_steers: bool = False) -> None:
         """Reflect turn state without locking the user's draft.
 
         Submissions made while a turn is running are queued by ``HXApp``.  The
         prompt must stay editable so the user can prepare and submit them.
         """
-        self.set_placeholder(RUNNING_PLACEHOLDER if running else PLACEHOLDER)
+        if not running:
+            self.set_placeholder(PLACEHOLDER)
+            return
+        self.set_placeholder(STEERING_PLACEHOLDER if enter_steers else RUNNING_PLACEHOLDER)
 
 
 class FileCompleter:

@@ -372,3 +372,66 @@ async def test_a_title_model_override_is_used(hx_home: Path, tmp_path: Path) -> 
 
     assert h.provider.requests[-1].model == "cheap/model"
     assert h.provider.requests[0].model == "anthropic/claude-sonnet-4.5"
+
+
+async def test_closing_the_session_renames_it_for_what_it_became(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A name from the first exchange describes an opening question, not a session.
+
+    ``/resume`` is picked from these names, so the one worth keeping is the one
+    written when the work is done.
+    """
+    script = [
+        text_turn("done"),
+        text_turn("Parser bug fix"),
+        text_turn("done again"),
+        text_turn("Parser rewrite and tests"),
+    ]
+    async with build_loop(script, tmp_path, title=None) as h:
+        await h.loop.run("fix the parser")
+        assert h.loop.session.meta.title == "Parser bug fix"
+        await h.loop.run("now rewrite it")
+
+        await h.loop.retitle_session()
+
+    assert h.loop.session.meta.title == "Parser rewrite and tests"
+
+
+async def test_closing_an_unchanged_session_does_not_spend_a_call(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """Nothing was said after the name was written, so there is nothing to rename."""
+    script = [text_turn("done"), text_turn("Parser bug fix")]
+    async with build_loop(script, tmp_path, title=None) as h:
+        await h.loop.run("fix the parser")
+        before = len(h.provider.requests)
+
+        await h.loop.retitle_session()
+
+    assert h.loop.session.meta.title == "Parser bug fix"
+    assert len(h.provider.requests) == before
+
+
+async def test_a_failed_rename_keeps_the_name_it_had(hx_home: Path, tmp_path: Path) -> None:
+    """The script runs out, so the naming call raises. Losing the old name over
+    that would make closing a session worse than not closing it."""
+    script = [text_turn("done"), text_turn("Parser bug fix"), text_turn("done again")]
+    async with build_loop(script, tmp_path, title=None) as h:
+        await h.loop.run("fix the parser")
+        await h.loop.run("now rewrite it")
+
+        await h.loop.retitle_session()
+
+    assert h.loop.session.meta.title == "Parser bug fix"
+
+
+async def test_a_subagent_session_is_not_renamed_on_close(hx_home: Path, tmp_path: Path) -> None:
+    async with build_loop([text_turn("done")], tmp_path, title=None) as h:
+        h.loop.origin = "reviewer subagent"
+        await h.loop.run("fix the parser")
+
+        await h.loop.retitle_session()
+
+    assert h.loop.session.meta.title is None
+    assert len(h.provider.requests) == 1

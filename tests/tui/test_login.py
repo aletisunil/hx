@@ -18,6 +18,7 @@ from hx.providers.fake import FakeProvider, text_turn
 from hx.providers.models import CODEX_MODELS, ModelRegistry
 from hx.tools.registry import ToolRegistry
 from hx.tui.app import HXApp
+from hx.tui.widgets.login import LoginModal as LoginModalType
 
 MODEL = "anthropic/claude-sonnet-4.5"
 CODEX_MODEL = "openai-codex/gpt-5.3-codex"
@@ -236,3 +237,126 @@ async def test_cancelling_the_login_modal_unblocks_the_flow(hx_home: Path, tmp_p
 
         with pytest.raises(asyncio.CancelledError):
             await pasted
+
+
+async def test_the_whole_login_flow_reaches_the_paste_field(
+    hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression that made ``/login`` a dead end.
+
+    The modal was pushed without awaiting the mount, so the flow's first call
+    into it raised ``NoMatches`` and died before the paste future existed. The
+    modal stayed up, focused, taking keystrokes, and ignoring Enter forever.
+    """
+    from textual.widgets import Input
+
+    import hx.auth.oauth.codex as codex
+
+    async def opened(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(codex, "_open_browser", opened)
+
+    exchanged: list[str] = []
+
+    async def fake_exchange(code: str, verifier: str, redirect_uri: str) -> OAuthCredential:
+        exchanged.append(code)
+        return OAuthCredential(access="a", refresh="r", expires=0.0, extra={"account_id": "x"})
+
+    monkeypatch.setattr(codex, "_exchange", fake_exchange)
+
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.submit("/login openai-codex")
+        await pilot.pause(0.1)
+
+        pasted = "http://localhost:1455/auth/callback?code=CODE"
+        app.screen.query_one("#login-input", Input).value = pasted
+        await pilot.press("enter")
+        for _ in range(20):
+            await pilot.pause()
+
+        assert exchanged == ["CODE"], "the pasted code never reached the token exchange"
+        assert AuthStore().read("openai-codex") is not None
+        assert not isinstance(app.screen, LoginModalType), "the modal outlived the flow"
+
+
+async def test_a_flow_that_fails_early_still_tears_the_modal_down(
+    hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An orphaned modal is worse than a failed login: nothing can dismiss it."""
+    import hx.auth.oauth.codex as codex
+
+    async def exploding_login(interaction: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(codex, "login_browser", exploding_login)
+
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.submit("/login openai-codex")
+        await pilot.pause(0.1)
+
+        assert not isinstance(app.screen, LoginModalType)
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        assert "boom" in notices
+
+
+async def test_opening_the_browser_never_blocks_the_event_loop(
+    hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``webbrowser.open`` shells out to ``osascript`` on macOS and waits for it.
+
+    On the event loop that freezes every key the user presses - including the
+    Escape that would cancel the login and the field it asks them to paste into.
+    """
+    import asyncio
+    import contextlib
+    import threading
+
+    import hx.auth.oauth.codex as codex
+
+    release = threading.Event()
+    ran_on: list[str] = []
+
+    def slow_open(url: str) -> bool:
+        ran_on.append(threading.current_thread().name)
+        release.wait(5)
+        return True
+
+    monkeypatch.setattr(codex.webbrowser, "open", slow_open)
+
+    alive = asyncio.Event()
+
+    async def heartbeat() -> None:
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+        alive.set()
+
+    class Silent:
+        """A LoginInteraction that says nothing and never finishes."""
+
+        def show_url(self, url: str, instructions: str) -> None: ...
+        def show_device_code(self, user_code: str, verification_uri: str) -> None: ...
+        def progress(self, message: str) -> None: ...
+
+        async def prompt_paste(self, message: str) -> str:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    beat = asyncio.create_task(heartbeat())
+    flow = asyncio.create_task(codex.login_browser(Silent()))
+    try:
+        await asyncio.wait_for(alive.wait(), timeout=3)
+    finally:
+        release.set()
+        flow.cancel()
+        beat.cancel()
+        for task in (flow, beat):
+            with contextlib.suppress(asyncio.CancelledError, OSError):
+                await task
+
+    assert ran_on, "the browser was never opened"
+    assert ran_on[0] != threading.main_thread().name, "the open ran on the event loop"

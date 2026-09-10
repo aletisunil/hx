@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from rich.console import Console
@@ -13,7 +14,7 @@ from hx.tui.widgets.working import WorkingIndicator
 
 
 def _plain(renderable: object, width: int = 90) -> str:
-    console = Console(width=width, record=True, force_terminal=False)
+    console = Console(width=width, record=True, force_terminal=False, file=io.StringIO())
     console.print(renderable)
     return console.export_text()
 

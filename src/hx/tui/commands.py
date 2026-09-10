@@ -179,7 +179,7 @@ def _persist_model_choice(ctx: CommandContext, model_id: str) -> None:
     import os
 
     from hx.config import ConfigError, read_settings_file, write_settings_file
-    from hx.paths import project_settings_file, user_settings_file
+    from hx.paths import project_local_settings_file, project_settings_file, user_settings_file
 
     path = user_settings_file()
     try:
@@ -199,17 +199,23 @@ def _persist_model_choice(ctx: CommandContext, model_id: str) -> None:
     if os.environ.get("HX_MODEL"):
         ctx.app.notice("$HX_MODEL overrides this on the next start.", "warning")
         return
-    project = project_settings_file(ctx.settings.cwd)
-    try:
-        project_models = read_settings_file(project).get("models")
-    except ConfigError:
-        return
-    project_model = project_models.get("model") if isinstance(project_models, dict) else None
-    if project_model:
-        ctx.app.notice(
-            f"{project} pins models.model to {project_model} and overrides this on the next start.",
-            "warning",
-        )
+    # Both project layers sit above the user file, so either one pinning a model
+    # would quietly win next session.
+    for path in (
+        project_settings_file(ctx.settings.cwd),
+        project_local_settings_file(ctx.settings.cwd),
+    ):
+        try:
+            models = read_settings_file(path).get("models")
+        except ConfigError:
+            continue
+        pinned = models.get("model") if isinstance(models, dict) else None
+        if pinned:
+            ctx.app.notice(
+                f"{path} pins models.model to {pinned} and overrides this on the next start.",
+                "warning",
+            )
+            return
 
 
 async def cmd_models(ctx: CommandContext, args: str) -> None:
@@ -229,6 +235,9 @@ async def cmd_models(ctx: CommandContext, args: str) -> None:
 
 async def cmd_clear(ctx: CommandContext, args: str) -> None:
     """``/clear`` - start a fresh session in the same directory."""
+    if ctx.app.is_busy:
+        ctx.app.notice("Interrupt the running turn before clearing.", "warning")
+        return
     ctx.app.start_new_session()
 
 
@@ -250,6 +259,10 @@ async def cmd_resume(ctx: CommandContext, args: str) -> None:
     """``/resume`` - pick a previous session in this directory."""
     from hx.core.session import list_sessions
     from hx.tui.widgets.palette import SessionPicker
+
+    if ctx.app.is_busy:
+        ctx.app.notice("Interrupt the running turn before resuming another.", "warning")
+        return
 
     sessions = list_sessions(ctx.settings.cwd)
     if not sessions:
@@ -423,6 +436,12 @@ async def cmd_permissions(ctx: CommandContext, args: str) -> None:
         lines.append("")
         lines.append('No rules configured. Add them under "permissions" in .hx/settings.json.')
 
+    from hx.paths import project_local_settings_file
+
+    lines.append("")
+    lines.append(f'"Always allow" writes to {project_local_settings_file(ctx.settings.cwd)}')
+    lines.append("  (this machine only - .hx/settings.json stays yours to check in)")
+
     ctx.app.notice("\n".join(lines), "info" if ctx.app.sandbox_active else "warning")
 
 
@@ -542,7 +561,11 @@ async def _run_oauth_login(ctx: CommandContext, spec: Any) -> None:
     from hx.tui.widgets.login import LoginModal
 
     modal = LoginModal(spec.label)
-    ctx.app.push_screen(modal)
+    # Awaited: the flow talks to the modal immediately, and a screen that has
+    # not composed yet has nothing to talk to. Pushing without waiting left the
+    # first call raising NoMatches and the modal orphaned on screen - focused,
+    # accepting keystrokes, and wired to nothing.
+    await ctx.app.push_screen(modal)
     try:
         credential = await codex_oauth.login_browser(modal)
     except asyncio.CancelledError:
@@ -551,9 +574,14 @@ async def _run_oauth_login(ctx: CommandContext, spec: Any) -> None:
     except (codex_oauth.OAuthError, CallbackError) as exc:
         ctx.app.notice(f"Sign-in failed: {exc}", "error")
         return
+    except Exception as exc:
+        # Any other failure is a bug, and a bug must not cost the user their
+        # terminal: the modal is torn down in `finally` either way, and the
+        # message goes to the transcript where they can read it.
+        ctx.app.notice(f"Sign-in failed: {exc}", "error")
+        return
     finally:
-        if modal.is_running:
-            modal.dismiss(None)
+        ctx.app.dismiss_modal(modal)
 
     try:
         AuthStore().save(spec.id, credential)
@@ -663,6 +691,52 @@ async def cmd_copy(ctx: CommandContext, args: str) -> None:
     await ctx.app.copy(text)
 
 
+async def cmd_queue(ctx: CommandContext, args: str) -> None:
+    """``/queue [steer <n>|clear]`` - see and act on what is waiting."""
+    from hx.keys import KEYMAP
+
+    queued = ctx.app.queued
+    argument = args.strip()
+
+    if argument in {"clear", "drop"}:
+        if not queued:
+            ctx.app.notice("Nothing queued.", "warning")
+            return
+        count = ctx.app.clear_queue()
+        ctx.app.notice(f"Dropped {count} queued message(s).", "success")
+        return
+
+    if argument.startswith("steer"):
+        rest = argument.removeprefix("steer").strip()
+        index = 1
+        if rest:
+            if not rest.isdigit():
+                ctx.app.notice("Usage: /queue steer <n>", "warning")
+                return
+            index = int(rest)
+        if not 1 <= index <= len(queued):
+            ctx.app.notice(f"No queued message {index}. There are {len(queued)}.", "warning")
+            return
+        ctx.app.steer_queued(index - 1)
+        return
+
+    if argument:
+        ctx.app.notice("Usage: /queue [steer <n>|clear]", "warning")
+        return
+
+    if not queued:
+        ctx.app.notice("Nothing queued.", "info")
+        return
+
+    lines = ["Queued, oldest first:"]
+    lines += [f"  {position}. {text}" for position, text in enumerate(queued, start=1)]
+    lines.append("")
+    lines.append(
+        f"/queue steer <n> sends one now; {KEYMAP.text('tui.input.steer')} sends the first."
+    )
+    ctx.app.notice("\n".join(lines), "info")
+
+
 async def cmd_quit(ctx: CommandContext, args: str) -> None:
     ctx.app.exit()
 
@@ -691,6 +765,13 @@ def build_default_commands() -> CommandRegistry:
         Command("configure", "Settings and the OpenRouter API key", cmd_configure),
         Command("login", "Sign in to a model route", cmd_login, "[provider]", takes_args=True),
         Command("logout", "Forget a stored credential", cmd_logout, "<provider>", takes_args=True),
+        Command(
+            "queue",
+            "Messages waiting for this turn to end",
+            cmd_queue,
+            "[steer <n>|clear]",
+            takes_args=True,
+        ),
         Command("copy", "Copy the last reply to the clipboard", cmd_copy),
         Command("help", "List commands and keys", cmd_help),
         Command("quit", "Exit HX", cmd_quit, aliases=("exit", "q")),

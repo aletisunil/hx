@@ -61,6 +61,10 @@ if TYPE_CHECKING:
     from hx.tools.registry import ToolRegistry
 
 
+class _Steered(Exception):
+    """Internal: this stream was cancelled to deliver a steer, not to stop."""
+
+
 @dataclass(slots=True)
 class TurnResult:
     stop_reason: StopReason
@@ -107,6 +111,11 @@ class AgentLoop:
         self.project_context = project_context
         self._cancelled = False
         self._turn_index = 0
+        self._steer: list[str] = []
+        """Messages the user pushed into a running turn, not yet delivered."""
+        self._steered = False
+        """Set while a steer is the reason the current stream is being cancelled."""
+        self._stream_task: asyncio.Task[tuple[Message, StopReason]] | None = None
         self.last_context: AssembledContext | None = None
         self.origin: str | None = None
         """Set for subagents so approval prompts name who is asking."""
@@ -153,13 +162,22 @@ class AgentLoop:
             if self._cancelled:
                 return TurnResult(StopReason.CANCELLED, produced)
 
+            produced.extend(self._deliver_steer())
+
             await self._maybe_compact()
             self._turn_index += 1
             if self.origin is None:
                 self.bus.publish(TurnStarted(turn_index=self._turn_index, model=self.model))
 
             try:
-                message, stop_reason = await self._stream_turn()
+                message, stop_reason = await self._await_stream()
+            except _Steered:
+                # The stream was cut off to make room for what the user just
+                # said. Whatever had streamed is already in the transcript, and
+                # the next iteration delivers the message and asks again.
+                if self.origin is None:
+                    self.bus.publish(TurnFinished(self._turn_index, StopReason.CANCELLED))
+                continue
             except asyncio.CancelledError:
                 self.bus.publish(TurnFinished(self._turn_index, StopReason.CANCELLED))
                 raise
@@ -175,6 +193,11 @@ class AgentLoop:
 
             calls = message.tool_uses()
             if not calls or self._cancelled:
+                # A steer that arrived during the last stretch is the next thing
+                # the user said, so the conversation continues rather than
+                # ending and making them send it twice.
+                if self._steer and not self._cancelled:
+                    continue
                 await self._name_session()
                 return TurnResult(stop_reason, produced)
 
@@ -187,6 +210,78 @@ class AgentLoop:
             ErrorRaised(message=f"Stopped after {self.MAX_TURNS} turns", recoverable=True)
         )
         return TurnResult(stop_reason, produced, error="turn limit reached")
+
+    # --- steering ---------------------------------------------------------
+
+    def steer(self, text: str) -> bool:
+        """Put ``text`` into the turn that is running now.
+
+        Returns whether it will land mid-turn. ``False`` means there was no turn
+        to steer - the caller still owns the text, and :meth:`take_pending_steer`
+        hands it back.
+
+        While the model is streaming, that stream is cut off: the point of
+        steering is not to wait, and the tokens after the interruption are being
+        spent on the wrong thing anyway. While *tools* are running they are left
+        to finish, and the message lands at the next model call instead -
+        cancelling a half-written file or an in-flight ``git`` command is how a
+        working tree ends up in a state nobody asked for.
+        """
+        text = text.strip()
+        if not text or self.origin is not None:
+            return False
+
+        self._steer.append(text)
+        stream = self._stream_task
+        if stream is None or stream.done():
+            return False
+        self._steered = True
+        stream.cancel()
+        return True
+
+    def take_pending_steer(self) -> list[str]:
+        """Hand undelivered steers back to the caller, clearing them.
+
+        A cancelled turn drops what it was doing but not what the user typed:
+        the frontend puts these back in its queue.
+        """
+        pending, self._steer = self._steer, []
+        return pending
+
+    def _deliver_steer(self) -> list[Message]:
+        """Append pending steers to the transcript as what they are: user turns.
+
+        Their own messages, rather than extra text on the tool-result message
+        they follow. A correction is a thing the user said, and every route
+        encodes a plain user turn the same way; folding it into a message that
+        also carries tool results makes its delivery depend on how a particular
+        provider flattens mixed content.
+        """
+        delivered: list[Message] = []
+        for text in self.take_pending_steer():
+            message = user_message(text)
+            self.session.append(message)
+            delivered.append(message)
+        return delivered
+
+    async def _await_stream(self) -> tuple[Message, StopReason]:
+        """Run one stream as its own task, so a steer can cancel just that.
+
+        Cancelling ``run`` itself would end the whole conversation; steering has
+        to be able to end one provider call and no more.
+        """
+        self._steered = False
+        task = asyncio.ensure_future(self._stream_turn())
+        self._stream_task = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            if self._steered and not self._cancelled:
+                self._steered = False
+                raise _Steered from None
+            raise
+        finally:
+            self._stream_task = None
 
     async def _name_session(self) -> None:
         """Give the session a title once, after its first completed exchange.
@@ -201,24 +296,67 @@ class AgentLoop:
         if self.origin is not None or self.session.meta.title or self._cancelled:
             return
 
-        messages = [m for m in self.session.messages if not m.ephemeral]
-        if not any(m.role == "user" for m in messages):
+        messages = self._nameable_messages(self.session)
+        if messages is None:
             return
 
-        from hx.core.title import fallback_title, generate_title
+        title = await self._ask_for_title(messages, self.session)
+        from hx.core.title import fallback_title
 
-        title: str | None = None
+        self.session.set_title(title or fallback_title(messages))
+
+    async def retitle_session(self, session: Session | None = None) -> None:
+        """Rename a session for what it turned into, as it closes.
+
+        The first name is written after one exchange, so it describes an opening
+        question. Two hours later it is the wrong label on the row the user has
+        to recognise in ``/resume``, and the list gives them no way to know that.
+
+        ``session`` names the one to rename, for the cases where it is no longer
+        the live one - ``/clear`` and ``/resume`` both leave a session behind.
+
+        Only when the transcript grew since the name was written, and never at
+        the cost of the name already there: a rename that fails leaves the old
+        title alone rather than replacing something specific with a guess.
+        """
+        if self.origin is not None:
+            return
+
+        target = session if session is not None else self.session
+        messages = self._nameable_messages(target)
+        if messages is None:
+            return
+        if len(target.messages) <= target.meta.title_message_count:
+            return
+
+        if title := await self._ask_for_title(messages, target):
+            target.set_title(title)
+
+    def _nameable_messages(self, session: Session) -> list[Message] | None:
+        """The transcript a name is derived from, or ``None`` if there is none."""
+        messages = [m for m in session.messages if not m.ephemeral]
+        if not any(m.role == "user" for m in messages):
+            return None
+        return messages
+
+    async def _ask_for_title(self, messages: list[Message], session: Session) -> str | None:
+        """One tiny provider call. Returns ``None`` if it produced nothing usable.
+
+        The cost is recorded against the session being named, which is not
+        always the live one.
+        """
+        from hx.core.title import generate_title
+
         try:
             model = self.settings.models.title_model or self.model
             title, usage = await generate_title(self.provider, model, messages)
-            if usage.prompt_tokens or usage.output_tokens:
-                self._record_usage(usage, None)
         except asyncio.CancelledError:
             raise
         except Exception:
-            title = None
-
-        self.session.set_title(title or fallback_title(messages))
+            return None
+        if usage.prompt_tokens or usage.output_tokens:
+            self._record_usage(usage, None, session=session)
+        return title
 
     async def _stream_turn(self) -> tuple[Message, StopReason]:
         """One provider call. Publishes deltas and the usage update."""
@@ -265,7 +403,14 @@ class AgentLoop:
         except asyncio.CancelledError:
             # Keep whatever streamed before the interrupt: the next turn must
             # reflect what the user actually saw.
-            if text_parts or tool_calls:
+            #
+            # Only if prose reached the user, though. The tool calls are dropped
+            # - they were never executed - and what is left of a stream cut off
+            # during thinking, or before its first token, carries nothing a route
+            # can encode: it goes on the wire as an assistant turn with null
+            # content and no tool calls, which is rejected on the very next call.
+            # Steering makes that the common case rather than a rare one.
+            if text_parts:
                 self.session.append(
                     self._assemble(text_parts, thinking_parts, [], thinking_signature)
                 )
@@ -337,10 +482,26 @@ class AgentLoop:
         blocks.extend(tool_calls)
         return assistant_message(blocks, model=self.model)
 
-    def _record_usage(self, usage: TurnUsage, request: ProviderRequest | None) -> None:
+    def _record_usage(
+        self,
+        usage: TurnUsage,
+        request: ProviderRequest | None,
+        session: Session | None = None,
+    ) -> None:
+        """Bill a call to a session's ledger.
+
+        ``session`` is for spend that belongs to a session other than the live
+        one - naming a transcript ``/clear`` has already moved on from. Its cost
+        is not published, because the status bar shows the live session and
+        adding somebody else's tokens to that total would be wrong.
+        """
         if usage.cost_usd is None and self.model_info is not None:
             usage.cost_usd = compute_cost(usage, self.model_info.pricing)
-        self.session.record_usage(usage)
+        target = session if session is not None else self.session
+        target.record_usage(usage)
+        target.flush()
+        if target is not self.session:
+            return
         ledger = self.session.usage
         self.bus.publish(
             UsageUpdated(

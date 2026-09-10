@@ -184,3 +184,32 @@ def test_hx_prompt_reports_appended_blocks(
     assert captured.out.rstrip().endswith("be French")
     assert "[source] built-in" in captured.err
     assert "[append] --append-system-prompt" in captured.err
+
+
+async def test_closing_the_session_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rename runs while the user waits for their shell prompt back, so a
+    provider that has stopped answering must not hold the process open."""
+    import asyncio
+    import time
+
+    from hx import cli
+
+    class Slow:
+        async def retitle_session(self) -> None:
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(cli, "RENAME_TIMEOUT_SECONDS", 0.05)
+    started = time.monotonic()
+    await cli._rename_closed_session(Slow())
+
+    assert time.monotonic() - started < 1.0, "the rename was not bounded"
+
+
+async def test_a_rename_that_raises_never_reaches_the_user() -> None:
+    from hx.cli import _rename_closed_session
+
+    class Broken:
+        async def retitle_session(self) -> None:
+            raise RuntimeError("no provider")
+
+    await _rename_closed_session(Broken())

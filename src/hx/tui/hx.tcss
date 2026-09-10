@@ -35,6 +35,7 @@ Transcript {
    screen shifting a column sideways. */
 Transcript > MessageBlock,
 Transcript > ToolBlock,
+Transcript > PermissionPrompt,
 Transcript > Notice {
     height: auto;
     margin: 1 0 0 0;
@@ -70,6 +71,20 @@ Transcript > MessageBlock.role-user {
 
 Transcript > Notice {
     padding: 0 1;
+}
+
+/* A pending approval is the one block on screen that is waiting on the user, so
+   it keeps the cursor gutter lit for as long as it is unanswered. Once it
+   collapses into its record line it gives the gutter back and reads as the
+   notice it has become. */
+Transcript > PermissionPrompt.permission-prompt {
+    border-left: vkey $warning;
+}
+
+Transcript > PermissionPrompt:focus {
+    /* Focus moved here for the duration of the question; the block already
+       announces itself, so this must not add a second highlight fighting it. */
+    background: transparent;
 }
 
 TodoSidebar {
@@ -188,52 +203,7 @@ ModalScreen {
     background: $surface;
 }
 
-/* Permission prompt. Sized to its content so the buttons sit under the diff,
-   not stranded at the bottom of an empty screen. */
-#permission {
-    width: 90%;
-    max-width: 110;
-    height: auto;
-    max-height: 80%;
-    padding: 1 2;
-    /* Same frame as every other modal, in the warning colour rather than a
-       heavier border: the colour carries the risk, and a second border style
-       would just make this dialog look like it came from another app. */
-    border: round $warning;
-    background: $surface;
-}
-
-#permission-title {
-    padding: 0;
-}
-
-#permission-rule {
-    height: 1;
-    color: $warning;
-    background: $surface;
-}
-
-#permission-detail {
-    height: auto;
-    max-height: 20;
-    padding: 0 1;
-    border: none;
-    background: $panel;
-}
-
-/* One line of keys, not a row of three-line buttons. The keys are bound
-   anyway, so the buttons were restating them at four times the height. */
-#permission-actions {
-    height: 1;
-    margin: 1 0 0 0;
-}
-
-#permission-actions Button {
-    margin: 0 0 0 1;
-    min-width: 14;
-}
-
-/* Configuration modal. Sized to content, like the permission prompt. */
+/* Configuration modal, sized to its content. */
 #configure {
     width: 80%;
     max-width: 90;

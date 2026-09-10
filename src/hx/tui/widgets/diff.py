@@ -1,7 +1,7 @@
 """Diff rendering for permission prompts.
 
 The painter itself lives in :mod:`hx.tui.renderers`, next to the tool that
-produces the diff. This module keeps the small helpers the permission modal
+produces the diff. This module keeps the small helpers the permission prompt
 needs and re-exports the painter so there is exactly one of them.
 """
 

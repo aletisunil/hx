@@ -199,7 +199,9 @@ async def login_browser(interaction: LoginInteraction) -> OAuthCredential:
     state = random_state()
     url = authorize_url(pkce, state)
 
-    with LoopbackCallback(CALLBACK_PORT, CALLBACK_PATH, state=state) as callback:
+    callback = LoopbackCallback(CALLBACK_PORT, CALLBACK_PATH, state=state)
+    callback.start()
+    try:
         interaction.show_url(
             url,
             "Complete the sign-in in your browser. On a remote machine, paste the "
@@ -210,10 +212,19 @@ async def login_browser(interaction: LoginInteraction) -> OAuthCredential:
                 f"Port {CALLBACK_PORT} is busy, so the browser cannot hand the code back. "
                 "Paste the redirect URL here instead."
             )
-        elif not _open_browser(url):
+        elif not await _open_browser(url):
             interaction.progress("Could not open a browser - open the URL above manually.")
 
         result = await _race_callback_and_paste(callback, interaction)
+    finally:
+        try:
+            await callback.aclose()
+        except asyncio.CancelledError:
+            # Cancelled mid-teardown: finish the job on this thread rather than
+            # leaving the port bound for the life of the process, which would
+            # cost the *next* login its browser callback.
+            callback.close()
+            raise
 
     if result.state is not None and result.state != state:
         raise OAuthError("OAuth state mismatch - discard this login and try again.")
@@ -248,9 +259,16 @@ async def _race_callback_and_paste(
                 task.cancel()
 
 
-def _open_browser(url: str) -> bool:
+async def _open_browser(url: str) -> bool:
+    """Open the URL without stalling the caller's event loop.
+
+    ``webbrowser.open`` is not a quick handoff: on macOS it writes AppleScript
+    to ``osascript`` and waits for it, which takes as long as the browser takes
+    to come up. On the event loop that freezes the whole TUI - including the
+    Escape that cancels the login and the field the user is meant to paste into.
+    """
     try:
-        return webbrowser.open(url)
+        return await asyncio.to_thread(webbrowser.open, url)
     except webbrowser.Error:
         return False
 

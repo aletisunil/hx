@@ -28,7 +28,7 @@ class GrantScope(StrEnum):
     ONCE = "once"
     SESSION = "session"
     ALWAYS = "always"
-    """Persisted to project settings.json."""
+    """Persisted to ``.hx/settings.local.json``."""
 
 
 DEFAULT_MUTATING_TOOLS = frozenset({"Bash", "Write", "Edit", "MultiEdit", "Task", "NotebookEdit"})
@@ -259,7 +259,7 @@ class PermissionEngine:
         """Record an approval.
 
         ``SESSION`` keeps the rules in memory; ``ALWAYS`` also writes them to
-        project settings. Both record the exact request as well, so a command
+        the project's local settings. Both record the exact request as well, so a command
         that could not be decomposed is still covered for the rest of the
         session.
         """
@@ -267,7 +267,7 @@ class PermissionEngine:
             return
 
         self._session_grants.add((request.tool_name, request.specifier))
-        source = "session grant" if scope is GrantScope.SESSION else "project settings"
+        source = "session grant" if scope is GrantScope.SESSION else "local settings"
         for rule_text in persistable_rules(request.tool_name, request.specifier):
             self.rules.append(parse_rule(rule_text, source, Decision.ALLOW))
             if scope is GrantScope.ALWAYS:
@@ -413,14 +413,20 @@ def _glob_regex(pattern: str) -> re.Pattern[str]:
 
 
 def load_rules(cwd: Path) -> list[Rule]:
-    """Collect rules from user and project settings, project last."""
+    """Collect rules from every settings layer, narrowest last.
+
+    Order only decides which source a rule is *reported* as when two layers say
+    the same thing; evaluation is deny-then-ask-then-allow across the lot, so a
+    local allow can never quietly override a project deny.
+    """
     from hx.config import read_settings_file
-    from hx.paths import project_settings_file, user_settings_file
+    from hx.paths import project_local_settings_file, project_settings_file, user_settings_file
 
     rules: list[Rule] = []
     for path, source in (
         (user_settings_file(), "user settings"),
         (project_settings_file(cwd), "project settings"),
+        (project_local_settings_file(cwd), "local settings"),
     ):
         permissions = read_settings_file(path).get("permissions") or {}
         for key, decision in (
@@ -452,10 +458,14 @@ def migrate_legacy_rules(cwd: Path) -> list[str]:
     point of the file is that its owner can see what it grants.
     """
     from hx.config import ConfigError, read_settings_file, write_settings_file
-    from hx.paths import project_settings_file, user_settings_file
+    from hx.paths import project_local_settings_file, project_settings_file, user_settings_file
 
     notices: list[str] = []
-    for path in (user_settings_file(), project_settings_file(cwd)):
+    for path in (
+        user_settings_file(),
+        project_settings_file(cwd),
+        project_local_settings_file(cwd),
+    ):
         try:
             data = read_settings_file(path)
         except ConfigError:
@@ -508,17 +518,52 @@ def _widen_rule(text: str) -> list[str] | None:
 
 
 def persist_allow_rule(rule_text: str, cwd: Path) -> None:
-    """Append an allow rule to the project settings file."""
-    from hx.config import read_settings_file, write_settings_file
-    from hx.paths import project_settings_file
+    """Append an allow rule to the project's *local* settings file.
 
-    path = project_settings_file(cwd)
+    Not ``settings.json``: that file is the project's shared configuration, and
+    a grant is one person's decision on one machine - frequently spelling out
+    absolute paths from their home directory. Writing there committed those
+    decisions to everyone who cloned the repo, or left them stranded in a file
+    the user had deliberately checked in.
+    """
+    from hx.config import read_settings_file, write_settings_file
+    from hx.paths import project_local_settings_file
+
+    path = project_local_settings_file(cwd)
     data = read_settings_file(path)
     permissions = data.setdefault("permissions", {})
     allow = permissions.setdefault("allow", [])
     if rule_text not in allow:
         allow.append(rule_text)
     write_settings_file(path, data)
+    ignore_local_settings(cwd)
+
+
+def ignore_local_settings(cwd: Path) -> None:
+    """Make ``.hx`` exclude the local layer, via its own ``.gitignore``.
+
+    Its own, rather than the repository's: the project's ``.gitignore`` belongs
+    to the project, and appending to it would show up as an uninvited change in
+    the user's next diff. A ``.gitignore`` inside ``.hx`` is HX's file to own,
+    and git applies it just the same.
+
+    Best effort - a repo that cannot be written to is not a reason to refuse a
+    permission the user granted.
+    """
+    from hx.paths import project_gitignore_file
+
+    path = project_gitignore_file(cwd)
+    entry = "settings.local.json"
+    try:
+        existing = path.read_text() if path.is_file() else ""
+        if entry in existing.split():
+            return
+        prefix = "" if not existing or existing.endswith("\n") else "\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{prefix}{entry}\n")
+    except OSError:
+        return
 
 
 class InvalidRule(Exception):

@@ -37,6 +37,9 @@ class SessionMeta:
     updated_at: float
     model: str
     title: str | None = None
+    title_message_count: int = 0
+    """How long the transcript was when the title was written, so closing the
+    session can tell whether the name still describes it."""
     message_count: int = 0
     parent_id: str | None = None
     """Set for subagent sessions, which nest under their parent's directory."""
@@ -106,6 +109,7 @@ class Session:
         keep reflecting real activity, not the moment a name was written.
         """
         self.meta.title = title.strip() or None
+        self.meta.title_message_count = len(self.messages)
         self._write_meta()
 
     def record_usage(self, usage: TurnUsage) -> None:

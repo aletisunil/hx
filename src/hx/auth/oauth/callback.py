@@ -96,10 +96,11 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class LoopbackCallback:
-    """Context manager owning the one-shot callback server.
+    """Owns the one-shot callback server.
 
-    Enter it *before* opening the browser, so a fast redirect cannot arrive at
-    a closed port.
+    Start it *before* opening the browser, so a fast redirect cannot arrive at
+    a closed port. Async callers use :meth:`start` / :meth:`aclose`; the sync
+    CLI path uses it as a context manager.
     """
 
     def __init__(self, port: int, path: str, *, state: str | None = None) -> None:
@@ -110,13 +111,15 @@ class LoopbackCallback:
         self._thread: threading.Thread | None = None
         self._bind_error: OSError | None = None
         self._closing = threading.Event()
+        self._closed = False
 
     @property
     def listening(self) -> bool:
         """False when the port could not be bound; only pasting will work then."""
         return self._server is not None
 
-    def __enter__(self) -> LoopbackCallback:
+    def start(self) -> LoopbackCallback:
+        """Bind and serve. Safe to call once; a failed bind is not an error."""
         try:
             server = HTTPServer((callback_host(), self.port), _Handler)
         except OSError as exc:
@@ -134,7 +137,30 @@ class LoopbackCallback:
         self._thread.start()
         return self
 
+    def __enter__(self) -> LoopbackCallback:
+        return self.start()
+
     def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    async def aclose(self) -> None:
+        """Shut down without stalling the caller's event loop.
+
+        ``shutdown`` waits for the serving thread to notice, and the join waits
+        again - a second or two of a frozen TUI at the end of every login, right
+        where the user is looking for their new session.
+        """
+        await asyncio.to_thread(self.close)
+
+    def close(self) -> None:
+        """Stop serving and release the port. Safe to call twice.
+
+        The flag is set at the end, not the start: a caller whose ``aclose`` was
+        cancelled runs this again on its own thread to finish the job, and it
+        can only do that while the work is still marked undone.
+        """
+        if self._closed:
+            return
         # Release any thread parked in `wait` before tearing the server down;
         # `asyncio.to_thread` cannot be cancelled, so without this the thread
         # would sit on the event for the life of the process.
@@ -145,6 +171,7 @@ class LoopbackCallback:
             self._server.server_close()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        self._closed = True
 
     async def wait(self) -> CallbackResult:
         """Block until the browser redirect lands.

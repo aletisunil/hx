@@ -26,6 +26,52 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Steer a running turn.** `alt+enter` pushes a message into the turn already
+  in flight: the model call is cut off mid-stream and the next one starts from
+  what you just said. Tools already running are left to finish, so nothing is
+  half-written. With an empty prompt it steers the front of the queue, so a
+  correction you already queued need not be retyped. `/queue` lists what is
+  waiting, `/queue steer <n>` sends one now, `/queue clear` drops them, and the
+  status bar shows the depth. Set `tui.enterWhileBusy` to `"steer"` to swap the
+  two keys.
+- **Sessions are renamed as they close.** The name written after the first
+  exchange described an opening question; `/resume` now lists what the session
+  turned into. Also on `/clear` and `/resume`, which leave a session behind.
+
+### Changed
+
+- **Approvals happen in the transcript, not in a modal.** The permission prompt
+  is now a block at the end of the conversation, directly under the sentence
+  where the model said what it intended to do. It takes the keyboard while it is
+  unanswered (`y` / `s` / `a` / `n`, `v` for the rest of a clipped diff), and
+  answering collapses it into a one-line record of what was granted and how
+  widely, so a session shows every rule it accumulated.
+- **More commands are recognised as read-only, and fewer are taken on trust.**
+  The allowlist that skips the prompt entirely grew from roughly thirty entries
+  to a hundred - digests, `ps`, `readlink`, most text filters, and the read-only
+  half of `git` (`rev-parse`, `ls-files`, `cat-file`, `stash list`, and the
+  rest). Arguments now decide alongside the name: `sed -i`, `find -exec`,
+  `sort -o`, `yq -i`, `git branch -D`, an `awk` program that calls `system()`,
+  and `git -c core.pager=…` all still ask. Review it if you run HX on anything
+  you would not hand a shell.
+- **"Always allow" writes to `.hx/settings.local.json`.** Grants no longer land
+  in `.hx/settings.json`, the file a project checks in - one machine's absolute
+  paths were being committed to everyone who cloned the repo. The new layer sits
+  above project settings, and HX adds a `.hx/.gitignore` covering it. Existing
+  rules in either file keep working.
+
+### Fixed
+
+- **`/login` no longer strands you in a dead modal.** The sign-in screen was
+  driven before it had finished mounting, so the flow died on its first call and
+  left a prompt that took keystrokes and ignored Enter. Opening the browser and
+  tearing down the loopback listener also ran on the event loop, freezing the
+  TUI - including the Escape that would have cancelled.
+- Text alongside tool results reaches the model on OpenRouter-shaped routes
+  instead of being silently dropped.
+
 ---
 
 ## [0.1.6] - 2026-09-10

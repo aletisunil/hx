@@ -303,19 +303,26 @@ def parse_usage(raw: dict[str, Any]) -> TurnUsage:
 
 
 def _system_message(text: str, *, structured: bool) -> dict[str, Any]:
+    return _text_message("system", text, structured=structured)
+
+
+def _text_message(role: str, text: str, *, structured: bool) -> dict[str, Any]:
+    """One plain-text wire message, in whichever content shape the route wants."""
     if structured:
-        return {"role": "system", "content": [{"type": "text", "text": text}]}
-    return {"role": "system", "content": text}
+        return {"role": role, "content": [{"type": "text", "text": text}]}
+    return {"role": role, "content": text}
 
 
 def _encode_message(message: Message, *, structured: bool) -> list[dict[str, Any]]:
     """Convert one transcript message into wire messages.
 
     Tool results become ``role: "tool"`` entries, which is why one transcript
-    message can expand into several wire messages.
+    message can expand into several wire messages. Text in the same message
+    follows them as a user turn rather than being discarded: a late-injected
+    reminder rides the newest user message, and that is often this one.
     """
     if results := [b for b in message.content if isinstance(b, ToolResultBlock)]:
-        return [
+        entries: list[dict[str, Any]] = [
             {
                 "role": "tool",
                 "tool_call_id": block.tool_use_id,
@@ -323,6 +330,9 @@ def _encode_message(message: Message, *, structured: bool) -> list[dict[str, Any
             }
             for block in results
         ]
+        if trailing := "".join(b.text for b in message.content if isinstance(b, TextBlock)):
+            entries.append(_text_message("user", trailing, structured=structured))
+        return entries
 
     text_parts = [b.text for b in message.content if isinstance(b, TextBlock | ThinkingBlock)]
     text = "".join(b.text for b in message.content if isinstance(b, TextBlock))

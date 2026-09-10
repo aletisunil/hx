@@ -52,6 +52,7 @@ def test_every_command_is_documented(readme: str) -> None:
 #: Actions the prompt handles itself rather than through App.BINDINGS.
 WIDGET_ACTIONS = {
     "tui.input.submit",
+    "tui.input.steer",
     "tui.input.newLine",
     "tui.input.complete",
     "tui.editor.cursorLeft",

@@ -53,6 +53,16 @@ class StatusBar(Static):
         self.auto_compact = True
         self.cwd = ""
         self.branch: str | None = None
+        self.queued = 0
+        """Messages waiting for the running turn to end."""
+
+    def set_queued(self, count: int) -> None:
+        """Show how much the user is waiting on - a queue nobody can see is a
+        queue they forget they filled."""
+        if count == self.queued:
+            return
+        self.queued = count
+        self.refresh()
 
     def set_model(self, model_id: str, *, subscription: bool = False) -> None:
         self.model = model_id
@@ -139,6 +149,8 @@ class StatusBar(Static):
         field = Text(self.cwd or "", style=THEME.fg("dim"))
         if self.branch:
             field.append(f" ({self.branch})", style=THEME.fg("dim"))
+        if self.queued:
+            field.append(f"  ⧗{self.queued} queued", style=THEME.fg("muted"))
         return field
 
     def _stats_field(self) -> Text:

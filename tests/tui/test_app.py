@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,16 @@ from hx.tui.commands import Command
 from hx.tui.widgets.input import PromptInput
 from hx.tui.widgets.statusbar import StatusBar
 from hx.tui.widgets.transcript import Transcript
+
+
+def _plain(renderable: object, width: int = 90) -> str:
+    """A block's text as it reaches the screen, without styling."""
+    from rich.console import Console
+
+    console = Console(width=width, record=True, force_terminal=False, file=io.StringIO())
+    console.print(renderable)
+    return console.export_text()
+
 
 MODEL = "anthropic/claude-sonnet-4.5"
 
@@ -312,12 +323,12 @@ async def test_prompt_stays_editable_and_queues_while_streaming(
         assert user_messages == ["first", "follow up"]
 
 
-async def test_permission_modal_shows_the_diff_before_approval(
+async def test_permission_prompt_shows_the_diff_before_approval(
     hx_home: Path, tmp_path: Path
 ) -> None:
     """An approval prompt that hides what it is approving is not consent."""
     from hx.permissions.engine import PermissionRequest
-    from hx.tui.widgets.permission import PermissionModal
+    from hx.tui.widgets.permission import PermissionPrompt
 
     diff = "--- a.py\n+++ a.py\n@@ -1 +1 @@\n-old line\n+new line\n"
     request = PermissionRequest(
@@ -331,9 +342,10 @@ async def test_permission_modal_shows_the_diff_before_approval(
 
     app = build_app(tmp_path)
     async with app.run_test() as pilot:
-        app.push_screen(PermissionModal(request))
+        prompt = PermissionPrompt(request)
+        app._transcript.add_permission_prompt(prompt)
         await pilot.pause()
-        rendered = str(app.screen.query_one("#permission-detail").query_one(Static).render())
+        rendered = _plain(prompt.render())
 
     # Numbered the way the transcript numbers a diff, so the line being approved
     # is the line the user will later see changed.
@@ -341,24 +353,28 @@ async def test_permission_modal_shows_the_diff_before_approval(
     assert "+    1 new line" in rendered
 
 
-async def test_permission_modal_returns_the_chosen_scope(hx_home: Path, tmp_path: Path) -> None:
+async def test_asking_inline_returns_the_chosen_scope(hx_home: Path, tmp_path: Path) -> None:
     from hx.permissions.engine import GrantScope, PermissionRequest
-    from hx.tui.widgets.permission import PermissionModal
+    from hx.tui.widgets.permission import PermissionPrompt
 
     request = PermissionRequest(
         "Bash", "rm -rf build", {}, True, "Bash(rm -rf build)", "rm -rf build"
     )
     app = build_app(tmp_path)
-    answers: list[Any] = []
 
     async with app.run_test() as pilot:
-        app.push_screen(PermissionModal(request), callback=answers.append)
+        asking = asyncio.ensure_future(app.ask_permission(request))
         await pilot.pause()
         await pilot.press("a")
-        await pilot.pause()
+        answer = await asking
 
-    assert answers[0].allowed
-    assert answers[0].scope is GrantScope.ALWAYS
+        assert answer.allowed
+        assert answer.scope is GrantScope.ALWAYS
+
+        # The block stays behind, so a long session can show what it granted.
+        (prompt,) = app._transcript.query(PermissionPrompt).results()
+        assert prompt.answered
+        assert "always allowed" in _plain(prompt.render())
 
 
 async def test_status_bar_marks_a_degraded_sandbox(hx_home: Path, tmp_path: Path) -> None:
@@ -373,12 +389,14 @@ async def test_status_bar_marks_a_degraded_sandbox(hx_home: Path, tmp_path: Path
         assert "no-sandbox" in str(app.query_one(StatusBar).render())
 
 
-async def test_the_ui_still_works_while_a_modal_is_open(hx_home: Path, tmp_path: Path) -> None:
-    """query_one resolves against the *active* screen, so a widget lookup made
-    while a permission modal is up would raise and kill whichever worker made
-    it. The main widgets are bound once at mount instead."""
+async def test_the_ui_still_works_while_a_prompt_is_pending(hx_home: Path, tmp_path: Path) -> None:
+    """A pending approval must not take the app hostage.
+
+    The modal this replaced pushed a screen, so `query_one` resolved against it
+    and every main-widget lookup raised while it was up. Asking inline leaves
+    the main screen active, so the rest of the UI keeps working.
+    """
     from hx.permissions.engine import PermissionRequest
-    from hx.tui.widgets.permission import PermissionModal
 
     request = PermissionRequest(
         "Bash", "rm -rf build", {}, True, "Bash(rm -rf build)", "rm -rf build"
@@ -386,11 +404,10 @@ async def test_the_ui_still_works_while_a_modal_is_open(hx_home: Path, tmp_path:
     app = build_app(tmp_path)
 
     async with app.run_test() as pilot:
-        app.push_screen(PermissionModal(request))
+        asking = asyncio.ensure_future(app.ask_permission(request))
         await pilot.pause()
-        assert app.screen is not app.screen_stack[0]
+        assert app.screen is app.screen_stack[0]
 
-        # Every one of these would have raised NoMatches before.
         app.notice("still reachable")
         app._working.start("thinking")
         await app.action_todos_toggle()
@@ -400,11 +417,14 @@ async def test_the_ui_still_works_while_a_modal_is_open(hx_home: Path, tmp_path:
         assert "still reachable" in notices
         assert app._working.busy
 
+        await pilot.press("n")
+        assert not (await asking).allowed
+
 
 async def test_a_subagent_prompt_names_who_is_asking(hx_home: Path, tmp_path: Path) -> None:
-    """An approval modal with no visible origin is not an informed approval."""
+    """An approval prompt with no visible origin is not an informed approval."""
     from hx.permissions.engine import PermissionRequest
-    from hx.tui.widgets.permission import PermissionModal
+    from hx.tui.widgets.permission import PermissionPrompt
 
     request = PermissionRequest(
         "Bash",
@@ -417,11 +437,12 @@ async def test_a_subagent_prompt_names_who_is_asking(hx_home: Path, tmp_path: Pa
     )
     app = build_app(tmp_path)
     async with app.run_test() as pilot:
-        app.push_screen(PermissionModal(request, origin=request.origin))
+        prompt = PermissionPrompt(request, origin=request.origin)
+        app._transcript.add_permission_prompt(prompt)
         await pilot.pause()
-        title = str(app.screen.query_one("#permission-title", Static).render())
+        rendered = _plain(prompt.render())
 
-    assert "explore subagent" in title
+    assert "explore subagent" in rendered
 
 
 async def test_every_planned_command_is_registered(hx_home: Path, tmp_path: Path) -> None:
@@ -1342,3 +1363,194 @@ async def test_prompt_command_shows_the_prompt_in_force(hx_home: Path, tmp_path:
     # The built-in prompt is what a fresh resolve returns, so the in-use text
     # differs from it and the command must say the override applies next run.
     assert "applies next run" in text
+
+
+async def test_clear_renames_the_session_it_leaves_behind(hx_home: Path, tmp_path: Path) -> None:
+    """``/clear`` closes a session as surely as quitting does, and the name it
+    carries into ``/resume`` should describe the whole of it."""
+    from hx.core.session import load_session as reload
+
+    app = build_app(tmp_path, [text_turn("hello there"), text_turn("Retry logic for uploads")])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.submit("add retries to the uploader")
+        await pilot.pause(0.1)
+
+        old_id = app.loop.session.meta.session_id
+        await app.submit("/clear")
+        for _ in range(30):
+            await pilot.pause()
+
+        assert app.loop.session.meta.session_id != old_id
+        assert reload(old_id).meta.title == "Retry logic for uploads"
+
+
+async def test_clear_on_an_empty_session_asks_for_no_name(hx_home: Path, tmp_path: Path) -> None:
+    """Naming a session nobody used is spend with nothing behind it."""
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.submit("/clear")
+        for _ in range(10):
+            await pilot.pause()
+
+        assert app.loop.provider.requests == []
+
+
+async def test_typing_during_a_turn_queues_with_the_way_out(hx_home: Path, tmp_path: Path) -> None:
+    """The queue is where a user who changed their mind lands, so the notice
+    has to say how to get the message out of it."""
+    from hx.providers.fake import Pause
+
+    pause = Pause()
+    script = [[StreamDelta(text="working"), pause, StreamEnd(StopReason.END_TURN, TurnUsage())]]
+    app = build_app(tmp_path, script)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.submit("start something")
+        await app.loop.provider.wait_for_requests(1)
+        await app.submit("and then this")
+        await pilot.pause()
+
+        assert app.queued == ["and then this"]
+        assert app._status.queued == 1
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        assert "queued (1)" in notices
+        assert "steer" in notices
+
+        pause.release()
+        await pilot.pause()
+
+
+async def test_alt_enter_steers_the_draft_into_the_running_turn(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    from hx.providers.fake import Pause
+
+    pause = Pause()
+    script = [
+        [
+            StreamDelta(text="rewriting everything"),
+            pause,
+            StreamEnd(StopReason.END_TURN, TurnUsage()),
+        ],
+        text_turn("stopped"),
+    ]
+    app = build_app(tmp_path, script)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.submit("clean up the parser")
+        await app.loop.provider.wait_for_requests(1)
+
+        app._prompt.text = "only the tokeniser"
+        await pilot.press("alt+enter")
+        await app.loop.provider.wait_for_requests(2)
+        pause.release()
+        await pilot.pause()
+
+        sent = app.loop.provider.requests[1].context.messages
+        assert "only the tokeniser" in sent[-1].text()
+        assert app.queued == []
+
+
+async def test_alt_enter_with_nothing_typed_steers_the_queue(hx_home: Path, tmp_path: Path) -> None:
+    """The correction is already typed and waiting; retyping it is the bug."""
+    from hx.providers.fake import Pause
+
+    pause = Pause()
+    script = [
+        [StreamDelta(text="working"), pause, StreamEnd(StopReason.END_TURN, TurnUsage())],
+        text_turn("stopped"),
+    ]
+    app = build_app(tmp_path, script)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.submit("start something")
+        await app.loop.provider.wait_for_requests(1)
+        await app.submit("no, do the other thing")
+        await pilot.pause()
+
+        await pilot.press("alt+enter")
+        await app.loop.provider.wait_for_requests(2)
+        pause.release()
+        await pilot.pause()
+
+        assert app.queued == []
+        assert app._status.queued == 0
+        sent = app.loop.provider.requests[1].context.messages
+        assert "no, do the other thing" in sent[-1].text()
+
+
+async def test_queue_command_lists_and_promotes(hx_home: Path, tmp_path: Path) -> None:
+    """One queued message goes now; the rest keep waiting their turn."""
+    from hx.providers.fake import Pause
+
+    # The second turn parks too, so the queue can be inspected while the steered
+    # turn is still running rather than after it has drained.
+    first, second = Pause(), Pause()
+    script = [
+        [StreamDelta(text="working"), first, StreamEnd(StopReason.END_TURN, TurnUsage())],
+        [StreamDelta(text="stopped"), second, StreamEnd(StopReason.END_TURN, TurnUsage())],
+    ]
+    app = build_app(tmp_path, script)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.submit("start something")
+        await app.loop.provider.wait_for_requests(1)
+        await app.submit("first waiting")
+        await app.submit("second waiting")
+        await pilot.pause()
+
+        await app.submit("/queue")
+        await pilot.pause()
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        assert "1. first waiting" in notices
+        assert "2. second waiting" in notices
+
+        await app.submit("/queue steer 2")
+        await app.loop.provider.wait_for_requests(2)
+
+        assert app.queued == ["first waiting"]
+        assert app._status.queued == 1
+        sent = app.loop.provider.requests[1].context.messages
+        assert "second waiting" in sent[-1].text()
+
+        # Let the steered turn finish with an empty queue, so shutdown is not
+        # racing a submission the test never meant to make.
+        app.clear_queue()
+        first.release()
+        second.release()
+        await pilot.pause()
+
+
+async def test_queue_clear_drops_everything_waiting(hx_home: Path, tmp_path: Path) -> None:
+    from hx.providers.fake import Pause
+
+    pause = Pause()
+    script = [[StreamDelta(text="working"), pause, StreamEnd(StopReason.END_TURN, TurnUsage())]]
+    app = build_app(tmp_path, script)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.submit("start something")
+        await app.loop.provider.wait_for_requests(1)
+        await app.submit("forget this")
+        await pilot.pause()
+
+        await app.submit("/queue clear")
+        await pilot.pause()
+
+        assert app.queued == []
+        assert app._status.queued == 0
+        pause.release()
+        await pilot.pause()
+
+
+async def test_steering_with_nothing_queued_says_so(hx_home: Path, tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("alt+enter")
+        await pilot.pause()
+
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        assert "Nothing queued to steer" in notices

@@ -6,6 +6,7 @@ diff - rather than on which renderer class produced it.
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from rich.console import Console
@@ -32,7 +33,7 @@ DIFF = """\
 
 
 def _plain(renderable: object, width: int = 100) -> str:
-    console = Console(width=width, record=True, force_terminal=False)
+    console = Console(width=width, record=True, force_terminal=False, file=io.StringIO())
     console.print(renderable)
     return console.export_text()
 

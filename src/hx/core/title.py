@@ -24,16 +24,18 @@ if TYPE_CHECKING:
 TITLE_MAX_TOKENS = 32
 """A title is a handful of words; anything longer is a summary nobody asked for."""
 
-MAX_TITLE_CHARS = 60
+MAX_TITLE_CHARS = 50
+"""A session row is read at a glance, in a list. Longer names stop being names."""
 TRANSCRIPT_CHARS = 2_000
 
 TITLE_PROMPT = """\
 Name this coding session so it can be recognised in a list of sessions.
 
 Rules:
-- At most 6 words.
+- One line, at most 6 words.
 - Name the concrete subject: the file, feature, bug or command in play.
-- No quotes, no trailing period, no prefix like "Session:" or "Title:".
+- Name what the session did overall, not only how it opened.
+- No quotes, no punctuation at the end, no prefix like "Session:" or "Title:".
 - Reply with the name and nothing else.
 
 --- conversation ---
@@ -82,12 +84,17 @@ async def generate_title(
 
 
 def clean_title(raw: str) -> str:
-    """Strip the decoration models add to a name, and cap its length."""
+    """Strip the decoration models add to a name, and cap its length.
+
+    Whitespace is collapsed first, so a model that answers in two lines still
+    yields one: a name with a newline in it breaks the row it is rendered in.
+    """
     text = " ".join(raw.split())
     for prefix in ("Title:", "Session:", "Name:"):
         if text.lower().startswith(prefix.lower()):
             text = text[len(prefix) :].strip()
-    text = text.strip("\"'`").rstrip(".").strip()
+    text = text.lstrip("-*• ").strip()
+    text = text.strip("\"'`").rstrip(".:").strip()
     if len(text) > MAX_TITLE_CHARS:
         text = text[:MAX_TITLE_CHARS].rstrip() + "…"
     return text
