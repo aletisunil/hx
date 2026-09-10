@@ -28,6 +28,17 @@ the project follows [semantic versioning](https://semver.org/).
 
 ---
 
+## [0.1.8] - 2026-09-10
+
+### Fixed
+
+- Publishes everything listed under 0.1.7. That tag was cut but never shipped:
+  a type annotation on the transcript's pending-approval list failed the lint
+  job, so the release build stopped before it reached PyPI. `hx upgrade` moves
+  from 0.1.6 straight to here.
+
+---
+
 ## [0.1.7] - 2026-09-10
 
 ### Added
@@ -223,7 +234,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/aletisunil/hx/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/aletisunil/hx/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/aletisunil/hx/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/aletisunil/hx/compare/v0.1.4...v0.1.5
