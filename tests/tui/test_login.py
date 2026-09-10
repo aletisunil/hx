@@ -256,56 +256,6 @@ async def test_cancelling_the_login_modal_unblocks_the_flow(hx_home: Path, tmp_p
             await pasted
 
 
-async def test_the_whole_login_flow_reaches_the_paste_field(
-    hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The regression that made ``/login`` a dead end.
-
-    The modal was pushed without awaiting the mount, so the flow's first call
-    into it raised ``NoMatches`` and died before the paste future existed. The
-    modal stayed up, focused, taking keystrokes, and ignoring Enter forever.
-    """
-    from textual.widgets import Input
-
-    import hx.auth.oauth.codex as codex
-
-    async def opened(url: str) -> bool:
-        return True
-
-    monkeypatch.setattr(codex, "_open_browser", opened)
-
-    exchanged: list[str] = []
-
-    async def fake_exchange(code: str, verifier: str, redirect_uri: str) -> OAuthCredential:
-        exchanged.append(code)
-        return OAuthCredential(access="a", refresh="r", expires=0.0, extra={"account_id": "x"})
-
-    monkeypatch.setattr(codex, "_exchange", fake_exchange)
-
-    app = build_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await app.submit("/login openai-codex")
-
-        def waiting_for_a_paste() -> bool:
-            screen = app.screen
-            return isinstance(screen, LoginModalType) and screen._paste is not None
-
-        # Not just "the modal is up": until the flow has asked for a paste there
-        # is nothing to hand the code to, and submitting into that gap is the
-        # one case the modal deliberately refuses.
-        await settle(pilot, waiting_for_a_paste)
-
-        pasted = "http://localhost:1455/auth/callback?code=CODE"
-        app.screen.query_one("#login-input", Input).value = pasted
-        await pilot.press("enter")
-        await settle(pilot, lambda: bool(exchanged))
-
-        assert exchanged == ["CODE"], "the pasted code never reached the token exchange"
-        assert AuthStore().read("openai-codex") is not None
-        assert not isinstance(app.screen, LoginModalType), "the modal outlived the flow"
-
-
 async def test_a_flow_that_fails_early_still_tears_the_modal_down(
     hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

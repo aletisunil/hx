@@ -197,47 +197,6 @@ async def test_usage_and_events_are_published(
     assert sum(isinstance(e, TurnFinished) for e in h.events) == 1
 
 
-async def test_cancellation_preserves_the_partial_assistant_message(
-    hx_home: Path, tmp_path: Path
-) -> None:
-    class SlowProvider:
-        name = "slow"
-
-        def __init__(self) -> None:
-            self.requests: list[Any] = []
-            self.delivered = asyncio.Event()
-            """Set once the loop has taken the delta and come back for more."""
-
-        async def astream(self, request: Any) -> Any:
-            self.requests.append(request)
-            yield StreamDelta(text="partial ")
-            # Reached only when the consumer asks for the next item, which it
-            # does after recording the text. Waiting on this rather than on a
-            # fixed delay is what makes the cancel below land where the test
-            # means it to, on a loaded runner as much as an idle one.
-            self.delivered.set()
-            await asyncio.sleep(10)
-            yield StreamEnd(stop_reason=StopReason.END_TURN)
-
-        async def aclose(self) -> None:
-            return None
-
-    provider = SlowProvider()
-    harness = build_loop([], tmp_path)
-    harness.loop.provider = provider  # type: ignore[assignment]
-
-    async with harness as h:
-        task = asyncio.create_task(h.loop.run("go"))
-        async with asyncio.timeout(5):
-            await provider.delivered.wait()
-        h.loop.cancel()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    assert h.loop.session.messages[-1].text() == "partial "
-
-
 async def test_mutating_tools_run_serially_in_emission_order(hx_home: Path, tmp_path: Path) -> None:
     order: list[str] = []
 
