@@ -78,3 +78,36 @@ def test_the_session_id_follows_a_new_session() -> None:
     codex = provider([auth("at-1")], session_id="old")
     codex.set_session_id("new")
     assert codex.session_id == "new"
+
+
+def test_a_model_this_account_cannot_run_says_what_to_do_about_it() -> None:
+    """The backend phrases it as though the model id were wrong. It is not:
+    entitlement is per model and per account, and the account's own list is
+    something HX can go and ask for."""
+    from hx.providers.codex import _error_message
+
+    body = '{"error": {"message": "The model `gpt-5.3-codex` is not supported when using Codex with a ChatGPT account."}}'
+    message = _error_message(400, body)
+
+    assert "not entitled" in message
+    assert "/models refresh" in message
+
+
+async def test_the_effort_is_asked_for_per_model_not_fixed_per_session() -> None:
+    """The model can change without the route changing, and two models differ
+    on what they will accept."""
+    from hx.providers.codex import DEFAULT_EFFORT
+
+    asked: list[str] = []
+
+    def effort(model_id: str) -> str | None:
+        asked.append(model_id)
+        return {"openai-codex/deep": "xhigh"}.get(model_id)
+
+    codex = provider([auth("at-1")], effort=effort)
+    assert codex.effort("openai-codex/deep") == "xhigh"
+    assert codex.effort("openai-codex/shallow") is None
+    assert asked == ["openai-codex/deep", "openai-codex/shallow"]
+
+    # Nothing wired in: one depth every Codex model accepts, as before.
+    assert provider([auth("at-1")]).effort("openai-codex/anything") == DEFAULT_EFFORT

@@ -21,8 +21,22 @@ from hx.tui.widgets.autocomplete import Autocomplete, Candidate, Completion
 MAX_HISTORY = 500
 
 PLACEHOLDER = "Ask HX…  (/ for commands)"
-RUNNING_PLACEHOLDER = "Ask HX…  (Enter queues · alt+enter steers)"
-STEERING_PLACEHOLDER = "Ask HX…  (Enter steers · alt+enter queues)"
+
+
+def running_placeholder(*, enter_steers: bool = False) -> str:
+    """What the prompt says while a turn is running.
+
+    The steer key is read from the registry rather than spelled out here: it is
+    rebindable, and ``display_key`` writes it the way the platform does - the
+    same key reads ``alt+enter`` on Linux and ``option+enter`` on macOS, which
+    is the only name on a Mac keyboard. Hard-coding one of the two made this
+    line disagree with ``/help`` on one platform or the other.
+    """
+    steer = KEYMAP.primary("tui.input.steer")
+    if enter_steers:
+        return f"Ask HX…  (Enter steers · {steer} queues)"
+    return f"Ask HX…  (Enter queues · {steer} steers)"
+
 
 #: Actions that have to beat TextArea's own bindings. A focused widget wins in
 #: Textual, so ctrl+c would copy and ctrl+d would delete a character before the
@@ -415,7 +429,7 @@ class PromptInput(TextArea):
         if not running:
             self.set_placeholder(PLACEHOLDER)
             return
-        self.set_placeholder(STEERING_PLACEHOLDER if enter_steers else RUNNING_PLACEHOLDER)
+        self.set_placeholder(running_placeholder(enter_steers=enter_steers))
 
 
 class FileCompleter:

@@ -1554,3 +1554,20 @@ async def test_steering_with_nothing_queued_says_so(hx_home: Path, tmp_path: Pat
 
         notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
         assert "Nothing queued to steer" in notices
+
+
+async def test_the_cost_breakdown_reconciles_requests_with_prompts(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A bare count of calls invited the question of why /resume reported a
+    different, larger number: one counts provider requests, the other counts
+    wire-format records, and a single prompt produces many of both."""
+    app = build_app(tmp_path)
+    async with app.run_test() as pilot:
+        await app.submit("hello")
+        await pilot.pause()
+        await app.submit("/cost")
+        await pilot.pause()
+
+        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        assert "API requests across 1 prompt" in notices

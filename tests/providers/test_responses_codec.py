@@ -130,7 +130,7 @@ def test_user_and_assistant_text_use_the_right_content_type() -> None:
 def test_reasoning_is_replayed_ahead_of_the_text_it_produced() -> None:
     """Order matters: the API rejects a reasoning item that trails its message."""
     signature = reasoning_signature(
-        [{"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque", "summary": ["drop me"]}]
+        [{"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque", "summary": []}]
     )
     items = encode_input(
         [
@@ -141,7 +141,31 @@ def test_reasoning_is_replayed_ahead_of_the_text_it_produced() -> None:
         ]
     )
     assert [item["type"] for item in items] == ["reasoning", "message"]
-    assert items[0] == {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque"}
+    assert items[0] == {
+        "type": "reasoning",
+        "id": "rs_1",
+        "encrypted_content": "opaque",
+        "summary": [],
+    }
+
+
+def test_a_reasoning_item_is_replayed_with_the_summary_the_api_requires() -> None:
+    """The server rejects a reasoning item that arrives without ``summary``.
+
+    Sessions recorded before it was stored have none, so the field is restored
+    on the way back in rather than only being kept on the way out.
+    """
+    stored = json.dumps([{"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque"}])
+
+    assert decode_reasoning(stored) == [
+        {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque", "summary": []}
+    ]
+    kept = json.loads(
+        reasoning_signature(
+            [{"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque", "summary": ["s"]}]
+        )
+    )
+    assert kept[0]["summary"] == ["s"]
 
 
 def test_reasoning_without_a_payload_is_dropped_not_sent_as_text() -> None:

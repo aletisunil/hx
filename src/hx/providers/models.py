@@ -1,15 +1,18 @@
 """Model catalogue: context windows, pricing, and caching behaviour.
 
-Populated from OpenRouter's ``/api/v1/models``, cached to
-``~/.hx/models.json`` and refreshed on demand (``/models refresh``) or when the
-cache is older than a day. The registry drives the ``/model`` picker, the
-context gauge, and cost fallback maths.
+Populated from OpenRouter's ``/api/v1/models`` and, for a signed-in ChatGPT
+subscription, from the Codex backend's own per-account catalogue
+(:mod:`hx.providers.codex_catalogue`). Cached to ``~/.hx/models.json`` and
+refreshed on demand (``/models refresh``), after a login, or when the cache is
+older than a day. The registry drives the ``/model`` picker, the context gauge,
+and cost fallback maths.
 """
 
 from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -56,15 +59,36 @@ class ModelInfo:
     is_subscription: bool = False
     """Billed to a subscription rather than per token, so cost display is
     meaningless and the picker says so instead of printing $0.00."""
+    reasoning_levels: tuple[str, ...] = ()
+    """Reasoning efforts this model accepts, weakest first.
+
+    Empty means unknown, not none: only the Codex catalogue publishes this, and
+    an unknown list is left to the backend to judge rather than guessed at."""
+    default_reasoning_level: str | None = None
+    """The effort the vendor picks when the caller does not. Per model - the
+    same account's models differ - so it is carried rather than assumed."""
 
 
-#: Models reachable on a ChatGPT Plus/Pro subscription. Hard-coded because the
-#: Codex backend has no catalogue endpoint to ask; figures track models.dev.
-CODEX_MODELS: tuple[ModelInfo, ...] = (
+CODEX_NAMESPACE = "openai-codex/"
+
+CODEX_FALLBACK_CONTEXT = 200_000
+CODEX_FALLBACK_OUTPUT = 64_000
+"""Assumed for a Codex model HX was told about but does not ship. There is
+nothing to ask for the real figures, and a conservative guess costs an accurate
+context gauge rather than the use of the model."""
+
+_CODEX_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+"""Shape of the fallback entries' reasoning levels; the real ones are fetched."""
+
+#: Fallback list of models on a ChatGPT Plus/Pro subscription, used only when
+#: the backend's own catalogue cannot be reached - see
+#: :mod:`hx.providers.codex_catalogue`. Entitlement is per account, so this is a
+#: guess about someone else's subscription; it is what HX saw last, not a promise.
+CODEX_MODELS: tuple[ModelInfo, ...] = tuple(
     ModelInfo(
-        id="openai-codex/gpt-5.3-codex",
-        name="GPT-5.3 Codex (ChatGPT subscription)",
-        context_window=400_000,
+        id=f"{CODEX_NAMESPACE}{slug}",
+        name=name,
+        context_window=272_000,
         max_output_tokens=128_000,
         pricing=ModelPricing(),
         cache_mode=CacheMode.IMPLICIT,
@@ -72,19 +96,16 @@ CODEX_MODELS: tuple[ModelInfo, ...] = (
         supports_reasoning=True,
         provider_id="openai-codex",
         is_subscription=True,
-    ),
-    ModelInfo(
-        id="openai-codex/gpt-5.3-codex-spark",
-        name="GPT-5.3 Codex Spark (ChatGPT subscription)",
-        context_window=128_000,
-        max_output_tokens=32_000,
-        pricing=ModelPricing(),
-        cache_mode=CacheMode.IMPLICIT,
-        supports_tools=True,
-        supports_reasoning=True,
-        provider_id="openai-codex",
-        is_subscription=True,
-    ),
+        reasoning_levels=levels,
+        default_reasoning_level=default_level,
+    )
+    for slug, name, levels, default_level in (
+        ("gpt-6-astra", "GPT-6-Astra", (*_CODEX_EFFORTS, "ultra"), "low"),
+        ("gpt-5.6-sol", "GPT-5.6-Sol", (*_CODEX_EFFORTS, "ultra"), "low"),
+        ("gpt-5.6-terra", "GPT-5.6-Terra", (*_CODEX_EFFORTS, "ultra"), "medium"),
+        ("gpt-5.6-luna", "GPT-5.6-Luna", _CODEX_EFFORTS, "medium"),
+        ("gpt-5.5", "GPT-5.5", _CODEX_EFFORTS[:-1], "medium"),
+    )
 )
 
 
@@ -100,6 +121,24 @@ class ModelRegistry:
     CACHE_TTL_SECONDS: ClassVar[float] = 86_400.0
 
     def __init__(self) -> None:
+        self._extra_codex: list[ModelInfo] = []
+        """Codex ids from settings. Merged alongside :data:`CODEX_MODELS`."""
+        self._requested_effort: str | None = None
+        """``models.reasoning_effort`` from settings. Clamped per model, since
+        the strongest effort one model offers is off the scale on another."""
+        self._codex: tuple[ModelInfo, ...] | None = None
+        """What the Codex backend said this account may call, or ``None`` when
+        it has not answered yet. ``None`` falls back to :data:`CODEX_MODELS`."""
+        self._codex_account: str | None = None
+        """Which ChatGPT account :attr:`_codex` describes. Entitlement is per
+        account, so a list fetched for another login means nothing here."""
+        self.codex_error: str | None = None
+        """Why the Codex catalogue could not be fetched, in one line.
+
+        Separate from :attr:`refresh_error` because it is not fatal: the rest
+        of the catalogue still refreshes, and the fallback list still offers
+        models. It is surfaced so a picker missing the model someone just paid
+        for says why."""
         self._models: dict[str, ModelInfo] = {}
         self._fetched_at: float = 0.0
         self._loaded = False
@@ -158,14 +197,19 @@ class ModelRegistry:
         return (time.time() - self._fetched_at) > self.CACHE_TTL_SECONDS
 
     async def refresh(self, resolver: AuthResolver) -> None:
-        """Fetch the live OpenRouter catalogue and rewrite the cache.
+        """Fetch every route's live catalogue and rewrite the cache.
 
-        Only OpenRouter has a catalogue to fetch; a user signed in to Codex
-        alone still gets that route's models, which are static.
+        A Codex failure is recorded but not raised: it costs the account's real
+        model list, which the fallback stands in for, and there is no reason
+        for it to also cost the OpenRouter catalogue that did arrive.
         """
         from hx.auth.store import OPENROUTER
         from hx.net import describe
         from hx.providers.openrouter import fetch_models
+
+        # Asked for first: a broken OpenRouter key raises below, and it must not
+        # also cost the subscription its model list.
+        await self._refresh_codex(resolver)
 
         fetched: dict[str, ModelInfo] = {}
         if resolver.has_credential(OPENROUTER):
@@ -191,10 +235,139 @@ class ModelRegistry:
         self._fetched_at = time.time()
         self.save_cache()
 
+    async def _refresh_codex(self, resolver: AuthResolver) -> None:
+        """Ask the Codex backend which models this login may actually call.
+
+        The answer is per account and cannot be derived from the plan name, so
+        it is asked for rather than assumed. An empty answer is treated as a
+        failure to answer: it is what a client version the backend does not
+        recognise returns, and emptying the picker is worse than showing the
+        list HX already had.
+        """
+        from hx.net import describe
+        from hx.providers import codex_catalogue
+        from hx.providers.registry import CODEX
+
+        if not resolver.has_credential(CODEX):
+            # Signed out: the previous account's entitlements are not ours.
+            self._codex = None
+            self._codex_account = None
+            self.codex_error = None
+            return
+        try:
+            auth = await resolver.resolve(CODEX)
+        except Exception as exc:
+            self.codex_error = describe(exc)
+            return
+
+        account = str(auth.extra.get("account_id") or "") or None
+        if account != self._codex_account:
+            # A different login, so what is cached describes somebody else's
+            # subscription. Dropped before the fetch rather than after it: if
+            # the fetch then fails, the shipped list is a better answer than
+            # another account's entitlements.
+            self._codex = None
+            self._codex_account = None
+
+        try:
+            fetched = await codex_catalogue.fetch_models(auth)
+        except Exception as exc:
+            self.codex_error = describe(exc)
+            return
+        self.codex_error = None
+        if fetched:
+            self._codex = tuple(fetched)
+            self._codex_account = account
+
     def _merge_static(self) -> None:
-        """Add the routes whose catalogues do not come off the wire."""
-        for info in CODEX_MODELS:
+        """Add the Codex route, whose models are never in the OpenRouter fetch."""
+        for info in self._codex if self._codex is not None else CODEX_MODELS:
             self._models[info.id] = info
+        for info in self._extra_codex:
+            # Never over a fetched entry. Settings are read before the cache is,
+            # so an id named in both arrives here as an escape hatch carrying
+            # guessed figures and no reasoning levels - which laid over the real
+            # catalogue entry would cost that model its context window and its
+            # `/effort` levels.
+            self._models.setdefault(info.id, info)
+
+    def set_reasoning_effort(self, effort: str | None) -> None:
+        """Ask for an effort on every model that offers one.
+
+        ``None`` - the default - leaves each model at the depth its vendor
+        chose for it, which is what the catalogue publishes per model.
+        """
+        self._requested_effort = effort or None
+
+    @property
+    def requested_effort(self) -> str | None:
+        """What was asked for, before any model clamped it. ``None`` means each
+        model is left at its own default."""
+        return self._requested_effort
+
+    def displayed_effort(self, model_id: str) -> str | None:
+        """The effort to show for a model, or ``None`` when showing one would
+        be a claim HX cannot back.
+
+        A model whose levels are unknown - anything off the Codex catalogue -
+        gets nothing rather than the raw setting: OpenRouter ignores the field
+        entirely today, and a status bar reading ``high`` over a route that
+        never sends it is worse than a status bar that is quiet.
+        """
+        if not self.get_or_default(model_id).reasoning_levels:
+            return None
+        return self.reasoning_effort(model_id)
+
+    def reasoning_effort(self, model_id: str) -> str | None:
+        """The effort to send for one model, or ``None`` to leave it to the
+        backend. Providers call this per request: the model can change without
+        the route changing, and the two models differ on what they accept."""
+        from hx.providers.codex_catalogue import resolve_effort
+
+        return resolve_effort(self._requested_effort, self.get_or_default(model_id))
+
+    def add_codex_models(self, model_ids: Iterable[str]) -> list[str]:
+        """Register Codex ids from settings, on top of whatever was fetched.
+
+        The backend's catalogue is the real list, so this is now an escape
+        hatch rather than the only way in: an id the account can call but the
+        catalogue does not advertise, or a session with no network to ask.
+
+        The figures are guesses: nothing here can ask how big a window an
+        unknown model has. That costs an accurate context gauge, not the
+        ability to use the model.
+
+        Returns the ids added, ignoring any already known.
+        """
+        added: list[str] = []
+        for raw in model_ids:
+            bare = raw.strip()
+            if not bare:
+                continue
+            model_id = bare if bare.startswith(CODEX_NAMESPACE) else f"{CODEX_NAMESPACE}{bare}"
+            known = self._codex if self._codex is not None else CODEX_MODELS
+            if model_id in {info.id for info in self._extra_codex} or any(
+                info.id == model_id for info in known
+            ):
+                continue
+            self._extra_codex.append(
+                ModelInfo(
+                    id=model_id,
+                    name=f"{model_id.removeprefix(CODEX_NAMESPACE)} (ChatGPT subscription)",
+                    context_window=CODEX_FALLBACK_CONTEXT,
+                    max_output_tokens=CODEX_FALLBACK_OUTPUT,
+                    pricing=ModelPricing(),
+                    cache_mode=CacheMode.IMPLICIT,
+                    supports_tools=True,
+                    supports_reasoning=True,
+                    provider_id="openai-codex",
+                    is_subscription=True,
+                )
+            )
+            added.append(model_id)
+        if added and self._loaded:
+            self._merge_static()
+        return added
 
     def load_cache(self) -> None:
         """Read the cache, and register the static routes either way.
@@ -213,6 +386,7 @@ class ModelRegistry:
             except (OSError, json.JSONDecodeError):
                 payload = {}
         self._fetched_at = payload.get("fetched_at", 0.0)
+        self._load_cached_codex(payload.get("codex"))
         for entry in payload.get("models", []):
             try:
                 info = parse_model_entry(entry)
@@ -221,10 +395,48 @@ class ModelRegistry:
             self._models[info.id] = info
         self._merge_static()
 
+    def _load_cached_codex(self, payload: Any) -> None:
+        """Restore the account's fetched Codex list from the cache file.
+
+        Kept out of the ``models`` list because these are cached per account
+        and carry no pricing: they are what one login was entitled to, not a
+        public catalogue. A malformed block is dropped whole and the fallback
+        list stands in - half an entitlement list is worse than none.
+        """
+        if not isinstance(payload, dict):
+            return
+        entries = payload.get("models")
+        if not isinstance(entries, list):
+            return
+        try:
+            restored = tuple(
+                ModelInfo(
+                    id=str(entry["id"]),
+                    name=str(entry.get("name") or entry["id"]),
+                    context_window=int(entry["context_window"]),
+                    max_output_tokens=int(entry["max_output_tokens"]),
+                    pricing=ModelPricing(),
+                    cache_mode=CacheMode.IMPLICIT,
+                    supports_tools=True,
+                    supports_reasoning=bool(entry.get("supports_reasoning", True)),
+                    provider_id="openai-codex",
+                    is_subscription=True,
+                    reasoning_levels=tuple(str(level) for level in entry.get("levels", ())),
+                    default_reasoning_level=entry.get("default_level") or None,
+                )
+                for entry in entries
+            )
+        except (KeyError, TypeError, ValueError):
+            return
+        if restored:
+            self._codex = restored
+            account = payload.get("account_id")
+            self._codex_account = str(account) if account else None
+
     def save_cache(self) -> None:
         path = models_cache_file()
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
+        payload: dict[str, Any] = {
             "fetched_at": self._fetched_at,
             "models": [
                 {
@@ -246,6 +458,22 @@ class ModelRegistry:
                 if not m.is_subscription
             ],
         }
+        if self._codex is not None:
+            payload["codex"] = {
+                "account_id": self._codex_account,
+                "models": [
+                    {
+                        "id": m.id,
+                        "name": m.name,
+                        "context_window": m.context_window,
+                        "max_output_tokens": m.max_output_tokens,
+                        "supports_reasoning": m.supports_reasoning,
+                        "levels": list(m.reasoning_levels),
+                        "default_level": m.default_reasoning_level,
+                    }
+                    for m in self._codex
+                ],
+            }
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
         tmp.replace(path)

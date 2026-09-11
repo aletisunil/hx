@@ -36,6 +36,18 @@ MODEL_PREFIX = "openai-codex/"
 
 TokenSource = Callable[[], Awaitable[ResolvedAuth]]
 
+EffortSource = Callable[[str], str | None]
+"""How deeply to reason, asked per model rather than fixed per session.
+
+Which models a Codex login can call is a property of the account, and each one
+publishes its own reasoning levels and its own default, so the answer changes
+when the model does - and the model can change without the route changing.
+"""
+
+DEFAULT_EFFORT = "medium"
+"""Used when nothing was wired in to answer. Every Codex model listed so far
+accepts it, and it is the depth HX asked for before efforts were per model."""
+
 
 class CodexProvider:
     name = "openai-codex"
@@ -48,14 +60,14 @@ class CodexProvider:
         *,
         base_url: str = API_BASE,
         session_id: str | None = None,
-        reasoning_effort: str | None = "medium",
+        effort: EffortSource | None = None,
         timeout: float = 600.0,
         max_retries: int = 3,
     ) -> None:
         self._auth = auth
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id
-        self.reasoning_effort = reasoning_effort
+        self.effort: EffortSource = effort if effort is not None else _default_effort
         self.max_retries = max_retries
         self._client = async_client(timeout=httpx.Timeout(timeout, connect=15.0))
 
@@ -67,7 +79,7 @@ class CodexProvider:
         body = build_body(
             request,
             session_id=self.session_id,
-            reasoning_effort=self.reasoning_effort,
+            reasoning_effort=self.effort(request.model),
         )
         body["model"] = wire_model(request.model)
         url = f"{self.base_url}{RESPONSES_PATH}"
@@ -141,6 +153,10 @@ class CodexProvider:
         await self._client.aclose()
 
 
+def _default_effort(model_id: str) -> str:
+    return DEFAULT_EFFORT
+
+
 async def _iter_sse(response: httpx.Response) -> AsyncIterator[dict[str, Any]]:
     """Yield decoded ``data:`` payloads.
 
@@ -162,8 +178,16 @@ async def _iter_sse(response: httpx.Response) -> AsyncIterator[dict[str, Any]]:
 
 
 def wire_model(model_id: str) -> str:
-    """Strip the HX provider namespace: ``openai-codex/gpt-5.3-codex`` -> ``gpt-5.3-codex``."""
+    """Strip the HX provider namespace: ``openai-codex/gpt-5.5`` -> ``gpt-5.5``."""
     return model_id[len(MODEL_PREFIX) :] if model_id.startswith(MODEL_PREFIX) else model_id
+
+
+#: What the backend says when this account is not entitled to this model. It is
+#: per model, not per account: one ``plus`` login has been seen streaming
+#: ``gpt-5.6-sol`` and refusing ``gpt-5.3-codex`` in the same second. The
+#: catalogue in :mod:`hx.providers.codex_catalogue` is what knows the
+#: difference, so the answer is to re-ask it, not to guess another id.
+_NOT_ENTITLED = "is not supported when using Codex with a ChatGPT account"
 
 
 def _error_message(status: int, body: str) -> str:
@@ -171,6 +195,18 @@ def _error_message(status: int, body: str) -> str:
         return (
             "Codex rejected the credential (HTTP "
             f"{status}). Run `hx auth login openai-codex` to sign in again."
+        )
+    if status == 400 and _NOT_ENTITLED in body:
+        # Names the remedy rather than a cause: the backend will say which
+        # models this account does have, and that list is a question HX can
+        # ask, not one the user should have to answer.
+        return (
+            "This ChatGPT account is not entitled to this model. Entitlement is "
+            "per model and per account, and the account's real list is what the "
+            "Codex backend serves - run `/models refresh` and pick one of the "
+            "openai-codex models it offers. If the list comes back empty, check "
+            "that the subscription is active and Codex is enabled for the account "
+            "(chatgpt.com/codex); `hx auth` shows which account the stored login is on."
         )
     try:
         parsed = json.loads(body)

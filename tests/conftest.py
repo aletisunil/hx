@@ -21,8 +21,14 @@ def hx_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture()
-def project(tmp_path: Path) -> Path:
-    """An empty project directory with a ``.hx`` config dir."""
+def project(tmp_path: Path, hx_home: Path) -> Path:
+    """An empty project directory with a ``.hx`` config dir.
+
+    Depends on ``hx_home`` because everything HX writes for a project - the
+    permission grants, the record of which migrations have run - now lives
+    under ``$HX_HOME/projects/<slug>``. Without the isolated home, a test that
+    grants a permission writes into the developer's real ``~/.hx``.
+    """
     root = tmp_path / "project"
     (root / ".hx").mkdir(parents=True)
     return root

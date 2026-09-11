@@ -5,6 +5,12 @@ Two lines, the way pi lays them out::
     ~/src/hx (main)                                    default · sandbox seatbelt
     ↑57k ↓3.5k R244k W12k CH81% $0.1652 1.4s 12%/200k (auto)   claude-sonnet-4.5
 
+A model on a subscription route is tagged ``gpt-5.6-terra (sub)`` and its cost
+field reads ``sub`` rather than ``$0.00``: which credential paid for a turn has
+to be readable off the bar, not inferred from a model id it does not show. The
+reasoning depth rides along as ``· high`` where the model has one, since it is
+set per model and changes underfoot when the model does.
+
 The first line answers "where am I and what am I allowed to do"; the second
 answers "what is this costing and how much room is left". Cache and cost are
 the point of the bar: they are the only place the user can see whether the
@@ -45,6 +51,10 @@ class StatusBar(Static):
         self.cost_usd = 0.0
         self.latency_ms = 0.0
         self.mode = "default"
+        self.effort: str | None = None
+        """Reasoning depth in force, or ``None`` where the model has no say in
+        it. Shown because it is resolved per model: switching models can change
+        it without anyone typing anything."""
         self.subscription = False
         """True on a route billed to a subscription, where a per-token cost is
         not a number the user can act on."""
@@ -67,6 +77,12 @@ class StatusBar(Static):
     def set_model(self, model_id: str, *, subscription: bool = False) -> None:
         self.model = model_id
         self.subscription = subscription
+        self.refresh()
+
+    def set_effort(self, effort: str | None) -> None:
+        if effort == self.effort:
+            return
+        self.effort = effort
         self.refresh()
 
     def set_context(self, used: int, window: int) -> None:
@@ -179,7 +195,23 @@ class StatusBar(Static):
         return field
 
     def _model_field(self) -> Text:
-        return Text(self.model.split("/")[-1] or "no model", style=THEME.fg("muted"))
+        """``gpt-5.6-terra (sub)`` - the bare name, plus the route when it is not
+        the default one.
+
+        The namespace is stripped because ``anthropic/claude-sonnet-4.5`` is
+        four wasted columns on the line that matters most. But stripping it from
+        ``openai-codex/gpt-5.6-terra`` also erased the only on-screen trace of
+        which account a turn was billed to, so the route comes back as a tag.
+        """
+        if not self.model:
+            return Text("no model", style=THEME.fg("muted"))
+
+        field = Text(self.model.split("/")[-1], style=THEME.fg("muted"))
+        if self.subscription:
+            field.append(" (sub)", style=THEME.fg("success"))
+        if self.effort:
+            field.append(f" · {self.effort}", style=THEME.fg("dim"))
+        return field
 
     def _context_field(self) -> Text:
         """``12%/200k`` - percentage first, because that is the number that decides

@@ -85,3 +85,53 @@ def test_help_lists_keys_from_the_registry() -> None:
     rows = dict(help_keys())
     assert rows["esc"] == KEYMAP.description("app.interrupt")
     assert "ctrl+o/ctrl+r" in rows
+
+
+def test_a_priority_action_shares_its_key_without_that_being_a_conflict() -> None:
+    """``ctrl+c`` copies a transcript selection and otherwise clears the prompt.
+
+    That is a chain, not a collision: the priority action skips when it has
+    nothing to do and the key carries on. The conflict check exists to catch a
+    key that silently does nothing, which is the opposite.
+    """
+    keymap = load_keymap(overrides={})
+
+    assert keymap.keys_for("app.selection.copy") == ("ctrl+c",)
+    assert keymap.keys_for("app.clear") == ("ctrl+c",)
+    assert keymap.problems == []
+
+
+def test_two_priority_actions_on_one_key_still_conflict() -> None:
+    """Whichever loses never runs, which is the thing worth reporting."""
+    from hx.keys import KeyBinding, _conflicts
+
+    bindings = {
+        "a.one": KeyBinding("a.one", ("ctrl+c",), "one", priority=True),
+        "a.two": KeyBinding("a.two", ("ctrl+c",), "two", priority=True),
+    }
+    keys = {action: binding.default_keys for action, binding in bindings.items()}
+
+    assert _conflicts(keys, bindings) == ["ctrl+c is bound to a.one and a.two"]
+
+
+def test_the_priority_flag_reaches_textual() -> None:
+    """Without it the binding is checked after the focused widget's own, and
+    the prompt - a TextArea that binds ctrl+c - is always the focused widget."""
+    assert bindings_for("app.selection.copy")[0].priority is True
+    assert bindings_for("app.clear")[0].priority is False
+
+
+def test_the_prompt_spells_the_steer_key_the_way_help_does() -> None:
+    """One key, two names: ``alt`` on Linux, ``option`` on a Mac keyboard.
+
+    The placeholder used to hard-code ``alt+enter``, so on macOS - where
+    ``display_key`` writes ``option`` - the prompt and ``/help`` named the same
+    key differently, and a rebind left the placeholder pointing at a key that
+    no longer steered.
+    """
+    from hx.tui.widgets.input import running_placeholder
+
+    steer = KEYMAP.primary("tui.input.steer")
+
+    assert f"{steer} steers" in running_placeholder()
+    assert f"{steer} queues" in running_placeholder(enter_steers=True)

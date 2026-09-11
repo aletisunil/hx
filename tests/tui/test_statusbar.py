@@ -129,3 +129,34 @@ def test_a_long_model_id_still_leaves_the_stats_readable() -> None:
     bar.model = "some-vendor/an-extremely-long-experimental-model-name-preview"
     stats = _lines(bar, 60)[1]
     assert len(stats) <= 60
+
+
+def test_a_subscription_model_is_tagged_rather_than_priced() -> None:
+    """Which credential paid for a turn has to be readable off the bar: the
+    stripped model name is otherwise the only trace of the route, and it is
+    gone."""
+    bar = _bar()
+    bar.set_model("openai-codex/gpt-5.6-terra", subscription=True)
+
+    text = " ".join(_lines(bar, 140))
+    assert "gpt-5.6-terra (sub)" in text
+
+
+def test_the_reasoning_depth_rides_next_to_the_model() -> None:
+    """It is resolved per model, so switching models can change it without
+    anyone typing anything."""
+    bar = _bar()
+    bar.set_model("openai-codex/gpt-5.6-terra", subscription=True)
+    bar.set_effort("high")
+
+    assert "gpt-5.6-terra (sub) · high" in " ".join(_lines(bar, 140))
+
+    # A route with no say in it says nothing rather than claiming a depth.
+    bar.set_effort(None)
+    assert "· high" not in " ".join(_lines(bar, 140))
+
+
+def test_a_bar_with_no_model_yet_still_renders() -> None:
+    bar = _bar()
+    bar.set_model("", subscription=False)
+    assert "no model" in " ".join(_lines(bar, 140))

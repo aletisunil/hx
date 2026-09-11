@@ -193,6 +193,122 @@ def parse_status(raw: str) -> tuple[str, dict[str, str]]:
     return branch, entries
 
 
+class BranchWatcher:
+    """The current branch, cheap enough to poll on a UI timer.
+
+    The status bar read the branch once at startup and never again, so checking
+    out in another terminal or an IDE left HX displaying a branch the user had
+    not been on for an hour.
+
+    Polling ``git rev-parse`` on a timer would spawn a subprocess every second
+    for the life of the session, so this reads ``HEAD`` the way git writes it
+    instead: one stat, and a short read only when the file has actually moved.
+    A checkout always rewrites ``HEAD``, which is what makes the stat a
+    sufficient guard.
+    """
+
+    def __init__(self, cwd: Path) -> None:
+        self.cwd = cwd
+        self._head: Path | None = None
+        self._resolved = False
+        self._stamp: tuple[int, float] | None = None
+        self._branch: str | None = None
+
+    @property
+    def branch(self) -> str | None:
+        """The last value :meth:`poll` read. ``None`` outside a repository."""
+        return self._branch
+
+    def poll(self) -> str | None:
+        """Re-read the branch if ``HEAD`` moved, and return it either way."""
+        head = self._head_file()
+        if head is None:
+            return None
+        try:
+            stat = head.stat()
+        except OSError:
+            # The repository went away mid-session - a `rm -rf .git`, an
+            # unmounted volume. Keep the last known branch rather than blanking
+            # the bar on a transient stat failure.
+            return self._branch
+
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        if stamp == self._stamp:
+            return self._branch
+        self._stamp = stamp
+        self._branch = _branch_from_head(head)
+        return self._branch
+
+    def _head_file(self) -> Path | None:
+        """Locate ``HEAD``, once. ``None`` when this is not a repository.
+
+        ``.git`` is a directory in a normal clone and a file holding
+        ``gitdir: <path>`` in a worktree or submodule; both have to work, since
+        a worktree is exactly where branch switching happens most.
+        """
+        if self._resolved:
+            return self._head
+        self._resolved = True
+
+        marker = self.cwd / ".git"
+        git_dir: Path | None = None
+        if marker.is_dir():
+            git_dir = marker
+        elif marker.is_file():
+            try:
+                pointer = marker.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                pointer = ""
+            if pointer.startswith("gitdir:"):
+                target = Path(pointer[len("gitdir:") :].strip())
+                git_dir = target if target.is_absolute() else (self.cwd / target)
+        else:
+            # Not the repository root: ask git where the directory is, once.
+            git_dir = _git_dir_of(self.cwd)
+
+        if git_dir is None:
+            return None
+        head = git_dir / "HEAD"
+        self._head = head if head.is_file() else None
+        return self._head
+
+
+def _branch_from_head(head: Path) -> str | None:
+    """Parse a ``HEAD`` file: a symbolic ref, or a raw sha when detached."""
+    try:
+        content = head.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if content.startswith("ref:"):
+        ref = content[4:].strip()
+        prefix = "refs/heads/"
+        return ref[len(prefix) :] if ref.startswith(prefix) else ref or None
+    return DETACHED if content else None
+
+
+def _git_dir_of(cwd: Path) -> Path | None:
+    """``git rev-parse --git-dir``, run once when ``cwd`` is not the root.
+
+    The only subprocess this watcher ever spawns, and only for a session
+    started in a subdirectory.
+    """
+    try:
+        result = subprocess.run(
+            ("git", "rev-parse", "--absolute-git-dir"),
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    path = result.stdout.strip()
+    return Path(path) if path else None
+
+
 def git_injector(
     watcher: GitWatcher,
     *,

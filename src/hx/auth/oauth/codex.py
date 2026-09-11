@@ -8,7 +8,10 @@ no browser.
 
 The account id the Codex backend requires is not returned by the token
 endpoint - it is a claim inside the access token, so it is decoded here and
-kept alongside the credential.
+kept alongside the credential. The subscription plan rides along for the same
+reason: OAuth succeeds for *any* ChatGPT account, including a free one that
+cannot call a single Codex model, and the backend only says so on the first
+turn - as an opaque "model is not supported" 400.
 """
 
 from __future__ import annotations
@@ -48,6 +51,15 @@ DEVICE_TIMEOUT_SECONDS = 15 * 60
 
 #: The access token is a JWT; the account id lives under this namespaced claim.
 JWT_CLAIM = "https://api.openai.com/auth"
+
+FREE_PLAN = "free"
+"""The one plan known to complete the OAuth flow and then have every Codex
+model rejected. Read at sign-in rather than discovered on the first failed
+turn."""
+
+UNKNOWN_PLAN = "unknown"
+"""A plan name the token did not carry. Treated as entitled: an unrecognised
+new plan must not lock a paying user out of a route they can use."""
 
 ORIGINATOR = "hx"
 HTTP_TIMEOUT = 30.0
@@ -117,6 +129,49 @@ def account_id_from_token(access_token: str) -> str:
     return account_id
 
 
+def plan_from_token(access_token: str) -> str:
+    """The ChatGPT plan the token was minted for, lowercased.
+
+    Returns :data:`UNKNOWN_PLAN` when the claim is absent or the token is not a
+    readable JWT - never raises. The plan decides whether Codex models are
+    usable, and a login is still worth keeping when only that answer is
+    missing.
+    """
+    parts = access_token.split(".")
+    if len(parts) != 3:
+        return UNKNOWN_PLAN
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (binascii.Error, ValueError, json.JSONDecodeError):
+        return UNKNOWN_PLAN
+    plan = (claims.get(JWT_CLAIM) or {}).get("chatgpt_plan_type")
+    return plan.lower() if isinstance(plan, str) and plan else UNKNOWN_PLAN
+
+
+def plan_of(credential: OAuthCredential) -> str:
+    """Cached on the credential; falls back to decoding the token.
+
+    A credential saved before plans were recorded has no ``plan`` in ``extra``,
+    so the token is read instead of reporting the login as unusable.
+    """
+    cached = credential.extra.get("plan")
+    if isinstance(cached, str) and cached:
+        return cached.lower()
+    return plan_from_token(credential.access)
+
+
+def is_entitled(plan: str) -> bool:
+    """Whether ``plan`` can run Codex models.
+
+    Only ``free`` is refused. An unrecognised plan counts as entitled: the list
+    of paid tiers changes, and an allow-list would turn every new one into a
+    lockout of a subscription that actually works.
+    """
+    return plan.lower() not in {FREE_PLAN, ""}
+
+
 def account_id(credential: OAuthCredential) -> str:
     """Cached on the credential; falls back to decoding the token."""
     cached = credential.extra.get("account_id")
@@ -137,7 +192,13 @@ def _credential(token: dict[str, Any]) -> OAuthCredential:
         access=access,
         refresh=refresh,
         expires=time.time() + lifetime,
-        extra={"account_id": account_id_from_token(access)},
+        extra={
+            "account_id": account_id_from_token(access),
+            # Recorded alongside the account id and re-derived on every refresh
+            # for the same reason: an upgrade from Free to Plus has to be
+            # visible without signing in again.
+            "plan": plan_from_token(access),
+        },
     )
 
 

@@ -21,6 +21,7 @@ from textual.widgets import Static
 
 from hx.tui.renderers import ToolCall, renderer_for
 from hx.tui.theme import THEME, syntax_style
+from hx.tui.widgets.selectable import SelectableBlock
 
 if TYPE_CHECKING:
     from hx.tui.widgets.permission import PermissionPrompt
@@ -67,12 +68,16 @@ def markdown(source: str) -> Markdown:
     )
 
 
-class MessageBlock(Static):
+class MessageBlock(Static, SelectableBlock):
     """One assistant, user or thinking message.
 
     Markdown is re-rendered from the accumulated buffer rather than per delta:
     a partial fenced block is not parseable, so incremental parsing would flick
     between two layouts on every token.
+
+    :class:`~hx.tui.widgets.selectable.SelectableBlock` is what makes a mouse
+    selection over this block copy anything: the render is a Rich renderable,
+    which Textual cannot extract text from on its own.
     """
 
     def __init__(self, role: str, text: str = "") -> None:
@@ -96,7 +101,7 @@ class MessageBlock(Static):
         return Padding(markdown(self.buffer or ""), (0, 1))
 
 
-class ToolBlock(Static):
+class ToolBlock(Static, SelectableBlock):
     """One tool call, drawn by that tool's own renderer.
 
     The block is tinted by outcome - pending, succeeded, failed - because that
@@ -197,8 +202,15 @@ class ToolBlock(Static):
         return Padding(content, (0, 1), style=THEME.bg(background))
 
 
-class Notice(Static):
-    """A system notice: compaction, model switch, degraded sandbox, errors."""
+class Notice(Static, SelectableBlock):
+    """A system notice: compaction, model switch, degraded sandbox, errors.
+
+    Selectable through the same mixin as the blocks around it. A notice renders
+    as ``Text``, so Textual could extract it unaided - but from the unwrapped
+    source, whose line breaks are not the ones on screen. Reading the drawn
+    lines makes a selection across a wrapped notice copy what it looks like it
+    copies.
+    """
 
     LEVELS: ClassVar[dict[str, str]] = {
         "info": "muted",

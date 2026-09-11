@@ -11,10 +11,12 @@ state it produces is whatever replaying the file yields. That is what keeps
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,19 @@ class SessionMeta:
     """How long the transcript was when the title was written, so closing the
     session can tell whether the name still describes it."""
     message_count: int = 0
+    """Every message record: the user's prompts, the assistant's replies, and
+    the tool-result messages that ride the user role to match the provider wire
+    format. Roughly twice the number of provider calls, and no relation at all
+    to the number of things the user typed - see :attr:`prompt_count`."""
+    prompt_count: int = 0
+    """Distinct prompts the user actually sent.
+
+    The number ``/resume`` leads with, because ``57 msgs`` on a session with
+    three prompts describes the wire format rather than the conversation.
+    Counted the way :meth:`Session.rewind_points` counts: by identity, so a
+    compaction re-appending the turns it kept does not count those prompts
+    twice.
+    """
     parent_id: str | None = None
     """Set for subagent sessions, which nest under their parent's directory."""
 
@@ -69,12 +84,22 @@ class Session:
     checkpoints: list[Checkpoint] = field(default_factory=list)
     """Pre-images of the files HX changed, in the order they were changed."""
     _pending: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    _prompt_keys: set[tuple[float, str]] = field(default_factory=set, repr=False)
+    """Identities of the prompts seen so far, maintained as they arrive.
+
+    A set rather than a counter because a compaction re-appends the turns it
+    kept: the same prompt is appended a second time, verbatim, and a counter
+    would read that as the user having asked twice.
+    """
 
     def append(self, message: Message) -> None:
         """Add to memory and flush the JSONL line. Ephemeral messages are recorded
         but marked so resume does not replay stale reminders."""
         self.messages.append(message)
+        if _is_prompt(message):
+            self._prompt_keys.add(_prompt_identity(message))
         self.meta.message_count = len(self.messages)
+        self.meta.prompt_count = len(self._prompt_keys)
         self.meta.updated_at = time.time()
         self._pending.append({"kind": "message", "data": to_dict(message)})
         self.flush()
@@ -143,7 +168,7 @@ class Session:
             if not _is_prompt(message):
                 continue
             text = message.text().strip()
-            identity = (message.timestamp, text)
+            identity = _prompt_identity(message)
             if identity in seen:
                 continue
             seen.add(identity)
@@ -178,9 +203,21 @@ class Session:
         replayed = load_session(self.meta.session_id)
         self.messages = replayed.messages
         self.checkpoints = replayed.checkpoints
+        self._recount_prompts()
         self.meta.message_count = len(self.messages)
         self.meta.updated_at = time.time()
         self._write_meta()
+
+    def _recount_prompts(self) -> None:
+        """Rebuild the prompt identities from the messages in hand.
+
+        For the paths that replace the whole transcript at once - a replay, a
+        rewind - where maintaining the set incrementally has nothing to add to.
+        """
+        self._prompt_keys = {
+            _prompt_identity(message) for message in self.messages if _is_prompt(message)
+        }
+        self.meta.prompt_count = len(self._prompt_keys)
 
     def active_messages(self) -> list[Message]:
         """Messages eligible for context: not ``compacted``, not ``ephemeral``."""
@@ -203,6 +240,17 @@ class Session:
         path.write_text(json.dumps(asdict(self.meta), indent=2))
 
 
+def _prompt_identity(message: Message) -> tuple[float, str]:
+    """What makes two prompt records the same prompt.
+
+    A compaction re-appends the turns it kept verbatim - same text, same
+    timestamp - so text and timestamp together are what tell a second copy from
+    a second prompt. The same identity :meth:`Session.rewind_points` uses, so
+    the count and the rewind list can never disagree about what a prompt is.
+    """
+    return (message.timestamp, message.text().strip())
+
+
 def _is_prompt(message: Message) -> bool:
     return (
         message.role == "user"
@@ -210,6 +258,18 @@ def _is_prompt(message: Message) -> bool:
         and not message.metadata.get("compaction_summary")
         and not any(isinstance(block, ToolResultBlock) for block in message.content)
     )
+
+
+def _meta_from_json(raw: dict[str, Any]) -> SessionMeta:
+    """Build a :class:`SessionMeta` from a ``meta.json`` payload.
+
+    Unknown keys are dropped rather than raising: the file gains fields over
+    time, and a session written by a newer HX has to stay resumable by an older
+    one. Missing keys fall back to the dataclass defaults, which is what lets a
+    session recorded before ``prompt_count`` existed still list.
+    """
+    fields = {f.name for f in dataclass_fields(SessionMeta)}
+    return SessionMeta(**{k: v for k, v in raw.items() if k in fields})
 
 
 def new_session(cwd: Path, model: str, parent_id: str | None = None) -> Session:
@@ -251,7 +311,7 @@ def load_session(session_id: str) -> Session:
     if not meta_path.exists():
         raise SessionNotFound(session_id)
 
-    meta = SessionMeta(**json.loads(meta_path.read_text()))
+    meta = _meta_from_json(json.loads(meta_path.read_text()))
     session = Session(meta=meta)
     if not path.exists():
         return session
@@ -295,6 +355,7 @@ def load_session(session_id: str) -> Session:
             elif kind == "rewind":
                 _rewind(session, int(record["data"]["to"]), compactions)
     session.meta.message_count = len(session.messages)
+    session._recount_prompts()
     return session
 
 
@@ -333,7 +394,7 @@ def list_sessions(cwd: Path | None = None, limit: int = 20) -> list[SessionMeta]
         if not meta_path.is_file():
             continue
         try:
-            meta = SessionMeta(**json.loads(meta_path.read_text()))
+            meta = _meta_from_json(json.loads(meta_path.read_text()))
         except (OSError, json.JSONDecodeError, TypeError):
             continue
         if cwd is not None and meta.cwd != str(cwd.resolve()):
@@ -343,7 +404,48 @@ def list_sessions(cwd: Path | None = None, limit: int = 20) -> list[SessionMeta]
         metas.append(meta)
 
     metas.sort(key=lambda m: m.updated_at, reverse=True)
-    return metas[:limit]
+    # Backfilled after the cut, never before it: the backfill replays a
+    # transcript, and doing that for every session on the machine to render a
+    # list of five is a stall the user waits through.
+    return [_backfilled(meta) for meta in metas[:limit]]
+
+
+BACKFILL_MAX_BYTES = 4_000_000
+"""Largest transcript worth replaying just to count its prompts.
+
+The backfill happens once per session, but it happens while the user is waiting
+on the ``/resume`` list. A transcript past this keeps the old ``N msgs`` shape
+until something resumes it and writes the count out as a side effect.
+"""
+
+
+def _backfilled(meta: SessionMeta) -> SessionMeta:
+    """Fill in ``prompt_count`` for a session recorded before it existed.
+
+    Sessions predating the field would otherwise list as ``31 msgs`` forever -
+    the very shape the count replaced - until each was resumed. The answer is
+    written back to ``meta.json``, so a given session is replayed for this at
+    most once.
+    """
+    if meta.prompt_count or meta.message_count <= 0:
+        return meta
+
+    transcript = session_transcript_file(meta.session_id)
+    try:
+        if transcript.stat().st_size > BACKFILL_MAX_BYTES:
+            return meta
+    except OSError:
+        return meta
+
+    try:
+        counted = load_session(meta.session_id)
+    except (SessionNotFound, OSError, json.JSONDecodeError):
+        return meta
+
+    meta.prompt_count = counted.meta.prompt_count
+    with contextlib.suppress(OSError):
+        counted._write_meta()
+    return meta
 
 
 def latest_session(cwd: Path) -> SessionMeta | None:

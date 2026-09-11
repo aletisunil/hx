@@ -452,6 +452,12 @@ def migrate_legacy_rules(cwd: Path) -> list[str]:
     Single-segment rules are left alone: they are already usable, and widening
     a hand-written ``Bash(git status)`` would grant more than its author asked.
 
+    Only the two files HX owns are rewritten - the user's and this machine's
+    project layer, both under ``$HX_HOME``. The project's shared
+    ``settings.json`` is read and reported on, never edited: it belongs to the
+    repository, and a tool that quietly rewrites a checked-in file hands its
+    user an unexplained diff.
+
     Returns one line per rule rewritten, naming the rule before and after.
     Editing a user's permission file is not something to do behind their back,
     so every change is spelled out rather than summarised as a count: the whole
@@ -460,10 +466,11 @@ def migrate_legacy_rules(cwd: Path) -> list[str]:
     from hx.config import ConfigError, read_settings_file, write_settings_file
     from hx.paths import project_local_settings_file, project_settings_file, user_settings_file
 
+    shared = project_settings_file(cwd)
     notices: list[str] = []
     for path in (
         user_settings_file(),
-        project_settings_file(cwd),
+        shared,
         project_local_settings_file(cwd),
     ):
         try:
@@ -489,12 +496,22 @@ def migrate_legacy_rules(cwd: Path) -> list[str]:
 
         if not changes:
             continue
+        listed = "\n".join(f"  {change}" for change in changes)
+
+        if path == shared:
+            notices.append(
+                f"{path} has whole-command permission rules, which match one exact "
+                f"command and nothing else:\n{listed}\n"
+                "  It is your repository's file, so HX has not touched it - rewrite "
+                "them yourself, or remove them and grant again."
+            )
+            continue
+
         permissions["allow"] = widened
         try:
             write_settings_file(path, data)
         except OSError:
             continue  # read-only settings are not worth failing startup over
-        listed = "\n".join(f"  {change}" for change in changes)
         notices.append(f"Rewrote whole-command permission rules in {path}:\n{listed}")
     return notices
 
@@ -518,13 +535,19 @@ def _widen_rule(text: str) -> list[str] | None:
 
 
 def persist_allow_rule(rule_text: str, cwd: Path) -> None:
-    """Append an allow rule to the project's *local* settings file.
+    """Append an allow rule to this machine's settings for this project.
 
-    Not ``settings.json``: that file is the project's shared configuration, and
+    Not the project's ``settings.json``: that file is shared configuration, and
     a grant is one person's decision on one machine - frequently spelling out
     absolute paths from their home directory. Writing there committed those
-    decisions to everyone who cloned the repo, or left them stranded in a file
-    the user had deliberately checked in.
+    decisions to everyone who cloned the repo.
+
+    And not inside the repository at all. The local layer lives under
+    ``$HX_HOME/projects/<slug>`` (see
+    :func:`hx.paths.project_local_settings_file`), so answering a permission
+    prompt never puts a file in the user's checkout for them to notice in a
+    diff and wonder about - which also means HX no longer has any reason to
+    write a ``.gitignore`` on their behalf.
     """
     from hx.config import read_settings_file, write_settings_file
     from hx.paths import project_local_settings_file
@@ -536,34 +559,6 @@ def persist_allow_rule(rule_text: str, cwd: Path) -> None:
     if rule_text not in allow:
         allow.append(rule_text)
     write_settings_file(path, data)
-    ignore_local_settings(cwd)
-
-
-def ignore_local_settings(cwd: Path) -> None:
-    """Make ``.hx`` exclude the local layer, via its own ``.gitignore``.
-
-    Its own, rather than the repository's: the project's ``.gitignore`` belongs
-    to the project, and appending to it would show up as an uninvited change in
-    the user's next diff. A ``.gitignore`` inside ``.hx`` is HX's file to own,
-    and git applies it just the same.
-
-    Best effort - a repo that cannot be written to is not a reason to refuse a
-    permission the user granted.
-    """
-    from hx.paths import project_gitignore_file
-
-    path = project_gitignore_file(cwd)
-    entry = "settings.local.json"
-    try:
-        existing = path.read_text() if path.is_file() else ""
-        if entry in existing.split():
-            return
-        prefix = "" if not existing or existing.endswith("\n") else "\n"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{prefix}{entry}\n")
-    except OSError:
-        return
 
 
 class InvalidRule(Exception):

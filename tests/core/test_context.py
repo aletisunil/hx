@@ -85,6 +85,19 @@ def test_project_context_reports_cwd(project: Path) -> None:
     assert str(project) in build_project_context(project)
 
 
+def test_project_context_carries_agents_md(project: Path) -> None:
+    (project / "AGENTS.md").write_text("run the tests with pytest")
+    context = build_project_context(project)
+    assert "# Project instructions (AGENTS.md)" in context
+    assert "run the tests with pytest" in context
+
+
+def test_project_context_without_agents_md_says_nothing_about_instructions(
+    project: Path,
+) -> None:
+    assert "Project instructions" not in build_project_context(project)
+
+
 def test_the_built_in_prompt_is_used_when_nothing_overrides_it(
     hx_home: Path, project: Path
 ) -> None:

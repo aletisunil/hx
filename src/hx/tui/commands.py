@@ -149,7 +149,14 @@ def _reachable(ctx: CommandContext, models: list[Any]) -> list[Any]:
 
 
 async def _switch_model(ctx: CommandContext, model_id: str) -> None:
-    """Switching resets the cached prefix - the new model has its own cache."""
+    """Switching resets the cached prefix - the new model has its own cache.
+
+    Nothing here second-guesses whether the route will accept the model. The
+    subscription plan on the credential looked like it would answer that and
+    does not - Codex refuses every model on a ``plus`` account exactly as it
+    does on a ``free`` one - so a switch that might fail is allowed to fail,
+    where the provider's own error can say so.
+    """
     from hx.auth.resolve import ExpiredCredential, MissingCredential
 
     info = ctx.app.models.get_or_default(model_id)
@@ -160,8 +167,15 @@ async def _switch_model(ctx: CommandContext, model_id: str) -> None:
         return
     ctx.app.loop.set_model(model_id, info)
     ctx.app.query_one_status().set_model(model_id, subscription=info.is_subscription)
+    # Resolved per model, so the depth can change without the user asking: the
+    # bar has to say so at the moment it happens.
+    ctx.app.query_one_status().set_effort(ctx.app.models.displayed_effort(model_id))
     ctx.app.query_one_status().set_context(0, info.context_window)
-    billing = "subscription" if info.is_subscription else f"via {info.provider_id}"
+    billing = (
+        f"subscription, {info.provider_id}"
+        if info.is_subscription
+        else f"per token, via {info.provider_id}"
+    )
     ctx.app.notice(
         f"Model set to {model_id} ({format_tokens(info.context_window)} context, "
         f"cache: {info.cache_mode}, {billing})",
@@ -178,8 +192,29 @@ def _persist_model_choice(ctx: CommandContext, model_id: str) -> None:
     """
     import os
 
+    if not _persist_model_setting(ctx, "model", model_id, "the model choice"):
+        return
+
+    # A higher layer setting models.model would quietly win next session, so say so
+    # rather than letting the user believe the choice stuck.
+    if os.environ.get("HX_MODEL"):
+        ctx.app.notice("$HX_MODEL overrides this on the next start.", "warning")
+        return
+    _warn_if_pinned(ctx, "model")
+
+
+def _persist_model_setting(ctx: CommandContext, key: str, value: Any, label: str) -> bool:
+    """Write one ``models.<key>`` to the user settings file.
+
+    ``label`` names the setting the way the user asked for it - "the model
+    choice", "the reasoning effort" - because a failure notice naming
+    ``models.reasoning_effort`` describes the file rather than what was lost.
+
+    Returns False when it could not be written, having said so: the session has
+    already changed either way, and losing the file is not worth losing the turn.
+    """
     from hx.config import ConfigError, read_settings_file, write_settings_file
-    from hx.paths import project_local_settings_file, project_settings_file, user_settings_file
+    from hx.paths import user_settings_file
 
     path = user_settings_file()
     try:
@@ -188,19 +223,26 @@ def _persist_model_choice(ctx: CommandContext, model_id: str) -> None:
         if not isinstance(models, dict):
             models = {}
             data["models"] = models
-        models["model"] = model_id
+        if value is None:
+            models.pop(key, None)
+        else:
+            models[key] = value
         write_settings_file(path, data)
     except (ConfigError, OSError) as exc:
-        ctx.app.notice(f"Could not save the model choice to {path}: {exc}", "warning")
-        return
+        ctx.app.notice(f"Could not save {label} to {path}: {exc}", "warning")
+        return False
+    return True
 
-    # A higher layer setting models.model would quietly win next session, so say so
-    # rather than letting the user believe the choice stuck.
-    if os.environ.get("HX_MODEL"):
-        ctx.app.notice("$HX_MODEL overrides this on the next start.", "warning")
-        return
-    # Both project layers sit above the user file, so either one pinning a model
-    # would quietly win next session.
+
+def _warn_if_pinned(ctx: CommandContext, key: str) -> None:
+    """Say when a project layer will overrule what was just saved.
+
+    Both project layers sit above the user file, so either one pinning the same
+    key would quietly win next session.
+    """
+    from hx.config import ConfigError, read_settings_file
+    from hx.paths import project_local_settings_file, project_settings_file
+
     for path in (
         project_settings_file(ctx.settings.cwd),
         project_local_settings_file(ctx.settings.cwd),
@@ -209,13 +251,77 @@ def _persist_model_choice(ctx: CommandContext, model_id: str) -> None:
             models = read_settings_file(path).get("models")
         except ConfigError:
             continue
-        pinned = models.get("model") if isinstance(models, dict) else None
+        pinned = models.get(key) if isinstance(models, dict) else None
         if pinned:
             ctx.app.notice(
-                f"{path} pins models.model to {pinned} and overrides this on the next start.",
+                f"{path} pins models.{key} to {pinned} and overrides this on the next start.",
                 "warning",
             )
             return
+
+
+async def cmd_effort(ctx: CommandContext, args: str) -> None:
+    """``/effort [level|default]`` - how hard the model should think.
+
+    Takes effect on the next turn: the provider asks for the depth per request,
+    so nothing has to be rebuilt and a turn already running is left alone.
+    """
+    from hx.providers.codex_catalogue import EFFORT_ORDER
+    from hx.tui.widgets.palette import DEFAULT_EFFORT_ROW, EffortPicker
+
+    model_id = ctx.app.loop.model
+    info = ctx.app.models.get_or_default(model_id)
+    choice = args.strip().lower()
+
+    if not choice:
+        if not info.reasoning_levels:
+            ctx.app.notice(
+                f"{model_id} publishes no reasoning levels, so there is nothing to pick "
+                "from. `/models refresh` fetches them for a Codex model.",
+                "warning",
+            )
+            return
+        picked = await ctx.app.push_screen_wait(EffortPicker(info, ctx.app.models.requested_effort))
+        if picked is None:
+            return
+        choice = picked
+
+    if choice in (DEFAULT_EFFORT_ROW, "auto"):
+        level: str | None = None
+    elif choice in EFFORT_ORDER:
+        level = choice
+    else:
+        known = ", ".join((DEFAULT_EFFORT_ROW, *EFFORT_ORDER))
+        ctx.app.notice(f"Unknown effort {choice!r}. Try one of: {known}", "warning")
+        return
+
+    ctx.app.models.set_reasoning_effort(level)
+    effective = ctx.app.models.reasoning_effort(model_id)
+    ctx.app.query_one_status().set_effort(ctx.app.models.displayed_effort(model_id))
+    _persist_model_setting(ctx, "reasoning_effort", level, "the reasoning effort")
+    _warn_if_pinned(ctx, "reasoning_effort")
+
+    name = model_id.split("/")[-1]
+    if level is None:
+        ctx.app.notice(
+            f"Reasoning effort left to each model. {name} runs at {effective or 'its own default'}.",
+            "success",
+        )
+    elif effective != level:
+        # Clamped rather than refused, and silence here would read as the
+        # deeper setting having taken.
+        ctx.app.notice(
+            f"Reasoning effort set to {level}. {name} tops out at {effective}, so it runs there.",
+            "success",
+        )
+    else:
+        ctx.app.notice(f"Reasoning effort set to {level}.", "success")
+    if not info.reasoning_levels and level is not None:
+        ctx.app.notice(
+            f"{name} does not publish its reasoning levels, so this is sent as asked "
+            "and the route decides. Only Codex models use it today.",
+            "warning",
+        )
 
 
 async def cmd_models(ctx: CommandContext, args: str) -> None:
@@ -230,6 +336,13 @@ async def cmd_models(ctx: CommandContext, args: str) -> None:
     except Exception as exc:
         ctx.app.notice(f"Model refresh failed: {describe(exc)}", "error")
         return
+    if ctx.app.models.codex_error:
+        # Not fatal - the rest of the catalogue refreshed - but silence here
+        # reads as "your subscription has these two models", which is a lie.
+        ctx.app.notice(
+            f"Could not list this account's Codex models: {ctx.app.models.codex_error}",
+            "warning",
+        )
     ctx.app.notice(f"Refreshed {len(ctx.app.models.all())} models.", "success")
 
 
@@ -337,8 +450,16 @@ async def cmd_prompt(ctx: CommandContext, args: str) -> None:
 async def cmd_cost(ctx: CommandContext, args: str) -> None:
     """``/cost`` - per-turn token and cost breakdown including cache savings."""
     usage = ctx.session.usage
+    meta = ctx.session.meta
+    prompts = meta.prompt_count
+    # "calls" alone invited the question of why /resume reports a different,
+    # larger number: these count provider requests, that counts wire-format
+    # message records, and a single prompt produces many of both.
+    scale = f"{len(usage.turns)} API requests"
+    if prompts:
+        scale += f" across {prompts} prompt{'s' if prompts != 1 else ''}"
     lines = [
-        f"Session cost:  {format_cost(usage.total_cost_usd)}  over {len(usage.turns)} calls",
+        f"Session cost:  {format_cost(usage.total_cost_usd)}  over {scale}",
         f"Input:         {format_tokens(usage.total_input)} uncached",
         f"Cache read:    {format_tokens(usage.total_cache_read)} "
         f"({usage.cache_hit_rate * 100:.0f}% of prompt tokens)",
@@ -440,6 +561,9 @@ async def cmd_permissions(ctx: CommandContext, args: str) -> None:
 
     lines.append("")
     lines.append(f'"Always allow" writes to {project_local_settings_file(ctx.settings.cwd)}')
+    # Where, and why there: a grant is machine-local, so it is kept per project
+    # under the user's home instead of being dropped into the checkout.
+    lines.append("  - per project, on this machine only; nothing is written into the repo")
     lines.append("  (this machine only - .hx/settings.json stays yours to check in)")
 
     ctx.app.notice("\n".join(lines), "info" if ctx.app.sandbox_active else "warning")
@@ -467,18 +591,18 @@ async def cmd_mode(ctx: CommandContext, args: str) -> None:
 
 
 INIT_PROMPT = """\
-Write an HX.md for this project, at its root.
+Write an AGENTS.md for this project, at its root.
 
 Read enough of the codebase to be accurate. Cover: what the project is, how to
 build, test and lint it, the layout of the source tree, and any conventions a
 newcomer would otherwise get wrong. Be concise and concrete - it is loaded into
 context on every session, so every line costs.
 
-If HX.md already exists, improve it rather than replacing it wholesale."""
+If AGENTS.md already exists, improve it rather than replacing it wholesale."""
 
 
 async def cmd_init(ctx: CommandContext, args: str) -> None:
-    """``/init`` - generate an HX.md describing this project."""
+    """``/init`` - generate an AGENTS.md describing this project."""
     await ctx.app.submit_to_model(INIT_PROMPT)
 
 
@@ -558,6 +682,7 @@ async def _run_oauth_login(ctx: CommandContext, spec: Any) -> None:
     from hx.auth.oauth import codex as codex_oauth
     from hx.auth.oauth.callback import CallbackError
     from hx.auth.store import AuthStore
+    from hx.providers import registry
     from hx.tui.widgets.login import LoginModal
 
     modal = LoginModal(spec.label)
@@ -589,11 +714,44 @@ async def _run_oauth_login(ctx: CommandContext, spec: Any) -> None:
         ctx.app.notice(f"Signed in, but could not save the credential: {exc}", "error")
         return
 
-    # The tokens themselves never reach the transcript.
-    ctx.app.notice(
-        f"Signed in to {spec.label}. Pick a model with /model.",
-        "success",
-    )
+    # The tokens themselves never reach the transcript. The plan is named
+    # because it is the one thing about the account worth knowing up front -
+    # Codex is documented as needing a paid ChatGPT plan - but it is stated as
+    # a fact about the login, not as a verdict on whether models will run.
+    plan = registry.subscription_plan(spec.id, ctx.app.auth)
+    signed_in = f"Signed in to {spec.label}" + (f" ({plan} plan)" if plan else "")
+    if plan == codex_oauth.FREE_PLAN:
+        ctx.app.notice(
+            f"{signed_in}. Codex is documented as requiring a paid ChatGPT plan, "
+            "so the models may be refused. Pick one with /model and see.",
+            "warning",
+        )
+        return
+
+    # The model list is per account, so it only means anything once there is an
+    # account: ask now rather than leaving /model showing the fallback guess.
+    count = await _refresh_after_login(ctx, spec.id)
+    offer = f"{count} models available" if count else "Pick a model with /model"
+    ctx.app.notice(f"{signed_in}. {offer}.", "success")
+
+
+async def _refresh_after_login(ctx: CommandContext, provider_id: str) -> int:
+    """Re-fetch the catalogue, and report how many models the route now offers.
+
+    A failure here is worth a line but not the sign-in: the credential is
+    stored either way, and the fallback list still offers models to try.
+    """
+    from hx.net import describe
+
+    try:
+        await ctx.app.models.refresh(ctx.app.auth)
+    except Exception as exc:
+        ctx.app.notice(f"Model refresh failed: {describe(exc)}", "warning")
+    if ctx.app.models.codex_error:
+        ctx.app.notice(
+            f"Could not list this account's models: {ctx.app.models.codex_error}", "warning"
+        )
+    return sum(1 for model in ctx.app.models.all() if model.provider_id == provider_id)
 
 
 async def cmd_logout(ctx: CommandContext, args: str) -> None:
@@ -611,6 +769,34 @@ async def cmd_logout(ctx: CommandContext, args: str) -> None:
         ctx.app.notice(f"Removed the {provider_id} credential.", "success")
     else:
         ctx.app.notice(f"No stored credential for {provider_id}.", "warning")
+
+
+async def cmd_mouse(ctx: CommandContext, args: str) -> None:
+    """``/mouse [on|off]`` - hand drag-selection back to the terminal, or take it back."""
+    choice = args.strip().lower()
+    if choice not in {"", "on", "off", "toggle"}:
+        ctx.app.notice(f"Usage: /mouse [on|off]. Got {args.strip()!r}.", "warning")
+        return
+
+    enabled = {"on": True, "off": False}.get(choice, not ctx.app.mouse_reporting)
+    if not ctx.app.set_mouse_reporting(enabled):
+        ctx.app.notice("This terminal driver has no mouse reporting to toggle.", "warning")
+        return
+
+    if enabled:
+        ctx.app.notice(
+            "Mouse reporting on. Scrolling and clicking work in HX; select with "
+            "the mouse and copy with ctrl+c.",
+            "success",
+        )
+    else:
+        ctx.app.notice(
+            "Mouse reporting off. Your terminal's own selection and copy are back, "
+            "and HX no longer sees scroll or clicks. /mouse on restores it. "
+            "(In most macOS terminals, holding alt/option while dragging selects "
+            "natively without turning this off at all.)",
+            "success",
+        )
 
 
 async def cmd_theme(ctx: CommandContext, args: str) -> None:
@@ -746,6 +932,9 @@ def build_default_commands() -> CommandRegistry:
     for command in (
         Command("model", "Choose the model", cmd_model, "[query]", takes_args=True),
         Command("models", "Refresh the model catalogue", cmd_models, "refresh", takes_args=True),
+        Command(
+            "effort", "Set the reasoning depth", cmd_effort, "[level|default]", takes_args=True
+        ),
         Command("clear", "Start a fresh session", cmd_clear),
         Command("compact", "Summarise older turns now", cmd_compact, "[focus]", takes_args=True),
         Command("todos", "Toggle the todo sidebar", cmd_todos),
@@ -760,8 +949,15 @@ def build_default_commands() -> CommandRegistry:
         Command("mcp", "MCP server status", cmd_mcp),
         Command("permissions", "Show permission rules and sandbox", cmd_permissions),
         Command("mode", "Set the permission mode", cmd_mode, "[mode]", takes_args=True),
-        Command("init", "Generate an HX.md for this project", cmd_init),
+        Command("init", "Generate an AGENTS.md for this project", cmd_init),
         Command("theme", "Switch the colour palette", cmd_theme, "[name]", takes_args=True),
+        Command(
+            "mouse",
+            "Mouse reporting, and with it terminal text selection",
+            cmd_mouse,
+            "[on|off]",
+            takes_args=True,
+        ),
         Command("configure", "Settings and the OpenRouter API key", cmd_configure),
         Command("login", "Sign in to a model route", cmd_login, "[provider]", takes_args=True),
         Command("logout", "Forget a stored credential", cmd_logout, "<provider>", takes_args=True),

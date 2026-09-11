@@ -29,8 +29,8 @@ from textual.binding import BindingType
 from textual.containers import Horizontal
 
 from hx.core import events as ev
-from hx.core.context import git_branch
 from hx.core.usage import format_tokens
+from hx.git import BranchWatcher
 from hx.keys import KEYMAP, bindings_for
 from hx.providers.models import ModelRegistry
 from hx.tui.commands import CommandContext, CommandRegistry, build_default_commands
@@ -50,6 +50,11 @@ if TYPE_CHECKING:
     from hx.core.loop import AgentLoop
 
 
+BRANCH_POLL_SECONDS = 1.0
+"""How often the status bar re-reads ``HEAD``. One stat, so this is cheap; a
+second of lag after a checkout is below the threshold of noticing."""
+
+
 class HXApp(App[None]):
     """Top-level Textual app."""
 
@@ -60,6 +65,7 @@ class HXApp(App[None]):
     #: prints and the ones the hints bar shows cannot drift apart.
     BINDINGS: ClassVar[list[BindingType]] = bindings_for(  # type: ignore[assignment]
         "app.interrupt",
+        "app.selection.copy",
         "app.clear",
         "app.exit",
         "app.suspend",
@@ -123,6 +129,10 @@ class HXApp(App[None]):
         # only exist once an HX theme is installed, and Textual parses CSS on
         # the way to the first frame, well before on_mount runs.
         self.apply_theme(settings.theme)
+        self.mouse_reporting = True
+        """Whether the terminal is reporting mouse events to HX. ``/mouse off``
+        hands drag-selection back to the terminal."""
+        self._branch = BranchWatcher(settings.cwd)
         self._turn_worker: Any = None
         self._queued: list[str] = []
         self._already_echoed: list[str] = []
@@ -166,8 +176,14 @@ class HXApp(App[None]):
             self.loop.model,
             subscription=self.models.get_or_default(self.loop.model).is_subscription,
         )
+        status.set_effort(self.models.displayed_effort(self.loop.model))
         status.set_mode(self.mode.value, self.sandbox_active, self._sandbox_backend)
-        status.set_location(_home_relative(self.settings.cwd), git_branch(self.settings.cwd))
+        self._refresh_branch()
+        # Checking out happens in another terminal or the IDE as often as it
+        # does here, and a status bar that answered "which branch" once at
+        # startup was wrong for the rest of the session. The watcher stats one
+        # file, so this costs nothing between checkouts.
+        self.set_interval(BRANCH_POLL_SECONDS, self._refresh_branch)
         if self.loop.model_info is not None:
             status.set_context(0, self.loop.model_info.context_window)
 
@@ -606,7 +622,10 @@ class HXApp(App[None]):
             return
 
         provider = registry.build_provider(
-            model_id, self.auth, session_id=self.loop.session.meta.session_id
+            model_id,
+            self.auth,
+            session_id=self.loop.session.meta.session_id,
+            models=self.models,
         )
         previous = self.loop.set_provider(provider)
         self._retarget_subagents(provider)
@@ -747,6 +766,27 @@ class HXApp(App[None]):
         self.loop.cancel()
         self._turn_worker.cancel()
 
+    async def action_selection_copy(self) -> None:
+        """Copy what is selected in the transcript, or let the key move on.
+
+        Textual binds this key on the *screen*, which the prompt never lets it
+        reach: the prompt is a TextArea, it holds focus for the whole session,
+        and it binds the same key to its own copy. So a selection dragged over
+        the transcript was highlighted and then copied by nothing at all.
+
+        Raising ``SkipAction`` when there is no transcript selection is what
+        keeps the rest of the key's meaning intact: it carries on down the
+        chain to ``app.clear``, so ctrl+c on an untouched transcript still
+        clears the draft and still exits on the second press.
+        """
+        from textual.actions import SkipAction
+
+        selected = self.screen.get_selected_text()
+        if not selected:
+            raise SkipAction()
+        self.screen.clear_selection()
+        await self.copy(selected)
+
     async def action_clear(self) -> None:
         """Clear the prompt; on an already-empty prompt, a second press exits.
 
@@ -804,6 +844,18 @@ class HXApp(App[None]):
             return
         self._transcript.toggle_expanded()
 
+    def _refresh_branch(self) -> None:
+        """Re-read the branch and repaint only when it moved.
+
+        Unconditional repainting would mark the status bar dirty once a second
+        for the life of the session; the watcher already knows when there is
+        nothing to say.
+        """
+        previous = self._branch.branch
+        current = self._branch.poll()
+        if current != previous or self._status.branch != current:
+            self._status.set_location(_home_relative(self.settings.cwd), current)
+
     def _sync_frame(self) -> None:
         """Keep the prompt's rules in step with focus and the draft's height."""
         focused = self._prompt.has_focus
@@ -836,12 +888,55 @@ class HXApp(App[None]):
             return
         await self.copy(text)
 
+    def set_mouse_reporting(self, enabled: bool) -> bool:
+        """Turn the terminal's mouse reporting on or off. Returns whether it took.
+
+        With reporting on, the terminal hands drags to HX and its own
+        click-and-drag selection is unavailable - which is why a selection that
+        HX cannot extract text from looks like a terminal that has stopped
+        letting you copy. Turning it off gives the terminal back its native
+        selection, at the cost of scroll-wheel and click inside HX.
+
+        Textual has no public switch for this, so the driver's own enable and
+        disable are used. They write four escape sequences each and keep no
+        state beyond that, so toggling mid-session is safe; a driver without
+        them (the headless one in tests) reports failure rather than raising.
+        """
+        driver = self._driver
+        method = getattr(
+            driver,
+            "_enable_mouse_support" if enabled else "_disable_mouse_support",
+            None,
+        )
+        if driver is None or method is None:
+            return False
+        method()
+        self.mouse_reporting = enabled
+        return True
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Textual's clipboard entry point, redirected through HX's.
+
+        Textual's own implementation is OSC 52 and nothing else, which macOS
+        Terminal ignores outright and iTerm2 ships disabled. Every copy that
+        went through it - notably ctrl+c on a mouse selection, which Textual
+        binds on the screen - therefore did nothing at all, silently, on the
+        two terminals most HX users are running.
+
+        Overriding here rather than rebinding the key catches Textual's
+        internal callers too, so there is one clipboard path in the app and one
+        notice saying which mechanism took the text.
+        """
+        self.run_worker(self.copy(text), name="clipboard", exclusive=False)
+
     async def copy(self, text: str) -> None:
         """Copy to the system clipboard and say so, or say why not."""
         from hx.tui.clipboard import ClipboardError, copy_text, format_size
 
         try:
-            via = await copy_text(text, write_osc52=self.copy_to_clipboard)
+            # The base implementation, not ``self.copy_to_clipboard`` - which is
+            # now this method's caller, and would loop.
+            via = await copy_text(text, write_osc52=super().copy_to_clipboard)
         except ClipboardError as exc:
             self.notice(f"Could not copy: {exc}", "error")
             return

@@ -35,6 +35,13 @@ class KeyBinding:
     description: str
     #: Shown in the compact hints bar under the prompt.
     hint: str | None = None
+    priority: bool = False
+    """Checked before the focused widget's own bindings.
+
+    For a key the prompt would otherwise swallow. The action is expected to
+    raise ``SkipAction`` when it has nothing to do, so the key carries on to
+    whatever would have handled it.
+    """
 
 
 def _wsl_style(env: dict[str, str] | None = None) -> bool:
@@ -55,6 +62,17 @@ def _defaults() -> dict[str, KeyBinding]:
     bindings = [
         # Turn control.
         KeyBinding("app.interrupt", ("escape",), "Cancel or abort", hint="interrupt"),
+        # Ahead of the prompt, which is a TextArea and binds ctrl+c to its own
+        # copy: with focus in the prompt - where it always is - a selection in
+        # the transcript was never what ctrl+c copied. Skips to the prompt's
+        # copy, and then to app.clear, when nothing in the transcript is
+        # selected.
+        KeyBinding(
+            "app.selection.copy",
+            ("ctrl+c",),
+            "Copy the selected text",
+            priority=True,
+        ),
         KeyBinding("app.clear", ("ctrl+c",), "Clear the prompt (twice to exit)"),
         KeyBinding("app.exit", ("ctrl+d",), "Exit when the prompt is empty"),
         KeyBinding("app.suspend", ("ctrl+z",), "Suspend to the background"),
@@ -148,22 +166,41 @@ def display_key(key: str) -> str:
     return "+".join(parts)
 
 
-def _conflicts(keys: dict[str, tuple[str, ...]]) -> list[str]:
+def _conflicts(
+    keys: dict[str, tuple[str, ...]],
+    bindings: dict[str, KeyBinding] | None = None,
+) -> list[str]:
     """Actions sharing a key. Reported, never silently resolved.
 
-    Two actions on one key is always a mistake in a config file, and the one
+    Two actions on one key is normally a mistake in a config file, and the one
     that loses is decided by dict order - which is not something a user can
     reason about, so say so instead.
+
+    The exception is a ``priority`` action, which is *meant* to share: it runs
+    first and skips when it has nothing to do, handing the key to whatever
+    would have had it. That is a chain, not a collision - the point of this
+    check is a key that silently does nothing, and a chain is the opposite. Two
+    priority actions on one key is still a conflict: the loser never runs.
     """
+    bindings = bindings or {}
+
+    def is_priority(action: str) -> bool:
+        binding = bindings.get(action)
+        return binding.priority if binding else False
+
     owners: dict[str, list[str]] = defaultdict(list)
     for action, action_keys in keys.items():
         for key in action_keys:
             owners[key].append(action)
-    return [
-        f"{key} is bound to {' and '.join(actions)}"
-        for key, actions in sorted(owners.items())
-        if len(actions) > 1
-    ]
+
+    problems: list[str] = []
+    for key, actions in sorted(owners.items()):
+        contenders = [action for action in actions if not is_priority(action)]
+        prioritised = [action for action in actions if is_priority(action)]
+        clashing = contenders if len(prioritised) <= 1 else actions
+        if len(clashing) > 1:
+            problems.append(f"{key} is bound to {' and '.join(clashing)}")
+    return problems
 
 
 def load_keymap(overrides: dict[str, object] | None = None) -> Keymap:
@@ -200,7 +237,7 @@ def load_keymap(overrides: dict[str, object] | None = None) -> Keymap:
             continue
         keys[action] = normalized
 
-    problems.extend(_conflicts(keys))
+    problems.extend(_conflicts(keys, bindings))
     return Keymap(bindings=bindings, keys=keys, problems=problems)
 
 
@@ -245,6 +282,7 @@ def bindings_for(*actions: str) -> list[Binding]:
                 action_name(action),
                 binding.description,
                 show=False,
+                priority=binding.priority,
             )
         )
     return bindings

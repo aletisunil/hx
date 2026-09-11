@@ -162,16 +162,23 @@ def decode_reasoning(signature: str | None) -> list[dict[str, Any]]:
         return []
     if not isinstance(payload, list):
         return []
-    return [item for item in payload if isinstance(item, dict) and item.get("type") == "reasoning"]
+    return [
+        # ``summary`` is required on the way back in, so a session recorded
+        # before it was stored still replays rather than 400ing the turn.
+        {**item, "summary": item.get("summary") or []}
+        for item in payload
+        if isinstance(item, dict) and item.get("type") == "reasoning"
+    ]
 
 
 def reasoning_signature(items: list[dict[str, Any]]) -> str:
     """Serialise a turn's reasoning items for storage on a :class:`ThinkingBlock`.
 
-    Only the fields the API needs back are kept - the summary text is already
-    in the block's ``text``, and storing it twice bloats every transcript.
+    Only the fields the API needs back are kept. ``summary`` is one of them:
+    the server rejects a reasoning item that arrives without it, even though
+    the same text is already in the block's ``text``.
     """
-    keep = ("type", "id", "encrypted_content")
+    keep = ("type", "id", "encrypted_content", "summary")
     return json.dumps(
         [{k: item[k] for k in keep if k in item} for item in items],
         sort_keys=True,

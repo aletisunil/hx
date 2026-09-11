@@ -26,6 +26,93 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Project instructions live in `AGENTS.md`, the cross-agent standard, instead
+  of `HX.md`. A repo already carrying an `AGENTS.md` for another coding agent
+  is understood by HX with no extra file; `/init` writes one. `HX.md` and
+  `.hx/HX.md` are no longer read - rename yours.
+- Python 3.13 and 3.14 are supported in fact, not just by the `>=3.11` floor.
+  CI runs the suite on every supported minor, so installing on a current
+  interpreter is covered by a test run rather than by hope.
+
+### Fixed
+
+- `/model` lists the Codex models your ChatGPT account can actually run. HX
+  shipped a hard-coded pair — `gpt-5.3-codex` and its spark — that the backend
+  now refuses outright, so a paid subscription offered two models and both
+  failed. Signing in fetches the account's own list instead; `/models refresh`
+  asks again, and the last shipped list stands in when the fetch cannot happen.
+- A Codex model that the account is refused now says so in terms you can act
+  on. The backend answers with a 400 naming the model, which reads as a bad
+  model id. The message now says entitlement is per model and per account, and
+  points at `/models refresh` to get the list that is true for your account.
+- `hx auth` names the plan behind a ChatGPT login (`signed in (plus)`), and
+  `/login` says when it is a free one, since Codex is documented as needing a
+  paid plan. Neither blocks a model: entitlement is per model, and the fetched
+  catalogue is what decides it, so HX reports the plan and lets the backend
+  answer.
+- `/model` says what pays for each model. Subscription models showed
+  `$0.00/$0.00`, indistinguishable from a free OpenRouter one; they now read
+  `subscription`. The status bar tags them too — `gpt-5.6-terra (sub)`.
+- `/resume` counts prompts, not wire-format records. A session you sent one
+  prompt to listed as "31 msgs"; it now reads `1 prompt · 31 msgs`, and `/cost`
+  says "17 API requests across 1 prompt" so the two numbers reconcile.
+- The status bar follows the branch. It read `git HEAD` once at startup, so
+  checking out in an IDE or another terminal left it showing a branch you had
+  left; it now re-reads on a timer, worktrees included.
+- Selecting assistant prose or a tool block with the mouse copies it. Textual
+  can only extract text from widgets that render plain text, so dragging over
+  those blocks highlighted them and copied nothing.
+- Copying goes through `pbcopy`/`wl-copy`/`xclip` before OSC 52. Textual's own
+  copy is OSC 52 only, which macOS Terminal ignores and iTerm2 ships disabled,
+  so `ctrl+c` on a selection silently did nothing there.
+- The prompt names the steer key the way your keyboard does. It read
+  `alt+enter` everywhere, while `/help` two keystrokes away read `option+enter`
+  on macOS - the same key, spelled two ways in one window. It now comes from
+  the keybinding registry, so it follows the platform and follows a rebind.
+- `ctrl+c` reaches the copy at all. The prompt holds focus for the whole session
+  and binds that key itself, so a transcript selection was never what it
+  copied. It now copies the selection when there is one, and clears the prompt
+  when there is not, exactly as before.
+
+### Added
+
+- `models.codex_models` in settings adds Codex model ids to the `/model`
+  picker, on top of the ones fetched for your account — for an id the backend
+  serves but does not advertise, or a machine that cannot reach it.
+  `{"models": {"codex_models": ["gpt-5.6-terra"]}}` adds your own.
+- `/effort` picks how hard the current model thinks, from the levels that model
+  actually offers, and the status bar shows the depth in force next to the
+  model — `gpt-5.6-terra (sub) · high`. It applies to the next turn and is
+  saved for later sessions. Switching models re-resolves it, so a choice the
+  new model cannot reach shows as the depth it will really run at.
+- `models.reasoning_effort` sets how hard a reasoning model thinks —
+  `none` through `ultra`. Left unset, each Codex model runs at the default its
+  own catalogue entry names (`low` on GPT-6 Astra, `medium` on GPT-5.6 Terra)
+  instead of one fixed depth for every model. A value is clamped to what the
+  chosen model advertises, so `max` runs at `xhigh` on GPT-5.5 rather than
+  being refused.
+- `/mouse [on|off]` hands drag-selection back to your terminal, for when you
+  want its own selection rather than HX's. Holding alt/option while dragging
+  does the same thing without the toggle.
+
+### Changed
+
+- "Always allow" grants move out of your repository. They were written to
+  `./.hx/settings.local.json`, with a `./.hx/.gitignore` added to hide them —
+  two files of HX's in your checkout. They now live in
+  `~/.hx/projects/<project>/settings.local.json`, still scoped to the project,
+  and an existing local file is migrated on the next run.
+- Grants that much older versions appended to `./.hx/settings.json` — the file
+  a project checks in — are lifted into that same local file on the next run,
+  and HX says which ones it moved. Only `allow` moves; a project's `deny` and
+  `ask` stay shared. It happens once, so a rule you later write there by hand
+  is left alone, and an emptied `./.hx` is removed.
+- HX no longer rewrites `./.hx/settings.json` at all. Its one remaining writer
+  there, the startup pass that widens stale whole-command rules, now reports
+  them and leaves the file to its owner.
+
 ---
 
 ## [0.1.8] - 2026-09-10

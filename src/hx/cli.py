@@ -252,6 +252,11 @@ class Runtime:
             from hx.net import describe
 
             self.notices.append(f"Model catalogue refresh failed: {describe(exc)}")
+            return
+        if self.models.codex_error:
+            self.notices.append(
+                f"Could not list this account's Codex models: {self.models.codex_error}"
+            )
 
     async def aclose(self) -> None:
         if self.mcp is not None:
@@ -263,6 +268,29 @@ class Runtime:
         if self.sandbox is not None:
             self.sandbox.cleanup()
         await self.provider.aclose()
+
+
+def _settings_migration_notices(cwd: Path) -> list[str]:
+    """Say what the one-time settings cleanups moved, and where.
+
+    Silently relocating someone's permission grants would be worse than leaving
+    them where they were: the file is the record of what HX may do without
+    asking, and its owner has to be able to find it.
+    """
+    from hx.config import lift_project_grants
+    from hx.paths import project_local_settings_file, project_settings_file
+
+    moved = lift_project_grants(cwd)
+    if not moved:
+        return []
+    listed = "\n".join(f"  {rule}" for rule in moved)
+    return [
+        f"Moved {len(moved)} permission grant(s) out of {project_settings_file(cwd)}, "
+        f"which is your repository's file, into {project_local_settings_file(cwd)}:\n"
+        f"{listed}\n"
+        "  They still apply to this project on this machine. Earlier versions of HX "
+        "wrote them into the checkout; it no longer writes there at all."
+    ]
 
 
 def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
@@ -307,6 +335,11 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     auth = AuthResolver()
 
     models = ModelRegistry()
+    # The built-in Codex list is hard-coded and cannot be otherwise - that
+    # backend has no catalogue to fetch - so it is stale as soon as OpenAI ships
+    # a model, and a subscriber sees only what this release happened to know.
+    models.add_codex_models(settings.models.codex_models)
+    models.set_reasoning_effort(settings.models.reasoning_effort)
     models.load_cache()
     model_info = models.get_or_default(settings.models.model)
 
@@ -315,7 +348,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     # Built after the session because a subscription route keys its prompt
     # cache on the session id.
     provider = registry.build_provider(
-        settings.models.model, auth, session_id=session.meta.session_id
+        settings.models.model, auth, session_id=session.meta.session_id, models=models
     )
 
     sandbox = (
@@ -340,7 +373,8 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     # Rules come from the settings files only, read once here: `settings`
     # already merges those same files, and loading both would list and match
     # every rule twice.
-    notices = migrate_legacy_rules(settings.cwd)
+    notices = _settings_migration_notices(settings.cwd)
+    notices += migrate_legacy_rules(settings.cwd)
     if (tls := tls_notice()) is not None:
         notices.append(tls)
     permissions = PermissionEngine(
@@ -502,10 +536,10 @@ def _print_tavily_status(resolver: Any) -> None:
 
     source = resolver.source(TAVILY)
     if source is None:
-        print(f"{TAVILY:<14} not configured      WebSearch and WebFetch are off")
+        print(f"{TAVILY:<14} {'not configured':<22} WebSearch and WebFetch are off")
         return
     key = mask(resolver.resolve_static(TAVILY).token)
-    print(f"{TAVILY:<14} {'key ' + key:<20} {source}")
+    print(f"{TAVILY:<14} {'key ' + key:<22} {source}")
 
 
 def run_tui_command(parsed: ParsedArgs) -> int:
@@ -830,6 +864,7 @@ def run_login(provider_id: str) -> int:
     """Sign in to one provider and store the credential."""
     from hx.auth.oauth import codex as codex_oauth
     from hx.auth.oauth.callback import CallbackError
+    from hx.auth.resolve import AuthResolver
     from hx.auth.store import OPENROUTER, AuthStore
     from hx.providers import registry
 
@@ -862,8 +897,50 @@ def run_login(provider_id: str) -> int:
 
     AuthStore().save(provider_id, credential)
     print(f"Signed in to {spec.label}. Saved to {auth_file()} (mode 0600).")
-    print("Select a model with: hx --model openai-codex/gpt-5.3-codex")
+
+    plan = registry.subscription_plan(provider_id, AuthResolver())
+    if plan == codex_oauth.FREE_PLAN:
+        # Said once, as the documented requirement rather than as a prediction:
+        # the plan on the credential has not proved to decide whether Codex
+        # accepts a model.
+        print(
+            f"This account is on the {plan} plan. Codex is documented as requiring a "
+            "paid ChatGPT plan, so the models may be refused.",
+            file=sys.stderr,
+        )
+
+    _report_models_after_login(provider_id)
     return 0
+
+
+def _report_models_after_login(provider_id: str) -> None:
+    """Refresh the catalogue and name what this account can now run.
+
+    Done here, at the one moment the answer changes, because the Codex model
+    list is per account: until the backend has been asked, HX is showing a
+    guess, and the first thing anyone does after signing in is pick a model.
+    """
+    from hx.auth.resolve import AuthResolver
+    from hx.net import describe
+    from hx.providers.models import ModelRegistry
+
+    models = ModelRegistry()
+    models.load_cache()
+    try:
+        asyncio.run(models.refresh(AuthResolver()))
+    except Exception as exc:
+        print(f"Could not refresh the model list: {describe(exc)}", file=sys.stderr)
+    if models.codex_error:
+        print(f"Could not list this account's models: {models.codex_error}", file=sys.stderr)
+
+    available = [m.id for m in models.all() if m.provider_id == provider_id]
+    if not available:
+        print("No models are listed for this account yet. Try `hx --model <id>`.", file=sys.stderr)
+        return
+    print("\nModels on this subscription:")
+    for model_id in available:
+        print(f"  {model_id}")
+    print(f"\nSelect one with: hx --model {available[0]}")
 
 
 def run_auth_command(args: list[str]) -> int:
@@ -887,7 +964,7 @@ def run_auth_command(args: list[str]) -> int:
                 print(f"{spec.id:<14} not signed in")
                 continue
             signed_in = True
-            print(f"{spec.id:<14} {_credential_label(resolver, spec):<20} {source}")
+            print(f"{spec.id:<14} {_credential_label(resolver, spec):<22} {source}")
             if source.startswith("environment"):
                 print(f"{'':<14} the environment overrides anything saved in {auth_file()}.")
         _print_tavily_status(resolver)
@@ -944,7 +1021,10 @@ def _credential_label(resolver: Any, spec: Any) -> str:
     from hx.auth.store import mask
 
     if spec.is_subscription:
-        return "signed in"
+        from hx.providers import registry
+
+        plan = registry.subscription_plan(spec.id, resolver)
+        return f"signed in ({plan})" if plan else "signed in"
     try:
         return f"key {mask(resolver.resolve_static(spec.id).token)}"
     except (MissingCredential, ExpiredCredential):

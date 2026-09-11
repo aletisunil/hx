@@ -23,7 +23,12 @@ from hx.tui.app import HXApp
 from hx.tui.widgets.login import LoginModal as LoginModalType
 
 MODEL = "anthropic/claude-sonnet-4.5"
-CODEX_MODEL = "openai-codex/gpt-5.3-codex"
+CODEX_MODEL = CODEX_MODELS[0].id
+"""One model off the fallback list, whatever it currently is.
+
+The list is what HX ships for an account it has not been able to ask, and it
+moves whenever OpenAI does; naming an id here would make every one of those
+moves a test failure with nothing wrong behind it."""
 
 
 @pytest.fixture(autouse=True)

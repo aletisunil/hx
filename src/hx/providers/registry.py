@@ -4,7 +4,7 @@ Routing is a property of the model id, exactly as in the settings file:
 
 * ``anthropic/claude-sonnet-4.5`` - no known provider namespace, so OpenRouter.
   Every id that worked before this module existed still routes there.
-* ``openai-codex/gpt-5.3-codex`` - the ChatGPT subscription route.
+* ``openai-codex/gpt-5.6-terra`` - the ChatGPT subscription route.
 
 There is deliberately no ``/route`` command and no auto-selection: with two
 credentials installed, "which one paid for that turn" must be answerable by
@@ -24,8 +24,11 @@ from hx.auth.store import OPENROUTER
 
 if TYPE_CHECKING:
     from hx.providers.base import Provider
+    from hx.providers.models import ModelRegistry
 
-    BuildProvider = Callable[["ProviderSpec", AuthResolver, str | None], Provider]
+    BuildProvider = Callable[
+        ["ProviderSpec", AuthResolver, str | None, "ModelRegistry | None"], Provider
+    ]
 else:  # runtime: dataclass field annotations are evaluated lazily anyway
     BuildProvider = Callable
 
@@ -55,6 +58,7 @@ def _build_openrouter(
     spec: ProviderSpec,
     resolver: AuthResolver,
     session_id: str | None,
+    models: ModelRegistry | None,
 ) -> Provider:
     from hx.providers.openrouter import OpenRouterProvider
 
@@ -67,6 +71,7 @@ def _build_codex(
     spec: ProviderSpec,
     resolver: AuthResolver,
     session_id: str | None,
+    models: ModelRegistry | None,
 ) -> Provider:
     from hx.auth.resolve import MissingCredential, missing_message
     from hx.providers.codex import CodexProvider
@@ -81,7 +86,13 @@ def _build_codex(
     async def token() -> ResolvedAuth:
         return await resolver.resolve(spec.id)
 
-    return CodexProvider(token, session_id=session_id)
+    # The catalogue knows what each model will reason at; without it the
+    # provider keeps its own default rather than inventing one per model.
+    return CodexProvider(
+        token,
+        session_id=session_id,
+        effort=models.reasoning_effort if models is not None else None,
+    )
 
 
 SPECS: tuple[ProviderSpec, ...] = (
@@ -106,6 +117,27 @@ BY_ID: dict[str, ProviderSpec] = {spec.id: spec for spec in SPECS}
 DEFAULT_PROVIDER = BY_ID[OPENROUTER]
 
 
+def subscription_plan(provider_id: str, resolver: AuthResolver) -> str | None:
+    """The subscription tier behind a stored login, or ``None``.
+
+    Reported, never acted on. It is worth showing - "which account is this, and
+    what is it paying for" is otherwise unanswerable without decoding a JWT by
+    hand - but it does *not* predict whether the route's models can be called:
+    the Codex backend has been observed refusing every model on a ``plus``
+    account and on a ``free`` one, with the same error. Gating a model switch on
+    this would lock out users the plan says nothing about.
+    """
+    if provider_id != CODEX:
+        return None
+
+    from hx.auth.store import OAuthCredential
+
+    stored = resolver.store.read(provider_id)
+    if not isinstance(stored, OAuthCredential):
+        return None
+    return codex_oauth.plan_of(stored)
+
+
 class UnknownProvider(Exception):
     pass
 
@@ -118,7 +150,7 @@ def get(provider_id: str) -> ProviderSpec:
 
 
 def split_model_id(model_id: str) -> tuple[ProviderSpec, str]:
-    """``("openai-codex/gpt-5.3-codex")`` -> (codex spec, ``"gpt-5.3-codex"``).
+    """``("openai-codex/gpt-5.6-terra")`` -> (codex spec, ``"gpt-5.6-terra"``).
 
     An id with no known namespace belongs to OpenRouter, whose own ids are
     already ``vendor/model`` shaped.
@@ -138,14 +170,19 @@ def build_provider(
     resolver: AuthResolver,
     *,
     session_id: str | None = None,
+    models: ModelRegistry | None = None,
 ) -> Provider:
     """Construct the provider that serves ``model_id``.
+
+    ``models`` is the catalogue, and is what lets a route answer per-model
+    questions - how deeply to reason, for one. Omitting it costs those answers,
+    not the provider.
 
     Raises :class:`~hx.auth.resolve.MissingCredential` when that route has no
     credential, which callers turn into onboarding rather than a stack trace.
     """
     spec = provider_for(model_id)
-    return spec.build(spec, resolver, session_id)
+    return spec.build(spec, resolver, session_id, models)
 
 
 def available(resolver: AuthResolver) -> list[ProviderSpec]:

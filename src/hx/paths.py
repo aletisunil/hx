@@ -1,8 +1,10 @@
 """Filesystem layout for HX state and configuration.
 
-User-level state lives under ``$HX_HOME`` (default ``~/.hx``). Project-level
-overrides live in ``<cwd>/.hx``, split into a shared ``settings.json`` and a
-``settings.local.json`` that stays on this machine.
+User-level state lives under ``$HX_HOME`` (default ``~/.hx``). A project's
+shared, checked-in settings live in ``<cwd>/.hx/settings.json``, written by
+hand. Anything HX writes for itself - the permission grants a user accumulates
+by answering prompts - lives under ``$HX_HOME/projects/<slug>``, so HX never
+leaves a file inside somebody's checkout.
 
 Nothing here touches the network or mutates state on import; call
 :func:`ensure_user_dirs` explicitly at startup.
@@ -10,11 +12,16 @@ Nothing here touches the network or mutates state on import; call
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
 HX_HOME_ENV = "HX_HOME"
 PROJECT_DIR_NAME = ".hx"
+
+_SLUG_MAX = 48
+"""Longest readable half of a project slug. A deep path is trimmed from the
+left: the last few components are the ones that identify a checkout."""
 
 
 def user_home() -> Path:
@@ -92,19 +99,72 @@ def project_settings_file(cwd: Path | None = None) -> Path:
     return project_dir(cwd) / "settings.json"
 
 
+def project_state_dir(cwd: Path | None = None) -> Path:
+    """Where HX keeps *its own* state for a project: ``$HX_HOME/projects/<slug>``.
+
+    Under the user's home rather than inside the repository. What HX writes on
+    the user's behalf is machine-local - an "always allow" grant is one
+    person's decision, on one machine, frequently spelling out absolute paths
+    from their home directory - and a tool that drops such a file into a
+    checkout makes it the user's problem: it shows up in `git status`, invites
+    a stray commit, and has to be excluded by a `.gitignore` entry HX had no
+    business writing either.
+
+    Still keyed by project, because the grants are genuinely project-scoped:
+    allowing ``pytest`` in one repository must not allow it everywhere.
+    """
+    return user_home() / "projects" / project_slug(cwd)
+
+
+def project_slug(cwd: Path | None = None) -> str:
+    """A filesystem-safe, collision-free name for a project directory.
+
+    The readable path, punctuation flattened, plus a short digest of the real
+    absolute path. The readable half is for a human browsing ``~/.hx/projects``
+    and wondering which directory a settings file belongs to; the digest is
+    what keeps ``~/work/api`` and ``~/personal/api`` apart after flattening.
+    """
+    resolved = (cwd or Path.cwd()).resolve()
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:8]
+    readable = "-".join(part for part in str(resolved).split(os.sep) if part)
+    safe = "".join(char if char.isalnum() or char in "-_." else "-" for char in readable)
+    return f"{safe[-_SLUG_MAX:].strip('-')}-{digest}" if safe else digest
+
+
 def project_local_settings_file(cwd: Path | None = None) -> Path:
     """This machine's settings for this project - never checked in.
 
-    Everything HX writes on the user's behalf lands here: an "always allow"
-    grant is a decision one person made on one machine, often naming absolute
-    paths, and appending it to a file a team shares was a way to commit
-    somebody else's permissions.
+    Everything HX writes on the user's behalf lands here. It lives under
+    :func:`project_state_dir` rather than in the repository; see
+    :func:`legacy_project_local_settings_file` for where it used to be and
+    :func:`hx.config.migrate_local_settings` for how one moves.
+    """
+    return project_state_dir(cwd) / "settings.local.json"
+
+
+def project_migrations_file(cwd: Path | None = None) -> Path:
+    """Records the one-time cleanups already applied for this project.
+
+    A migration that reruns is not a migration but a policy: without this, the
+    lift of permission grants out of the repository's shared settings would
+    fight the user every time they deliberately put one back.
+    """
+    return project_state_dir(cwd) / "migrations.json"
+
+
+def legacy_project_local_settings_file(cwd: Path | None = None) -> Path:
+    """Where the local layer lived when it was written into the repository.
+
+    Read once, to move it, and then no longer written.
     """
     return project_dir(cwd) / "settings.local.json"
 
 
-def project_gitignore_file(cwd: Path | None = None) -> Path:
-    """``.hx/.gitignore``, so the local layer excludes itself."""
+def legacy_project_gitignore_file(cwd: Path | None = None) -> Path:
+    """``.hx/.gitignore``, which existed only to hide the file above.
+
+    Removed with it when nothing else in ``.hx`` needs excluding.
+    """
     return project_dir(cwd) / ".gitignore"
 
 

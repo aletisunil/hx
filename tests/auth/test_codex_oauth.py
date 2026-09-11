@@ -67,6 +67,40 @@ def test_a_stored_account_id_is_preferred_over_decoding() -> None:
     assert codex.account_id(credential) == "acct-cached"
 
 
+def test_the_plan_is_read_off_the_token_at_sign_in() -> None:
+    """OAuth succeeds for any ChatGPT account, including a free one that cannot
+    call a single Codex model - and the backend only says so on the first turn,
+    as an opaque "model is not supported" 400."""
+    assert codex.plan_from_token(jwt({codex.JWT_CLAIM: {"chatgpt_plan_type": "Plus"}})) == "plus"
+    assert codex.plan_from_token(jwt({codex.JWT_CLAIM: {"chatgpt_plan_type": "free"}})) == "free"
+
+
+@pytest.mark.parametrize("token", ["not-a-jwt", "a.b", "a.!!!.c", "a.e30.c"])
+def test_an_unreadable_plan_is_unknown_rather_than_fatal(token: str) -> None:
+    """A login is worth keeping when only that one answer is missing."""
+    assert codex.plan_from_token(token) == codex.UNKNOWN_PLAN
+
+
+def test_only_free_is_treated_as_unentitled() -> None:
+    """An allow-list of paid tiers would turn every new plan into a lockout of
+    a subscription that actually works."""
+    assert not codex.is_entitled(codex.FREE_PLAN)
+    assert codex.is_entitled("plus")
+    assert codex.is_entitled(codex.UNKNOWN_PLAN)
+    assert codex.is_entitled("some_tier_shipped_next_year")
+
+
+def test_a_credential_saved_before_plans_were_recorded_still_reports_one() -> None:
+    from hx.auth.store import OAuthCredential
+
+    token = jwt({codex.JWT_CLAIM: {"chatgpt_plan_type": "Pro"}})
+    stored = OAuthCredential(access=token, refresh="r", expires=0.0, extra={})
+    assert codex.plan_of(stored) == "pro"
+
+    cached = OAuthCredential(access=token, refresh="r", expires=0.0, extra={"plan": "Plus"})
+    assert codex.plan_of(cached) == "plus"
+
+
 @pytest.mark.parametrize(
     ("pasted", "code", "state"),
     [

@@ -10,7 +10,7 @@ Layout, in order::
     [1] system prompt          static for the session
     [2] tool schemas           deterministic sort: builtins, then mcp__* alphabetical
     [3] skills index           name + description only (progressive disclosure)
-    [4] project context        HX.md, cwd, git branch, top-level listing
+    [4] project context        AGENTS.md, cwd, git branch, top-level listing
     --- breakpoint A (static) ---
     [5] conversation history
     --- breakpoint B (rolling, before the last few turns) ---
@@ -218,7 +218,7 @@ def _message_text(message: Message) -> str:
 
 
 def build_project_context(cwd: Path) -> str:
-    """Static per-session project preamble: HX.md contents, cwd, git branch, listing.
+    """Static per-session project preamble: AGENTS.md contents, cwd, git branch, listing.
 
     Computed once at startup and then frozen - refreshing it mid-session would
     invalidate the prefix.
@@ -235,11 +235,9 @@ def build_project_context(cwd: Path) -> str:
     if entries:
         lines.append("Top level: " + ", ".join(entries[:60]))
 
-    for name in ("HX.md", ".hx/HX.md"):
-        candidate = cwd / name
-        if candidate.is_file():
-            lines.append(f"\n# Project instructions ({name})\n\n{candidate.read_text()}")
-            break
+    agents_md = cwd / "AGENTS.md"
+    if agents_md.is_file():
+        lines.append(f"\n# Project instructions (AGENTS.md)\n\n{agents_md.read_text()}")
 
     return "\n".join(lines)
 

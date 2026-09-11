@@ -256,3 +256,95 @@ def test_outside_a_repository_the_watcher_stays_quiet(tmp_path: Path) -> None:
 
     assert watcher.poll() is None
     assert not watcher.enabled
+
+
+def _init_repo(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+    (root / "file.txt").write_text("one\n")
+    subprocess.run(["git", "add", "file.txt"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=root,
+        check=True,
+    )
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_branch_watcher_follows_a_checkout_made_elsewhere(tmp_path: Path) -> None:
+    """The status bar read the branch once at startup, so checking out in
+    another terminal left it naming a branch the user had long since left."""
+    from hx.git import BranchWatcher
+
+    _init_repo(tmp_path)
+    watcher = BranchWatcher(tmp_path)
+    assert watcher.poll() == "main"
+
+    subprocess.run(["git", "checkout", "-q", "-b", "feature/x"], cwd=tmp_path, check=True)
+
+    assert watcher.poll() == "feature/x"
+    assert watcher.branch == "feature/x"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_branch_watcher_reports_a_detached_head(tmp_path: Path) -> None:
+    from hx.git import BranchWatcher
+
+    _init_repo(tmp_path)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "-q", head], cwd=tmp_path, check=True)
+
+    assert BranchWatcher(tmp_path).poll() == DETACHED
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_branch_watcher_works_from_a_subdirectory(tmp_path: Path) -> None:
+    """A session started below the root still has a branch to show."""
+    from hx.git import BranchWatcher
+
+    _init_repo(tmp_path)
+    nested = tmp_path / "src" / "deep"
+    nested.mkdir(parents=True)
+
+    assert BranchWatcher(nested).poll() == "main"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_branch_watcher_follows_a_worktree(tmp_path: Path) -> None:
+    """``.git`` is a file there, not a directory - and a worktree is exactly
+    where branch switching happens most."""
+    from hx.git import BranchWatcher
+
+    main = tmp_path / "main"
+    _init_repo(main)
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "side", str(linked)], cwd=main, check=True
+    )
+
+    assert (linked / ".git").is_file()
+    assert BranchWatcher(linked).poll() == "side"
+
+
+def test_the_branch_watcher_stays_quiet_outside_a_repository(tmp_path: Path) -> None:
+    from hx.git import BranchWatcher
+
+    watcher = BranchWatcher(tmp_path)
+    assert watcher.poll() is None
+    assert watcher.branch is None
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_a_repository_that_disappears_keeps_the_last_branch(tmp_path: Path) -> None:
+    """A transient stat failure must not blank the status bar."""
+    from hx.git import BranchWatcher
+
+    _init_repo(tmp_path)
+    watcher = BranchWatcher(tmp_path)
+    assert watcher.poll() == "main"
+
+    shutil.rmtree(tmp_path / ".git")
+
+    assert watcher.poll() == "main"

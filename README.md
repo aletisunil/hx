@@ -55,7 +55,7 @@ model id alone, so "what paid for that" is always answerable by reading it:
 | Model id | Route | Billing |
 |---|---|---|
 | `anthropic/claude-sonnet-4.5`, `openai/gpt-5`, … | OpenRouter | per token, API key |
-| `openai-codex/gpt-5.3-codex` | ChatGPT Plus/Pro | your subscription |
+| `openai-codex/gpt-5.6-terra` | ChatGPT Plus/Pro | your subscription |
 
 Credentials live in `~/.hx/auth.json`, mode 0600, one entry per route.
 
@@ -78,7 +78,7 @@ subscription instead of paying per token
 
 ```sh
 hx auth login openai-codex      # or /login inside the TUI
-hx --model openai-codex/gpt-5.3-codex
+hx --model openai-codex/gpt-5.6-terra
 hx auth logout openai-codex
 ```
 
@@ -87,6 +87,67 @@ port 1455. Over SSH that redirect cannot reach your machine, so paste the final
 URL into the prompt instead — or set `HX_LOGIN_DEVICE_CODE=1` for the
 device-code flow. Access tokens are refreshed automatically; `/model` only
 offers routes you are actually signed in to.
+
+`hx auth` names the account's plan next to the login, because "which account is
+this and what is it paying for" is otherwise a JWT to decode by hand:
+
+```sh
+hx auth
+# openrouter     key sk-or-…8abd     ~/.hx/auth.json
+# openai-codex   signed in (plus)    ~/.hx/auth.json
+```
+
+Codex is documented as requiring a paid ChatGPT plan, and HX says so when the
+login is on a free one. It does not refuse to try: the plan on the credential
+has been observed deciding nothing — the backend refuses every Codex model on a
+`plus` account with the same error it gives a `free` one — so the switch is
+allowed and the backend's own answer is what reports the problem.
+
+**If every Codex model is refused**, the error says so in those terms: it is
+the account that is being refused, not the model, and a different model id will
+not help. Check that the subscription is active and Codex is enabled for the
+account at <https://chatgpt.com/codex>, and that the official Codex CLI can
+reach it at all.
+
+**Which Codex models you get** is decided by your ChatGPT account, not by HX.
+Signing in fetches the account's own list from the Codex backend, and `/model`
+offers exactly that; `/models refresh` asks again. Entitlement is per model —
+the same `plus` account can run `gpt-5.6-sol` and be refused `gpt-5.3-codex` —
+so a model the picker does not list is one the subscription does not cover.
+
+**How hard they think** comes from the same fetch. Each Codex model publishes
+its own reasoning levels and its own default — GPT-6 Astra starts at `low`,
+GPT-5.6 Terra at `medium` — and HX asks for the model's default rather than one
+fixed depth. `/effort` changes it:
+
+```
+/effort            # pick from the levels this model offers
+/effort high       # none | minimal | low | medium | high | xhigh | max | ultra
+/effort default    # back to the model's own default
+```
+
+It takes effect on the next turn, is saved to `~/.hx/settings.json` for later
+sessions, and shows on the status bar next to the model — `gpt-5.6-terra (sub)
+· high`. Levels differ per model, so a choice is clamped to what the current
+one offers: `max` runs at `xhigh` on GPT-5.5 rather than being refused, and the
+bar shows what is actually happening. Set it by hand instead with:
+
+```jsonc
+// ~/.hx/settings.json
+{ "models": { "reasoning_effort": "high" } }
+```
+
+When the model list cannot be fetched (no network, an old cache), HX falls back
+to the models it last shipped. To add an id the backend does not advertise:
+
+```jsonc
+// ~/.hx/settings.json
+{ "models": { "codex_models": ["gpt-5.6-terra"] } }
+```
+
+They join the `/model` picker on the next start. HX cannot ask how large an
+unknown model's context window is, so it assumes a conservative 200k — that
+costs an accurate context gauge, not the use of the model.
 
 **Web search.** Optional, and the one credential that is not a model route.
 It powers two tools:
@@ -223,7 +284,7 @@ be rebound (see [Keybindings](#keybindings)).
 | `enter` | send |
 | `ctrl+j` | newline (also `shift+enter`) |
 | `esc` | interrupt the current turn |
-| `ctrl+c` | clear the prompt; twice on an empty prompt exits |
+| `ctrl+c` | copy the selected text; with nothing selected, clear the prompt (twice on an empty prompt exits) |
 | `ctrl+d` | exit, when the prompt is empty |
 | `ctrl+z` | suspend to the background |
 | `shift+tab` | cycle permission mode |
@@ -260,10 +321,13 @@ HX writes through the platform's own clipboard tool first (`pbcopy`, `wl-copy`,
 `xclip`, `xsel`) and falls back to OSC 52, which is also always sent over SSH so
 the text lands on the machine you are actually sitting at.
 
-Because `ctrl+c` clears the prompt, drag-selecting in the transcript is your
-terminal's own selection rather than the TUI's — use your terminal's copy key
-for that. HX does not emit OSC 133 prompt markers yet, so shell-integration
-features that jump between prompts will not see HX's messages.
+Drag-select in the transcript and `ctrl+c` copies the selection — assistant
+prose and tool output included. With nothing selected, `ctrl+c` keeps its usual
+meaning and clears the prompt. See [Selecting and copying
+text](#selecting-and-copying-text) for the terminal's own selection.
+
+HX does not emit OSC 133 prompt markers yet, so shell-integration features that
+jump between prompts will not see HX's messages.
 
 #### Keybindings
 
@@ -286,6 +350,7 @@ than being silently resolved.
 |---|---|
 | `/model [query]` | pick a model; shows context window, price per Mtok, cache support |
 | `/models refresh` | re-fetch the catalogue |
+| `/effort [level]` | how hard a reasoning model thinks, from the levels it offers |
 | `/configure` | session settings and the API key |
 | `/login [provider]` | sign in to a model route |
 | `/logout <provider>` | forget a stored credential |
@@ -306,9 +371,26 @@ than being silently resolved.
 | `/theme [name]` | `dark`, `light`, `ansi`, or any theme in `~/.hx/themes` |
 | `/queue [steer <n>\|clear]` | messages waiting for the turn to end, and what to do with them |
 | `/copy` | copy the last reply to the clipboard |
-| `/init` | generate an `HX.md` for the project |
+| `/mouse [on\|off]` | mouse reporting, and with it your terminal's own text selection |
+| `/init` | generate an `AGENTS.md` for the project |
 | `/help` | list commands and keys |
 | `/quit` | exit (also `/exit`, `/q`) |
+
+### Selecting and copying text
+
+Drag to select and `ctrl+c` to copy. HX copies through `pbcopy`, `wl-copy` or
+`xclip` first and falls back to OSC 52, so it works in terminals that ignore
+OSC 52 - macOS Terminal ignores it outright, and iTerm2 ships with it off. The
+notice says which mechanism took the text, so a copy that did nothing says so.
+
+While HX is running, the terminal reports mouse events to it, which means the
+terminal's *own* click-and-drag selection is unavailable. Two ways around that:
+
+* Hold `alt`/`option` while dragging. Most terminals - macOS Terminal, iTerm2,
+  GNOME Terminal - take that as "this drag is mine", and you get the native
+  selection without changing anything.
+* `/mouse off` turns mouse reporting off for the session. Native selection comes
+  back everywhere, and HX stops seeing scroll and clicks until `/mouse on`.
 
 ### Steering a running turn
 
@@ -340,18 +422,27 @@ collapses after an edit is the visible symptom of a broken prefix.
 Settings are JSON, merged lowest to highest:
 
 ```
-defaults  <  ~/.hx/settings.json  <  ./.hx/settings.json  <  ./.hx/settings.local.json  <  HX_* env  <  CLI flags
+defaults  <  ~/.hx/settings.json  <  ./.hx/settings.json  <  ~/.hx/projects/<project>/settings.local.json  <  HX_* env  <  CLI flags
 ```
 
 Permission rule lists and `prompt.append` are unioned across layers, so a
 project can add a deny rule — or a line to the system prompt — without
 discarding yours. Everything else is replaced.
 
-`./.hx/settings.json` is the project's shared file, yours to check in.
-`./.hx/settings.local.json` is this machine's, and it is where HX writes
-anything it decides on your behalf - an "always allow" grant, for one. HX adds
-a `.hx/.gitignore` covering it the first time it writes there, so your grants
-stay out of the repo.
+`./.hx/settings.json` is the project's shared file, yours to check in, and
+nothing writes to it but you — HX only ever reads it. Versions before the local
+layer existed did append grants there; those are lifted out into the file below
+on the next run, once, and a rule you put back by hand afterwards stays put.
+Only `allow` moves: a project's `deny` and `ask` are the guardrails it shares,
+and HX never wrote them.
+
+Anything HX decides on your behalf - an "always allow" grant, for one - goes in
+`~/.hx/projects/<project>/settings.local.json` instead. Still per project,
+because a grant is: allowing `pytest` in one repo should not allow it
+everywhere. But under your home rather than in the checkout, so HX never leaves
+a file in your repository for you to find in a diff. If an older version
+already wrote `./.hx/settings.local.json`, it is moved there on the next run,
+along with the `.hx/.gitignore` it added to hide it.
 
 ```jsonc
 {
@@ -364,7 +455,9 @@ stay out of the repo.
     "subagent_model": null,           // defaults to "model"
     "title_model": null,              // model that names sessions; defaults to "model"
     "max_tokens": 8192,
-    "temperature": null
+    "temperature": null,
+    "reasoning_effort": null,         // Codex route: null = the model's own default
+    "codex_models": []                // extra Codex ids, e.g. ["gpt-5.6-terra"]
   },
 
   "permissions": {
@@ -428,7 +521,7 @@ Appended text is added after whichever prompt won, in this order:
 `--append-system-prompt` value (and `prompt.append`) in the order given. Nothing
 appended is ever discarded by a later layer.
 
-This is a different lever from `HX.md`: `HX.md` describes *the project* and is
+This is a different lever from `AGENTS.md`: `AGENTS.md` describes *the project* and is
 injected as its own context section, while these files change *the agent's
 instructions*. Both are read once at startup and frozen, because they sit above
 the first cache breakpoint — an override edited mid-session applies on the next
@@ -479,14 +572,14 @@ files load here unchanged. `src/hx/tui/themes/dark.json` is the reference.
 | `~/.hx/system-prompt-append.md` | text appended to whichever prompt is in force |
 | `~/.hx/sessions/` | transcripts, spilled tool output, subagent sessions |
 | `~/.hx/skills/`, `~/.hx/agents/` | your skills and agents |
-| `./.hx/settings.json` | project settings, checked in if you like |
-| `./.hx/settings.local.json` | this machine's project settings, never checked in - where "always allow" lands |
+| `~/.hx/projects/<project>/settings.local.json` | this machine's settings for one project - where "always allow" lands |
+| `./.hx/settings.json` | project settings, checked in if you like — read by HX, never written |
 | `./.hx/mcp.json` | project MCP servers |
 | `./.hx/system-prompt.md`, `./.hx/system-prompt-append.md` | project prompt overrides |
 | `./.hx/skills/`, `./.hx/agents/` | project skills and agents |
-| `./HX.md` | project instructions, loaded into every session |
+| `./AGENTS.md` | project instructions, loaded into every session |
 
-`HX.md` is the place for things a newcomer would get wrong: how to run the
+`AGENTS.md` is the place for things a newcomer would get wrong: how to run the
 tests, conventions, what not to touch. `/init` writes a first draft. It is
 loaded once per session and frozen, so it costs one prefix, not one per turn.
 
@@ -704,11 +797,13 @@ git tag v$(uv run hx --version | cut -d' ' -f2) && git push origin main --tags
 
 Step 1 is not optional and is not a convention: `tests/test_docs.py` fails the
 whole suite when `__version__` has no `CHANGELOG.md` section, so a release that
-skips it cannot get past CI to the `publish` job.
+skips it cannot get past CI to the `publish` job. The file ships inside the
+wheel and `hx changelog` prints it, so a version with no section there reaches
+users as a blank release.
 
 The `publish` job runs only on `refs/tags/v*` and only after lint, the test
-matrix, and an install-script run in a clean Debian container have passed. It
-builds with `uv build` and uploads via OIDC.
+suite and an install-script run in a clean Debian container have passed. It builds with
+`uv build` and uploads via OIDC.
 
 To check a build before tagging:
 

@@ -16,6 +16,7 @@ into matchers is ``hx.permissions.engine``'s job.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -24,7 +25,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from hx.paths import project_local_settings_file, project_settings_file, user_settings_file
+from hx.paths import (
+    PROJECT_DIR_NAME,
+    legacy_project_gitignore_file,
+    legacy_project_local_settings_file,
+    project_local_settings_file,
+    project_migrations_file,
+    project_settings_file,
+    user_settings_file,
+)
 
 
 class PermissionMode(StrEnum):
@@ -76,6 +85,22 @@ class ModelSettings:
     """Model used to name a session. Falls back to ``model``."""
     max_tokens: int = 8192
     temperature: float | None = None
+    reasoning_effort: str | None = None
+    """How hard a reasoning model should think, for models that offer a choice.
+
+    ``None`` - the default - leaves each model at the depth its vendor picked
+    for it, which the Codex catalogue publishes per model. A value is clamped
+    to what the chosen model advertises, so ``max`` runs at ``xhigh`` on a
+    model that stops there rather than being refused.
+    """
+    codex_models: tuple[str, ...] = ()
+    """Extra Codex model ids to offer, bare (``gpt-5.6-terra``).
+
+    The account's real list comes from the Codex backend at sign-in, so this is
+    an escape hatch rather than the usual way in: an id that account can call
+    but the catalogue does not advertise. The ids are added to the ``/model``
+    picker alongside the fetched ones.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +170,7 @@ def load_settings(
         overrides: CLI-flag layer, applied last.
     """
     root = (cwd or Path.cwd()).resolve()
+    migrate_local_settings(root)
     layers = [
         read_settings_file(user_settings_file()),
         read_settings_file(project_settings_file(root)),
@@ -154,6 +180,182 @@ def load_settings(
     ]
     merged = merge_layers(layers)
     return _build_settings(merged, root)
+
+
+def migrate_local_settings(root: Path) -> Path | None:
+    """Move a repository's ``.hx/settings.local.json`` under the user's home.
+
+    Earlier versions wrote permission grants into the checkout, along with a
+    ``.hx/.gitignore`` whose only job was to hide them. Both are HX's files in
+    somebody else's repository, so they are moved out on the next run rather
+    than left for the user to find in a diff.
+
+    Returns the new path when something moved, ``None`` otherwise. Best effort
+    throughout: a read-only checkout is a reason to keep reading the old file,
+    not to refuse to start.
+    """
+    legacy = legacy_project_local_settings_file(root)
+    if not legacy.is_file():
+        return None
+
+    destination = project_local_settings_file(root)
+    try:
+        moving = read_settings_file(legacy)
+    except ConfigError:
+        # Unparseable. Leave it exactly where it is: deleting a file we cannot
+        # read loses whatever the user had in it.
+        return None
+
+    try:
+        # The destination wins where both exist - it is the newer location, and
+        # anything already granted there was granted more recently.
+        merged = merge_layers([moving, read_settings_file(destination)])
+        write_settings_file(destination, merged)
+    except (ConfigError, OSError):
+        return None
+
+    with contextlib.suppress(OSError):
+        legacy.unlink()
+    _drop_legacy_gitignore(root)
+    _prune_empty_project_dir(root)
+    return destination
+
+
+#: Key in the migrations file for the one-time lift below.
+LIFTED_PROJECT_GRANTS = "lifted_project_grants"
+
+
+def lift_project_grants(root: Path) -> list[str] | None:
+    """Move auto-written permission grants out of the project's shared settings.
+
+    Versions before the local layer existed appended every "always allow" to
+    ``./.hx/settings.json`` - the file a project checks in - so a developer's
+    machine-local decisions, absolute home paths and all, ended up in the
+    repository. Current HX never writes there, but the residue does not clear
+    itself.
+
+    Only ``permissions.allow`` moves. ``deny`` and ``ask`` stay exactly where
+    they are: HX never wrote those, and they are the rules a project genuinely
+    shares - quietly relocating a deny into one machine's settings would weaken
+    a guardrail everyone else is relying on.
+
+    Runs once, recorded in :func:`~hx.paths.project_migrations_file`, so a grant
+    the user later writes into the shared file by hand is left alone.
+
+    Returns the rules moved, or ``None`` when there was nothing to do.
+    """
+    if _migration_done(root, LIFTED_PROJECT_GRANTS):
+        return None
+
+    shared_path = project_settings_file(root)
+    try:
+        shared = read_settings_file(shared_path)
+    except ConfigError:
+        return None
+
+    permissions = shared.get("permissions")
+    if not isinstance(permissions, dict):
+        _record_migration(root, LIFTED_PROJECT_GRANTS)
+        return None
+
+    grants = permissions.get("allow")
+    if not isinstance(grants, list) or not grants:
+        # Nothing to move, but the question is settled either way - and asking
+        # it again on every start would reopen it the moment a rule is added.
+        _record_migration(root, LIFTED_PROJECT_GRANTS)
+        return None
+
+    moved = [str(rule) for rule in grants]
+    destination = project_local_settings_file(root)
+    try:
+        local = read_settings_file(destination)
+    except ConfigError:
+        return None
+    local_permissions = local.setdefault("permissions", {})
+    if not isinstance(local_permissions, dict):
+        return None
+    existing = local_permissions.get("allow")
+    allow = list(existing) if isinstance(existing, list) else []
+    allow.extend(rule for rule in moved if rule not in allow)
+    local_permissions["allow"] = allow
+
+    del permissions["allow"]
+    if not permissions:
+        del shared["permissions"]
+
+    try:
+        write_settings_file(destination, local)
+        # The shared file is rewritten without the grants, or removed when they
+        # were all it held - an empty settings file is clutter, not content.
+        if shared:
+            write_settings_file(shared_path, shared)
+        else:
+            shared_path.unlink()
+    except OSError:
+        return None
+
+    _prune_empty_project_dir(root)
+    _record_migration(root, LIFTED_PROJECT_GRANTS)
+    return moved
+
+
+def _prune_empty_project_dir(root: Path) -> None:
+    """Remove ``./.hx`` once nothing is left in it.
+
+    Only HX's own files were ever in there for most projects, so after they
+    move out the directory is an empty folder the user did not create and now
+    has no use for. A project that keeps its own ``settings.json``, skills,
+    agents or prompts still has them, and the directory stays.
+    """
+    with contextlib.suppress(OSError):
+        directory = root / PROJECT_DIR_NAME
+        if directory.is_dir() and not any(directory.iterdir()):
+            directory.rmdir()
+
+
+def _migration_done(root: Path, name: str) -> bool:
+    path = project_migrations_file(root)
+    try:
+        recorded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(isinstance(recorded, dict) and recorded.get(name))
+
+
+def _record_migration(root: Path, name: str) -> None:
+    path = project_migrations_file(root)
+    try:
+        recorded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        recorded = {}
+    if not isinstance(recorded, dict):
+        recorded = {}
+    recorded[name] = True
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _drop_legacy_gitignore(root: Path) -> None:
+    """Remove the ``settings.local.json`` line HX added to ``.hx/.gitignore``.
+
+    The file is deleted outright once that line was all it held; a user who
+    added rules of their own keeps the file, minus the one HX put there.
+    """
+    path = legacy_project_gitignore_file(root)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+
+    kept = [line for line in lines if line.strip() != "settings.local.json"]
+    if len(kept) == len(lines):
+        return
+    with contextlib.suppress(OSError):
+        if any(line.strip() for line in kept):
+            path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        else:
+            path.unlink()
 
 
 def _default(cls: type, name: str) -> Any:
@@ -182,6 +384,14 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
     except ValueError as exc:
         raise ConfigError(f"unknown permission mode: {mode_raw!r}") from exc
 
+    effort_raw = models.get("reasoning_effort")
+    if effort_raw is not None:
+        from hx.providers.codex_catalogue import EFFORT_ORDER
+
+        if effort_raw not in EFFORT_ORDER:
+            known = ", ".join(EFFORT_ORDER)
+            raise ConfigError(f"unknown models.reasoning_effort: {effort_raw!r}. Known: {known}")
+
     busy_raw = tui.get("enterWhileBusy", tui.get("enter_while_busy", EnterWhileBusy.QUEUE))
     try:
         enter_while_busy = EnterWhileBusy(busy_raw)
@@ -196,6 +406,8 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
             title_model=models.get("title_model"),
             max_tokens=int(models.get("max_tokens", _default(ModelSettings, "max_tokens"))),
             temperature=models.get("temperature"),
+            reasoning_effort=effort_raw,
+            codex_models=tuple(str(entry) for entry in models.get("codex_models", ())),
         ),
         permissions=PermissionSettings(
             mode=mode,

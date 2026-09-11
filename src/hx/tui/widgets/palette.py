@@ -24,6 +24,10 @@ from hx.tui.widgets.rule import Rule
 CURSOR = "› "  # noqa: RUF001 - the marker pi uses, not a greater-than
 PAD = "  "
 
+SIZE_WIDTH = 22
+"""Width of the session-size column: ``999 prompts · 9999 msgs`` is about the
+widest it gets, and the titles after it have to start in one place."""
+
 
 class FilteredPicker(ModalScreen[str | None]):
     """A filter box over a list of options.
@@ -166,12 +170,22 @@ class CommandPalette(FilteredPicker):
 class ModelPicker(FilteredPicker):
     """Model chooser.
 
-    Each row shows id, context window, prompt/completion price per Mtok and
-    whether the model supports prompt caching - switching to a model without
-    caching has a real and otherwise invisible cost.
+    Each row shows id, context window, what pays for it, and whether the model
+    supports prompt caching - switching to a model without caching has a real
+    and otherwise invisible cost.
+
+    "What pays for it" is a column rather than an inference from the id: with
+    two credentials installed, a subscription model priced at ``$0.00/$0.00``
+    is indistinguishable from a free OpenRouter one, and the difference is the
+    whole question of which account a turn lands on.
     """
 
     LIMIT: ClassVar[int] = 200
+
+    BILLING_WIDTH: ClassVar[int] = 15
+    """Width of the billing column: ``$999.99/$999.99`` is the widest thing that
+    goes in it, and every row pads to the same size so the columns after it
+    line up."""
 
     def __init__(self, models: list[Any], current: str, initial: str = "") -> None:
         super().__init__("Select model", "Filter models…", initial)
@@ -186,8 +200,6 @@ class ModelPicker(FilteredPicker):
 
     def _label(self, model: Any) -> Text:
         current = model.id == self.current
-        prompt = model.pricing.prompt * 1_000_000
-        completion = model.pricing.completion * 1_000_000
         cache_mode = str(model.cache_mode)
         cache = {"explicit": "cache✓", "implicit": "cache~", "none": "cache✗"}[cache_mode]
         cache_role = {"explicit": "success", "implicit": "warning", "none": "dim"}[cache_mode]
@@ -195,8 +207,70 @@ class ModelPicker(FilteredPicker):
         label = Text("● " if current else "  ", style=THEME.fg("accent"))
         label.append(f"{model.id:<44}", style=THEME.fg("text", bold=current))
         label.append(f"{format_tokens(model.context_window):>7} ", style=THEME.fg("muted"))
-        label.append(f"${prompt:>6.2f}/${completion:<6.2f} ", style=THEME.fg("dim"))
+        label.append_text(self._billing(model))
+        label.append(" ")
         label.append(cache, style=THEME.fg(cache_role))
+        return label
+
+    def _billing(self, model: Any) -> Text:
+        """What pays for this model, padded to one column width.
+
+        A subscription model has no per-token price, so printing ``$0.00`` is a
+        claim about its cost rather than the absence of one.
+        """
+        if model.is_subscription:
+            return Text(
+                f"{'subscription':<{self.BILLING_WIDTH}}",
+                style=THEME.fg("success"),
+            )
+
+        prompt = model.pricing.prompt * 1_000_000
+        completion = model.pricing.completion * 1_000_000
+        # Exactly BILLING_WIDTH, like the branch above: the separating space is
+        # the caller's, so both kinds of row put the cache marker in the same
+        # column.
+        return Text(f"${prompt:>6.2f}/${completion:<6.2f}", style=THEME.fg("dim"))
+
+
+DEFAULT_EFFORT_ROW = "default"
+"""Value of the row that clears the setting. Never a level name - ``none`` is a
+real effort (no reasoning at all), so it cannot double as "unset"."""
+
+
+class EffortPicker(FilteredPicker):
+    """Reasoning-depth chooser for the model in force.
+
+    Only the levels that model advertises are offered: they differ per model -
+    GPT-5.5 stops at ``xhigh`` where GPT-6 Astra goes to ``ultra`` - and a row
+    that gets silently lowered on the way out is a row that lied.
+    """
+
+    def __init__(self, info: Any, current: str | None) -> None:
+        super().__init__(f"Reasoning effort for {info.id.split('/')[-1]}", "Filter levels…")
+        self.info = info
+        self.current = current
+
+    def rows(self, query: str) -> list[tuple[str, Text]]:
+        default_level = self.info.default_reasoning_level or "the model's default"
+        options: list[tuple[str, str]] = [
+            (DEFAULT_EFFORT_ROW, f"leave it to the model - runs at {default_level}")
+        ]
+        options.extend((level, "") for level in self.info.reasoning_levels)
+        needle = query.strip().lower()
+        return [
+            (value, self._label(value, note))
+            for value, note in options
+            if not needle or needle in value
+        ]
+
+    def _label(self, value: str, note: str) -> Text:
+        selected = value == (self.current or DEFAULT_EFFORT_ROW)
+        label = Text("● " if selected else "  ", style=THEME.fg("accent"))
+        label.append(f"{value:<10}", style=THEME.fg("text", bold=selected))
+        if note:
+            label.append(note, style=THEME.fg("muted"))
+        elif value == self.info.default_reasoning_level:
+            label.append("this model's default", style=THEME.fg("muted"))
         return label
 
 
@@ -210,13 +284,13 @@ class SessionPicker(FilteredPicker):
     def rows(self, query: str) -> list[tuple[str, Text]]:
         def plain(meta: Any) -> str:
             when = time.strftime("%Y-%m-%d %H:%M", time.localtime(meta.updated_at))
-            return f"{when} {meta.message_count} {meta.title or meta.session_id}"
+            return f"{when} {_size(meta)} {meta.title or meta.session_id}"
 
         rows: list[tuple[str, Text]] = []
         for meta in filter_items(self.sessions, query, key=plain):
             when = time.strftime("%Y-%m-%d %H:%M", time.localtime(meta.updated_at))
             label = Text(f"{when}  ", style=THEME.fg("dim"))
-            label.append(f"{meta.message_count:>4} msgs  ", style=THEME.fg("muted"))
+            label.append(f"{_size(meta):>{SIZE_WIDTH}}  ", style=THEME.fg("muted"))
             label.append(meta.title or meta.session_id, style=THEME.fg("text"))
             rows.append((meta.session_id, label))
         return rows
@@ -246,6 +320,24 @@ class RewindPicker(FilteredPicker):
                 label.append("  compacted", style=THEME.fg("muted"))
             rows.append((str(point.index), label))
         return rows
+
+
+def _size(meta: Any) -> str:
+    """How big a session is, led by the number the user recognises.
+
+    A prompt is a thing they typed; a message is a wire-format record, and
+    there are roughly two of those per provider call. Listing only the second
+    number made a one-prompt session read as "31 msgs", which describes the
+    protocol rather than the conversation.
+
+    Sessions recorded before prompts were counted have nothing to lead with, so
+    they keep the old shape rather than claiming zero prompts.
+    """
+    prompts = getattr(meta, "prompt_count", 0)
+    if not prompts:
+        return f"{meta.message_count} msgs"
+    unit = "prompt" if prompts == 1 else "prompts"
+    return f"{prompts} {unit} · {meta.message_count} msgs"
 
 
 def _one_line(text: str, width: int = 72) -> str:
