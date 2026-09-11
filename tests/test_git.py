@@ -345,6 +345,11 @@ def test_a_repository_that_disappears_keeps_the_last_branch(tmp_path: Path) -> N
     watcher = BranchWatcher(tmp_path)
     assert watcher.poll() == "main"
 
-    shutil.rmtree(tmp_path / ".git")
+    # Renamed rather than deleted: `git commit` can leave background
+    # maintenance running, and `rmtree` racing it dies on the `maintenance.lock`
+    # that vanished between the scandir and the unlink. A rename is one atomic
+    # call, and what it leaves behind - a `HEAD` that is suddenly gone - is
+    # exactly the case under test.
+    (tmp_path / ".git").rename(tmp_path / ".git-gone")
 
     assert watcher.poll() == "main"
