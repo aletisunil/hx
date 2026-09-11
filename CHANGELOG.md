@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.1.9] - 2026-09-11
+
 ### Changed
 
 - Project instructions live in `AGENTS.md`, the cross-agent standard, instead
