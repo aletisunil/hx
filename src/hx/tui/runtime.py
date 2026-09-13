@@ -33,6 +33,7 @@ from hx.tui.views.blocks import (
     UserMessage,
 )
 from hx.tui.views.permission import PermissionPrompt
+from hx.tui.views.prompt import Prompt
 from hx.tui.views.transcript import Session
 
 if TYPE_CHECKING:
@@ -83,7 +84,14 @@ class HXSession:
 
         from hx import __version__
 
-        self.view = Session(__version__, quiet=settings.quiet_startup)
+        self.prompt = Prompt(
+            Path(settings.cwd),
+            commands=extra.get("commands"),
+            rows_available=self._terminal_rows,
+            on_submit=self._submit,
+            on_steer=self._steer,
+        )
+        self.view = Session(__version__, quiet=settings.quiet_startup, prompt=self.prompt)
         # Injectable so a test can drive a whole session without a tty, and
         # read back what a terminal would have shown.
         self.runner = TuiRunner(self.view, terminal, on_key=self._on_key)
@@ -128,6 +136,16 @@ class HXSession:
             for block in self._tools.values():
                 block.tick()
             self.runner.request_render()
+
+    def _terminal_rows(self) -> int:
+        """How tall the terminal is, so the draft never eats the screen."""
+        return self.runner.terminal.size[1]
+
+    @property
+    def _enter_steers(self) -> bool:
+        from hx.config import EnterWhileBusy
+
+        return self.settings.tui.enter_while_busy is EnterWhileBusy.STEER
 
     @property
     def is_busy(self) -> bool:
@@ -265,13 +283,6 @@ class HXSession:
         if name == "ctrl+l":
             asyncio.create_task(self._open_models())  # noqa: RUF006
             return
-        if name == "enter":
-            text = self.view.dock.prompt.value.strip()
-            self.view.dock.prompt.clear()
-            if text:
-                self._submit(text)
-            return
-
         self.view.handle_input(name, key.data)
 
     def _submit(self, text: str) -> None:
@@ -280,6 +291,20 @@ class HXSession:
             self._notice("a turn is already running", "warning")
             return
         self._turn = asyncio.create_task(self._run_turn(text))
+
+    def _steer(self, text: str) -> None:
+        """Alt+Enter: put this into the running turn now.
+
+        With nothing in flight there is no tail to drain a queue, so a steer
+        with no turn running is just a submission - otherwise the message sits
+        there being described as waiting on a turn that does not exist.
+        """
+        if not self.is_busy:
+            if text:
+                self._submit(text)
+            return
+        self.view.transcript.append(UserMessage(text))
+        self.loop.steer(text)
 
     async def _run_turn(self, text: str) -> None:
         try:
@@ -311,6 +336,7 @@ class HXSession:
                     self._thinking = None
                     self._turn_started = time.monotonic()
                     working.start()
+                    self.prompt.set_running(True, enter_steers=self._enter_steers)
                 case ev.TextDelta():
                     if self._assistant is None:
                         self._assistant = AssistantMessage()
@@ -385,6 +411,7 @@ class HXSession:
                 case ev.TurnFinished():
                     self._turn_started = 0.0
                     working.stop()
+                    self.prompt.set_running(False)
 
             self.runner.request_render()
 

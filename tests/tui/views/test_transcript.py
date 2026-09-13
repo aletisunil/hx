@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pyte
 import pytest
 
@@ -10,7 +12,8 @@ from hx.term.terminal import FakeTerminal
 from hx.term.width import strip_ansi
 from hx.tui import paint
 from hx.tui.views.blocks import AssistantMessage, Notice, UserMessage
-from hx.tui.views.transcript import Dock, Session, StubPrompt, Transcript, WorkingRule
+from hx.tui.views.prompt import Prompt
+from hx.tui.views.transcript import Dock, Session, Transcript, WorkingIndicator
 from tests.term.conftest import assert_lines_fit, plain
 
 
@@ -43,79 +46,52 @@ def test_the_transcript_reports_its_blocks_without_the_spacers() -> None:
 # -- the working rule -------------------------------------------------------
 
 
-def test_the_prompt_is_framed_whether_or_not_a_turn_is_running() -> None:
+def _prompt(tmp_path: Path) -> Prompt:
+    return Prompt(tmp_path)
+
+
+def test_the_prompt_is_framed_whether_or_not_a_turn_is_running(tmp_path: Path) -> None:
     """A turn starting must cost no layout, or the transcript jumps when the
     spinner appears."""
-    rule = WorkingRule()
-    idle = rule.render(60)
-    rule.start()
-    rule.tick(1.0)
-    assert len(rule.render(60)) == len(idle) == 1
+    prompt = _prompt(tmp_path)
+    indicator = WorkingIndicator(prompt)
+    idle = len(prompt.render(60))
+    indicator.start()
+    indicator.tick(1.0)
+    assert len(prompt.render(60)) == idle
 
 
-def test_the_working_status_lives_in_the_rule() -> None:
-    rule = WorkingRule()
-    rule.start()
-    rule.tick(12.0)
-    drawn = strip_ansi(rule.render(70)[0])
+def test_the_working_status_lives_in_the_prompt_top_rule(tmp_path: Path) -> None:
+    prompt = _prompt(tmp_path)
+    indicator = WorkingIndicator(prompt)
+    indicator.start()
+    indicator.tick(12.0)
+    drawn = strip_ansi(prompt.render(70)[0])
     assert "Working…" in drawn
     assert "12s" in drawn
     assert "to interrupt" in drawn
     assert drawn.startswith("──")
 
 
-def test_a_stopped_rule_is_just_a_rule() -> None:
-    rule = WorkingRule()
-    rule.start()
-    rule.tick(1.0)
-    rule.stop()
-    assert set(strip_ansi(rule.render(40)[0])) == {"─"}
+def test_a_stopped_indicator_leaves_a_plain_rule(tmp_path: Path) -> None:
+    prompt = _prompt(tmp_path)
+    indicator = WorkingIndicator(prompt)
+    indicator.start()
+    indicator.tick(1.0)
+    indicator.stop()
+    assert set(strip_ansi(prompt.render(40)[0])) == {"─"}
 
 
-def test_a_finished_turn_does_not_keep_spinning() -> None:
-    rule = WorkingRule()
-    rule.stop()
-    before = rule.render(40)
-    rule.tick(5.0)
-    assert rule.render(40) == before
+def test_a_finished_turn_does_not_keep_spinning(tmp_path: Path) -> None:
+    prompt = _prompt(tmp_path)
+    indicator = WorkingIndicator(prompt)
+    indicator.stop()
+    before = prompt.render(40)
+    indicator.tick(5.0)
+    assert prompt.render(40) == before
 
 
 # -- the stub prompt --------------------------------------------------------
-
-
-def test_typing_accumulates_and_backspace_removes() -> None:
-    prompt = StubPrompt()
-    prompt.handle_input("text", "hel")
-    prompt.handle_input("text", "lo")
-    assert prompt.value == "hello"
-    prompt.handle_input("backspace", "")
-    assert prompt.value == "hell"
-
-
-def test_an_empty_prompt_shows_its_placeholder() -> None:
-    assert "Ask HX…" in strip_ansi(StubPrompt().render(40)[0])
-
-
-def test_a_paste_does_not_break_the_single_line() -> None:
-    """The stub is one line; a newline in a paste would make it two and shift
-    the whole dock."""
-    prompt = StubPrompt()
-    prompt.handle_input("paste", "one\ntwo")
-    assert len(prompt.render(60)) == 1
-    assert "\n" not in prompt.value
-
-
-def test_the_prompt_marks_where_the_hardware_cursor_belongs() -> None:
-    from hx.term.screen import CURSOR_MARKER
-
-    prompt = StubPrompt()
-    prompt.handle_input("text", "hi")
-    assert CURSOR_MARKER in prompt.render(40)[0]
-
-
-def test_unknown_keys_are_passed_on() -> None:
-    """So a binding the prompt does not own still reaches whatever does."""
-    assert StubPrompt().handle_input("ctrl+p", "") is False
 
 
 # -- the whole document -----------------------------------------------------
@@ -217,11 +193,19 @@ def test_the_document_honours_the_renderer_contract(width: int) -> None:
     assert_lines_fit(session, width)
 
 
-def test_the_dock_keeps_its_height_whatever_happens() -> None:
+def test_the_dock_keeps_its_height_whatever_happens(tmp_path: Path) -> None:
     """A dock that grows or shrinks pushes the transcript around under it."""
-    dock = Dock()
+    dock = Dock(_prompt(tmp_path))
     idle = len(dock.render(60))
     dock.working.start()
     dock.working.tick(9.0)
     dock.hints.set_hints([("esc", "interrupt")])
     assert len(dock.render(60)) == idle
+
+
+def test_the_dock_draws_exactly_one_frame(tmp_path: Path) -> None:
+    """The prompt brings its own two rules; a second pair here is how the dock
+    ended up drawing four."""
+    dock = Dock(_prompt(tmp_path))
+    rules = [line for line in plain(dock.render(60)) if set(line.strip()) == {"─"}]
+    assert len(rules) == 2

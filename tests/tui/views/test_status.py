@@ -6,7 +6,19 @@ import pytest
 
 from hx.term.width import cell_width, strip_ansi
 from hx.tui import paint
-from hx.tui.views.status import DANGER_FRACTION, WARN_FRACTION, Header, HintsBar, StatusBar, justify
+from hx.tui.views.status import (
+    DANGER_FRACTION,
+    METER_CELLS,
+    METER_EMPTY,
+    METER_FULL,
+    METER_MIN_WIDTH,
+    WARN_FRACTION,
+    Header,
+    HintsBar,
+    StatusBar,
+    justify,
+    meter,
+)
 from tests.term.conftest import assert_lines_fit, plain
 
 
@@ -85,6 +97,34 @@ def test_the_context_field_is_the_one_thing_that_changes_colour(fraction: float,
     bar = loaded()
     bar.set_context(int(200_000 * fraction), 200_000)
     assert paint.color(role).lstrip("#").lower() in _hexes(bar.render(100)[1])
+
+
+def test_the_context_field_shows_the_gauge_and_what_it_gauges() -> None:
+    """The bar for the glance, the counts for when the exact figure matters."""
+    bar = loaded()
+    bar.set_context(94_000, 1_000_000)
+    line = plain(bar.render(120))[1]
+    assert "94k/1M" in line
+    assert METER_FULL in line and METER_EMPTY in line
+
+
+@pytest.mark.parametrize(
+    ("fraction", "filled"),
+    [(0.0, 0), (0.0001, 1), (0.5, METER_CELLS // 2), (1.0, METER_CELLS), (2.0, METER_CELLS)],
+)
+def test_the_gauge_fills_with_the_fraction_and_never_past_it(fraction: float, filled: int) -> None:
+    """A fraction over 1.0 is a bad window figure, not a licence to overdraw."""
+    rendered = strip_ansi(meter(fraction, METER_CELLS, "success"))
+    assert rendered == METER_FULL * filled + METER_EMPTY * (METER_CELLS - filled)
+    assert cell_width(rendered) == METER_CELLS
+
+
+def test_a_narrow_pane_drops_the_gauge_and_keeps_the_counts() -> None:
+    """The bar is the decoration on that field; the numbers are the field."""
+    bar = loaded()
+    bar.set_context(94_000, 200_000)
+    line = plain(bar.render(METER_MIN_WIDTH - 1))[1]
+    assert METER_FULL not in line and METER_EMPTY not in line
 
 
 def _hexes(line: str) -> str:

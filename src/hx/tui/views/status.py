@@ -2,9 +2,9 @@
 
 Everything here is low contrast on purpose. It is reference material - what
 model, what mode, how much context is left - that should be readable when
-looked at and invisible when not. The one exception is the context percentage,
-which changes colour as it approaches the point where the next turn compacts,
-because that is the one number with a deadline attached.
+looked at and invisible when not. The one exception is the context gauge, which
+changes colour as it approaches the point where the next turn compacts, because
+that is the one field with a deadline attached.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 from hx.core.usage import format_tokens
 from hx.term.component import Widget
 from hx.term.width import cell_width, truncate_to_width
-from hx.tui.glyphs import ELLIPSIS, SEPARATOR
+from hx.tui.glyphs import ELLIPSIS, METER_EMPTY, METER_FULL, SEPARATOR
 from hx.tui.paint import fg
 
 GAP = 2
@@ -23,6 +23,14 @@ MIN_LEFT = 12
 
 WARN_FRACTION = 0.75
 DANGER_FRACTION = 0.90
+
+METER_CELLS = 6
+"""Width of the context gauge. Six cells is one step per 17% - coarse, which
+is the point: the number beside it is there for anyone who wants precision."""
+
+METER_MIN_WIDTH = 60
+"""Below this the gauge is dropped. It is the decoration on that field, and a
+narrow pane should spend its columns on the counts instead."""
 
 MODE_ROLES = {"plan": "border", "default": "dim", "acceptEdits": "warning", "bypass": "error"}
 
@@ -43,6 +51,19 @@ def justify(left: str, right: str, width: int) -> str:
     if not keep_right:
         return left
     return left + " " * max(0, width - cell_width(left) - right_width) + right
+
+
+def meter(fraction: float, cells: int, role: str) -> str:
+    """A ``cells``-wide gauge: the filled run in ``role``, the rest dim.
+
+    Any non-zero fraction lights at least one cell. A session that has spent
+    tokens should never draw an empty bar, however little it has spent.
+    """
+    fraction = min(max(fraction, 0.0), 1.0)
+    filled = round(fraction * cells)
+    if fraction > 0.0:
+        filled = max(1, filled)
+    return fg(role, METER_FULL * filled) + fg("dim", METER_EMPTY * (cells - filled))
 
 
 def format_cost(usd: float) -> str:
@@ -106,9 +127,10 @@ class StatusBar(Widget):
     def draw(self, width: int) -> list[str]:
         from hx.term.ansi import fill_line
 
+        inner = max(1, width - 2)
         return [
-            fill_line(" " + justify(self._location(), self._mode(), max(1, width - 2)), width),
-            fill_line(" " + justify(self._stats(), self._model(), max(1, width - 2)), width),
+            fill_line(" " + justify(self._location(), self._mode(), inner), width),
+            fill_line(" " + justify(self._stats(inner), self._model(), inner), width),
         ]
 
     # -- fields ------------------------------------------------------------
@@ -129,7 +151,7 @@ class StatusBar(Widget):
             field += fg("dim", f" · sandbox {self.sandbox_backend}")
         return field
 
-    def _stats(self) -> str:
+    def _stats(self, width: int) -> str:
         parts: list[str] = []
         if self.input_tokens:
             parts.append(fg("dim", f"↑{format_tokens(self.input_tokens)}"))
@@ -143,7 +165,7 @@ class StatusBar(Widget):
         )
         if self.latency_ms >= 100:
             parts.append(fg("dim", f"{self.latency_ms / 1000:.1f}s"))
-        parts.append(self._context())
+        parts.append(self._context(width))
         return " ".join(parts)
 
     def _cache_field(self) -> str:
@@ -161,12 +183,13 @@ class StatusBar(Widget):
             + fg(role, f" CH{self.cache_hit_rate * 100:.0f}%")
         )
 
-    def _context(self) -> str:
-        """``12%/200k`` - percentage first, because that is the number that
-        decides whether the next turn compacts.
+    def _context(self, width: int) -> str:
+        """``▰▰▱▱▱▱ 24k/200k`` - a gauge, then what it is a gauge of.
 
         The only coloured field down here, and it earns it by having a
-        deadline.
+        deadline: it decides whether the next turn compacts. The bar is what
+        makes that deadline legible without reading - a glance sees how full
+        the window is, and the counts are there when the exact figure matters.
         """
         fraction = self.context_fraction
         role = "success"
@@ -176,7 +199,9 @@ class StatusBar(Widget):
             role = "warning"
 
         window = format_tokens(self.context_window) if self.context_window else "?"
-        field = fg(role, f"{fraction * 100:.0f}%/{window}")
+        field = fg(role, f"{format_tokens(self.context_used)}/{window}")
+        if width >= METER_MIN_WIDTH:
+            field = meter(fraction, METER_CELLS, role) + " " + field
         if self.auto_compact:
             field += fg("dim", " (auto)")
         return field

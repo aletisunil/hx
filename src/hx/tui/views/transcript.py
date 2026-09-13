@@ -15,9 +15,9 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from hx.term.component import Component, Container
-from hx.term.primitives import LabelledRule, Spacer, Text
+from hx.term.primitives import Spacer, Text
 from hx.tui.glyphs import SPINNER
-from hx.tui.paint import fg, rule
+from hx.tui.paint import fg
 from hx.tui.views.status import Header, HintsBar, StatusBar
 
 
@@ -43,57 +43,12 @@ class Transcript(Container):
         return blocks[-1] if blocks else None
 
 
-class WorkingRule(LabelledRule):
-    """The prompt's top rule, which doubles as the working indicator.
-
-    A turn starting costs no layout: the rule is there either way, so the
-    transcript above it does not jump when a spinner appears. Borrowed from pi,
-    and the single highest-leverage thing in its design.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(rule("border_muted"))
-        self._frame = 0
-        self._running = False
-        self._elapsed = 0.0
-        self._overflow = ""
-
-    def start(self) -> None:
-        self._running = True
-        self._elapsed = 0.0
-        self.invalidate()
-
-    def stop(self) -> None:
-        self._running = False
-        self.set_label("")
-        self.invalidate()
-
-    def tick(self, elapsed: float) -> None:
-        if not self._running:
-            return
-        self._frame = (self._frame + 1) % len(SPINNER)
-        self._elapsed = elapsed
-        self.invalidate()
-
-    def draw(self, width: int) -> list[str]:
-        if self._running:
-            from hx.keys import primary_key
-
-            label = fg("accent", SPINNER[self._frame]) + fg(
-                "muted",
-                f" Working… ({self._elapsed:.0f}s · {primary_key('app.interrupt')} to interrupt)",
-            )
-            self.set_label(label)
-        return super().draw(width)
-
-
 @runtime_checkable
 class Prompt(Protocol):
     """What the dock needs from whatever is taking the user's typing.
 
-    A protocol rather than a base class, so the stub here and the real editor
-    that replaces it are interchangeable without either knowing about the
-    other.
+    A protocol rather than a base class, so a stub and the real editor are
+    interchangeable without either knowing about the other.
     """
 
     @property
@@ -101,9 +56,59 @@ class Prompt(Protocol):
 
     def clear(self) -> None: ...
 
+    def set_status(self, label: str) -> None: ...
+
     def render(self, width: int) -> list[str]: ...
 
     def handle_input(self, key: str, data: str) -> bool: ...
+
+
+class WorkingIndicator:
+    """The working status, written into the prompt's own top rule.
+
+    Not a component. The prompt is framed by two rules whether or not a turn is
+    running, so the status has nowhere of its own to be - it lives in a line
+    that already exists, which is why a turn starting costs no layout and the
+    transcript above never jumps. Borrowed from pi, and the highest-leverage
+    thing in its design.
+    """
+
+    def __init__(self, target: Prompt) -> None:
+        self.target = target
+        self._frame = 0
+        self._running = False
+        self._elapsed = 0.0
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        self._running = True
+        self._elapsed = 0.0
+        self._paint()
+
+    def stop(self) -> None:
+        self._running = False
+        self.target.set_status("")
+
+    def tick(self, elapsed: float) -> None:
+        if not self._running:
+            return
+        self._frame = (self._frame + 1) % len(SPINNER)
+        self._elapsed = elapsed
+        self._paint()
+
+    def _paint(self) -> None:
+        from hx.keys import primary_key
+
+        self.target.set_status(
+            fg("accent", SPINNER[self._frame])
+            + fg(
+                "muted",
+                f" Working… ({self._elapsed:.0f}s · {primary_key('app.interrupt')} to interrupt)",
+            )
+        )
 
 
 class StubPrompt(Text):
@@ -151,19 +156,27 @@ class StubPrompt(Text):
 
 
 class Dock(Container):
-    """Everything below the transcript, in the order it is drawn."""
+    """Everything below the transcript, in the order it is drawn.
+
+    It draws no frame of its own: the prompt is framed by its own two rules,
+    and adding another pair here is how the dock ended up with four.
+    """
 
     def __init__(self, prompt: Prompt | None = None) -> None:
         super().__init__()
-        self.working = WorkingRule()
-        self.prompt: Prompt = prompt if prompt is not None else StubPrompt()
+        if prompt is None:
+            from pathlib import Path
+
+            from hx.tui.views.prompt import Prompt as RealPrompt
+
+            prompt = RealPrompt(Path.cwd())
+        self.prompt: Prompt = prompt
+        self.working = WorkingIndicator(self.prompt)
         self.hints = HintsBar()
         self.status = StatusBar()
 
         self.add(Spacer(1))
-        self.add(self.working)
         self.add(self.prompt)
-        self.add(LabelledRule(rule("border_muted")))
         self.add(self.hints)
         self.add(self.status)
 
@@ -178,12 +191,14 @@ class Session(Container):
     behaviour: it does not cover the sentence the user is deciding about.
     """
 
-    def __init__(self, version: str = "", quiet: bool = False) -> None:
+    def __init__(
+        self, version: str = "", quiet: bool = False, prompt: Prompt | None = None
+    ) -> None:
         super().__init__()
         self.header = Header(version, quiet)
         self.transcript = Transcript()
         self.overlay = Container()
-        self.dock = Dock()
+        self.dock = Dock(prompt)
 
         self.add(self.header)
         self.add(self.transcript)

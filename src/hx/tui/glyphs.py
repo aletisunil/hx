@@ -50,6 +50,12 @@ BASH = "$ "
 """A shell command, wherever one is shown - including in an approval, which
 used to show the bare command while the tool block showed it with the prompt."""
 
+METER_FULL = "▰"
+METER_EMPTY = "▱"
+"""One cell of a gauge, filled and unfilled. Only the context meter draws them,
+and it is the only field down there with a quantity worth seeing at a glance
+rather than reading."""
+
 RULE = "─"
 QUOTE_RAIL = "│ "
 ELLIPSIS = "…"
