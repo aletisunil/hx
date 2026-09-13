@@ -12,6 +12,7 @@ from __future__ import annotations
 from hx.core.usage import format_tokens
 from hx.term.component import Widget
 from hx.term.width import cell_width, truncate_to_width
+from hx.tui.format import meter_fill
 from hx.tui.glyphs import ELLIPSIS, METER_EMPTY, METER_FULL, SEPARATOR
 from hx.tui.paint import fg
 
@@ -56,13 +57,10 @@ def justify(left: str, right: str, width: int) -> str:
 def meter(fraction: float, cells: int, role: str) -> str:
     """A ``cells``-wide gauge: the filled run in ``role``, the rest dim.
 
-    Any non-zero fraction lights at least one cell. A session that has spent
-    tokens should never draw an empty bar, however little it has spent.
+    The fill maths is shared with the legacy bar, so the two renderers cannot
+    disagree about how full the window is during the changeover.
     """
-    fraction = min(max(fraction, 0.0), 1.0)
-    filled = round(fraction * cells)
-    if fraction > 0.0:
-        filled = max(1, filled)
+    filled = meter_fill(fraction, cells)
     return fg(role, METER_FULL * filled) + fg("dim", METER_EMPTY * (cells - filled))
 
 

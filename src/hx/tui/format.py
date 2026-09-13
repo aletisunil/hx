@@ -43,6 +43,18 @@ def columns(rows: Sequence[Sequence[str]], gap: int = 2) -> list[str]:
     return out
 
 
+def meter_fill(fraction: float, cells: int) -> int:
+    """How many cells of a ``cells``-wide gauge are filled at ``fraction``.
+
+    Clamped at both ends: a fraction over 1.0 is a bad window figure, not a
+    licence to overdraw. Any non-zero fraction lights at least one cell, so a
+    session that has spent tokens never draws an empty bar.
+    """
+    fraction = min(max(fraction, 0.0), 1.0)
+    filled = round(fraction * cells)
+    return max(1, filled) if fraction > 0.0 else filled
+
+
 def one_line(text: str, width: int) -> str:
     """Collapse to a single line, ellipsized to fit.
 

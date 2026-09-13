@@ -101,6 +101,10 @@ class HXSession:
         """The approval the keyboard is currently answering, if any."""
         self._overlay_finished: asyncio.Event | None = None
         """Set when whatever is on the overlay reports that it is done."""
+        self._queued: list[str] = []
+        self._mouse = False
+        self.commands: Any = None
+        """The slash-command registry, built on start."""
         self._silent: set[str] = set()
         self._assistant: AssistantMessage | None = None
         self._thinking: ThinkingMessage | None = None
@@ -110,6 +114,14 @@ class HXSession:
     # -- lifecycle ---------------------------------------------------------
 
     async def run(self) -> None:
+        from hx.tui.commands import CommandContext, build_default_commands
+
+        self.commands = build_default_commands()
+        self.prompt.commands = self.commands
+        self._context = CommandContext(
+            app=self, settings=self.settings, session=self.loop.session, registry=self.commands
+        )
+
         self.view.dock.hints.set_hints(HINTS)
         self._refresh_status()
         if self.loop.permissions is not None:
@@ -137,6 +149,139 @@ class HXSession:
                 block.tick()
             self.runner.request_render()
 
+    # -- the surface the slash commands expect -----------------------------
+    #
+    # Commands are written against an app object, not against a frontend. Every
+    # name below exists because a command asks for it, and they are gathered
+    # here rather than scattered so the contract is legible in one place.
+
+    @property
+    def status(self) -> Any:
+        return self.view.dock.status
+
+    @property
+    def models(self) -> Any:
+        return self.extra.get("models")
+
+    @property
+    def auth(self) -> Any:
+        return self.extra.get("auth")
+
+    @property
+    def skills(self) -> Any:
+        return self.extra.get("skills")
+
+    @property
+    def agents(self) -> Any:
+        return self.extra.get("agents")
+
+    @property
+    def mcp(self) -> Any:
+        return self.extra.get("mcp")
+
+    @property
+    def sandbox_active(self) -> bool:
+        return bool(self.extra.get("sandbox_active", True))
+
+    @property
+    def sandbox_backend(self) -> str:
+        return str(self.extra.get("sandbox_backend") or "")
+
+    @property
+    def mode(self) -> str:
+        if self.loop.permissions is None:
+            return "default"
+        return str(self.loop.permissions.mode.value)
+
+    @property
+    def queued(self) -> list[str]:
+        return self._queued
+
+    @property
+    def last_message_text(self) -> str:
+        block = self.view.transcript.last()
+        return getattr(block, "text", "") or ""
+
+    @property
+    def last_context(self) -> Any:
+        return getattr(self.loop.session, "usage", None)
+
+    def notice(self, text: str, level: str = "info") -> None:
+        self._notice(text, level)
+
+    def show(self, component: Any) -> None:
+        """Put something on the overlay without waiting for it.
+
+        For a flow that drives its own screen and decides when it is finished.
+        """
+        self.view.show(component)
+        self.runner.request_immediate_render()
+
+    def dismiss_modal(self) -> None:
+        self.view.dismiss()
+        self.runner.request_immediate_render()
+
+    def exit(self) -> None:
+        self.runner.stop()
+
+    def set_mode(self, mode: str) -> None:
+        from hx.config import PermissionMode
+
+        if self.loop.permissions is not None:
+            self.loop.permissions.mode = PermissionMode(mode)
+        self.status.set_mode(mode, self.sandbox_active, self.sandbox_backend)
+        self.runner.request_render()
+
+    def apply_theme(self, name: str) -> None:
+        from hx.tui.theme import THEME
+
+        THEME.use(name)
+        # Every cached line holds the old colours, so the document is redrawn
+        # from scratch rather than diffed against them.
+        self._invalidate_all(self.view)
+        self.runner.request_immediate_render()
+
+    def _invalidate_all(self, component: Any) -> None:
+        invalidate = getattr(component, "invalidate", None)
+        if invalidate is not None:
+            invalidate()
+        for child in getattr(component, "children", []) or []:
+            self._invalidate_all(child)
+
+    async def copy(self, text: str) -> str:
+        """Copy, returning which mechanism took it.
+
+        The OSC 52 writer is the terminal itself, which is the fallback that
+        works over ssh where no local clipboard command exists.
+        """
+        from hx.tui.clipboard import copy_text
+
+        return await copy_text(text, write_osc52=self._write_osc52)
+
+    def _write_osc52(self, payload: str) -> None:
+        self.runner.terminal.write(payload)
+
+    def set_mouse_reporting(self, enabled: bool) -> None:
+        setter = getattr(self.runner.terminal, "set_mouse", None)
+        if setter is not None:
+            setter(enabled)
+        self._mouse = enabled
+
+    @property
+    def mouse_reporting(self) -> bool:
+        return self._mouse
+
+    async def submit_to_model(self, text: str) -> None:
+        self._submit(text)
+
+    def clear_queue(self) -> None:
+        self._queued.clear()
+
+    def steer_queued(self) -> None:
+        for text in self._queued:
+            self.loop.steer(text)
+        self._queued.clear()
+
     def _terminal_rows(self) -> int:
         """How tall the terminal is, so the draft never eats the screen."""
         return self.runner.terminal.size[1]
@@ -158,7 +303,7 @@ class HXSession:
 
         chosen = await self.ask(CommandPalette(self._commands()))
         if chosen:
-            self._notice(f"/{chosen}")
+            await self._run_command(f"/{chosen}")
 
     async def _open_models(self) -> None:
         from hx.tui.views.pickers import ModelPicker
@@ -174,12 +319,7 @@ class HXSession:
             self._notice(f"model set to {chosen}")
 
     def _commands(self) -> list[Any]:
-        """The slash commands this session offers.
-
-        Empty until the command registry is ported, which is the next stage -
-        the palette itself is complete and its rows come from here.
-        """
-        return list(self.extra.get("commands") or [])
+        return list(self.commands.all()) if self.commands is not None else []
 
     async def ask(self, component: Any) -> Any:
         """Show ``component`` and wait for it to finish.
@@ -287,10 +427,26 @@ class HXSession:
 
     def _submit(self, text: str) -> None:
         self.view.transcript.append(UserMessage(text))
+        if text.startswith("/"):
+            self._turn = asyncio.create_task(self._run_command(text))
+            return
         if self.is_busy:
-            self._notice("a turn is already running", "warning")
+            # Held rather than refused: the user typed it while a turn was
+            # running, and dropping it loses the message.
+            self._queued.append(text)
+            self.status.update(queued=len(self._queued))
             return
         self._turn = asyncio.create_task(self._run_turn(text))
+
+    async def _run_command(self, line: str) -> None:
+        try:
+            await self.commands.dispatch(self._context, line)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._notice(str(error), "error")
+        finally:
+            self.runner.request_immediate_render()
 
     def _steer(self, text: str) -> None:
         """Alt+Enter: put this into the running turn now.

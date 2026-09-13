@@ -338,3 +338,60 @@ async def test_the_command_palette_opens_on_its_key(hx_home: Path, tmp_path: Pat
         driver.type("\x10")  # ctrl+p
         await driver.settle()
         assert any("Commands" in line for line in driver.display())
+
+
+async def test_a_slash_command_runs_and_prints_into_the_transcript(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        driver.type("/help\r")
+        await driver.settle(rounds=40)
+        # The output is longer than the screen, so assert on its tail - what
+        # scrolled off is the terminal's now, which is the point of the renderer.
+        shown = " ".join(driver.display())
+        assert "Cancel or abort" in shown
+
+
+async def test_an_unknown_command_suggests_rather_than_failing_silently(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        driver.type("/halp\r")
+        await driver.settle(rounds=40)
+        assert any("Unknown command" in line for line in driver.display())
+
+
+async def test_a_slash_command_is_not_sent_to_the_model(hx_home: Path, tmp_path: Path) -> None:
+    session = build(tmp_path, [text_turn("the model should not see this")])
+    async with Driver(session) as driver:
+        driver.type("/help\r")
+        await driver.settle(rounds=40)
+        assert not any("should not see this" in line for line in driver.display())
+
+
+async def test_typing_while_busy_queues_rather_than_dropping(hx_home: Path, tmp_path: Path) -> None:
+    """The user typed it; refusing it loses the message."""
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        session._turn = asyncio.create_task(asyncio.sleep(5))
+        try:
+            driver.type("a second thought\r")
+            await driver.settle()
+            assert session.queued == ["a second thought"]
+            assert session.view.dock.status.queued == 1
+        finally:
+            session._turn.cancel()
+
+
+async def test_the_prompt_says_what_enter_does_while_a_turn_runs(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    from hx.core import events as ev
+
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        session.bus.publish(ev.TurnStarted(turn_index=0, model=MODEL))
+        await driver.settle()
+        assert "queues" in session.prompt.placeholder or "steers" in session.prompt.placeholder
