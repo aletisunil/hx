@@ -91,6 +91,8 @@ class HXSession:
         self._tools: dict[str, ToolBlock] = {}
         self._pending: PermissionPrompt | None = None
         """The approval the keyboard is currently answering, if any."""
+        self._overlay_finished: asyncio.Event | None = None
+        """Set when whatever is on the overlay reports that it is done."""
         self._silent: set[str] = set()
         self._assistant: AssistantMessage | None = None
         self._thinking: ThinkingMessage | None = None
@@ -132,6 +134,54 @@ class HXSession:
         return self._turn is not None and not self._turn.done()
 
     # -- input -------------------------------------------------------------
+
+    async def _open_commands(self) -> None:
+        from hx.tui.views.pickers import CommandPalette
+
+        chosen = await self.ask(CommandPalette(self._commands()))
+        if chosen:
+            self._notice(f"/{chosen}")
+
+    async def _open_models(self) -> None:
+        from hx.tui.views.pickers import ModelPicker
+
+        registry = self.extra.get("models")
+        if registry is None:
+            self._notice("no model registry is loaded", "warning")
+            return
+        current = getattr(getattr(self.loop, "model_info", None), "id", "") or ""
+        chosen = await self.ask(ModelPicker(list(registry.all()), current))
+        if chosen:
+            self.view.dock.status.set_model(chosen)
+            self._notice(f"model set to {chosen}")
+
+    def _commands(self) -> list[Any]:
+        """The slash commands this session offers.
+
+        Empty until the command registry is ported, which is the next stage -
+        the palette itself is complete and its rows come from here.
+        """
+        return list(self.extra.get("commands") or [])
+
+    async def ask(self, component: Any) -> Any:
+        """Show ``component`` and wait for it to finish.
+
+        The component owns the keyboard until its ``done`` flag is set, then
+        its ``result`` is returned. That is the whole contract, which is what
+        lets a picker be written as a component rather than as a screen with a
+        lifecycle.
+        """
+        finished = asyncio.Event()
+        self._overlay_finished = finished
+        self.view.show(component)
+        self.runner.request_immediate_render()
+        try:
+            await finished.wait()
+            return getattr(component, "result", None)
+        finally:
+            self._overlay_finished = None
+            self.view.dismiss()
+            self.runner.request_immediate_render()
 
     async def ask_permission(self, request: Any) -> Any:
         """Ask in the transcript and wait for the answer.
@@ -179,6 +229,16 @@ class HXSession:
             self.runner.request_immediate_render()
             return
 
+        # So does an overlay, and it takes precedence over every app binding
+        # below - ctrl+o inside a picker is that picker's business.
+        showing = self.view.showing
+        if showing is not None:
+            self.view.handle_input(name, key.data)
+            if getattr(showing, "done", False) and self._overlay_finished is not None:
+                self._overlay_finished.set()
+            self.runner.request_immediate_render()
+            return
+
         if name == "ctrl+d" and not self.view.dock.prompt.value:
             self.runner.stop()
             return
@@ -198,6 +258,12 @@ class HXSession:
             return
         if name == "ctrl+o":
             self.view.header.toggle()
+            return
+        if name == "ctrl+p":
+            asyncio.create_task(self._open_commands())  # noqa: RUF006
+            return
+        if name == "ctrl+l":
+            asyncio.create_task(self._open_models())  # noqa: RUF006
             return
         if name == "enter":
             text = self.view.dock.prompt.value.strip()

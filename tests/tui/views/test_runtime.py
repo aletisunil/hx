@@ -289,3 +289,52 @@ def _request(cwd: Path) -> object:
         detail="rm -rf build/",
         detail_kind="command",
     )
+
+
+async def test_an_overlay_owns_the_keyboard_while_it_is_up(hx_home: Path, tmp_path: Path) -> None:
+    """A key meant for a picker must never fall through into the prompt."""
+    from hx.tui.views.pickers import CommandPalette
+
+    class Command:
+        def __init__(self, name: str, summary: str) -> None:
+            self.name, self.summary = name, summary
+
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        chosen = asyncio.create_task(
+            session.ask(CommandPalette([Command("status", "show cost"), Command("clear", "x")]))
+        )
+        await driver.settle()
+        assert any("Commands" in line for line in driver.display())
+
+        driver.type("stat")
+        await driver.settle()
+        assert session.view.dock.prompt.value == "", "typing leaked into the prompt"
+
+        driver.type("\r")
+        assert await asyncio.wait_for(chosen, timeout=2) == "status"
+
+
+async def test_dismissing_an_overlay_leaves_the_transcript_as_it_was(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    from hx.tui.views.pickers import CommandPalette
+
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        chosen = asyncio.create_task(session.ask(CommandPalette([])))
+        await driver.settle()
+        driver.type("\x1b")
+        await driver.settle(rounds=20)
+
+        assert await asyncio.wait_for(chosen, timeout=2) is None
+        assert session.view.showing is None
+        assert not any("Commands" in line for line in driver.display())
+
+
+async def test_the_command_palette_opens_on_its_key(hx_home: Path, tmp_path: Path) -> None:
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        driver.type("\x10")  # ctrl+p
+        await driver.settle()
+        assert any("Commands" in line for line in driver.display())

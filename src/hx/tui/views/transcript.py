@@ -169,17 +169,48 @@ class Dock(Container):
 
 
 class Session(Container):
-    """The whole document: a header, the transcript, and the dock."""
+    """The whole document: a header, the transcript, an overlay, and the dock.
+
+    The overlay sits between the transcript and the dock rather than on top of
+    anything. There is no layering in a scrollback-native UI - the document is
+    the screen - so a picker is a block that appears where the conversation is
+    and takes the keyboard while it is there. Which is also the better
+    behaviour: it does not cover the sentence the user is deciding about.
+    """
 
     def __init__(self, version: str = "", quiet: bool = False) -> None:
         super().__init__()
         self.header = Header(version, quiet)
         self.transcript = Transcript()
+        self.overlay = Container()
         self.dock = Dock()
 
         self.add(self.header)
         self.add(self.transcript)
+        self.add(self.overlay)
         self.add(self.dock)
 
+    def show(self, component: Component) -> None:
+        self.overlay.clear()
+        self.overlay.add(Spacer(1))
+        self.overlay.add(component)
+
+    def dismiss(self) -> None:
+        self.overlay.clear()
+
+    @property
+    def showing(self) -> Component | None:
+        """Whatever currently owns the keyboard, if anything."""
+        blocks = [child for child in self.overlay.children if not isinstance(child, Spacer)]
+        return blocks[-1] if blocks else None
+
     def handle_input(self, key: str, data: str) -> bool:
+        showing = self.showing
+        if showing is not None:
+            handler = getattr(showing, "handle_input", None)
+            if handler is not None and handler(key, data):
+                return True
+            # An overlay swallows everything else while it is up: a key meant
+            # for it must never fall through and be typed into the prompt.
+            return True
         return self.dock.handle_input(key, data)
