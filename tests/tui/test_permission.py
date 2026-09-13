@@ -13,7 +13,7 @@ import pytest
 from rich.console import Console
 
 from hx.permissions.engine import GrantScope, PermissionAnswer, PermissionRequest
-from hx.tui.widgets.permission import MAX_DETAIL_LINES, PermissionPrompt
+from hx.tui.legacy.widgets.permission import MAX_DETAIL_LINES, PermissionPrompt
 
 
 def _plain(prompt: PermissionPrompt, width: int = 90) -> str:

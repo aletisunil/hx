@@ -11,7 +11,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from hx.tui.renderers import (
+from hx.tui.legacy.renderers import (
     ToolCall,
     count_changes,
     display_path,

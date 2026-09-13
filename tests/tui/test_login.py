@@ -19,8 +19,8 @@ from hx.core.session import new_session
 from hx.providers.fake import FakeProvider, text_turn
 from hx.providers.models import CODEX_MODELS, ModelRegistry
 from hx.tools.registry import ToolRegistry
-from hx.tui.app import HXApp
-from hx.tui.widgets.login import LoginModal as LoginModalType
+from hx.tui.legacy.app import HXApp
+from hx.tui.legacy.widgets.login import LoginModal as LoginModalType
 
 MODEL = "anthropic/claude-sonnet-4.5"
 CODEX_MODEL = CODEX_MODELS[0].id
@@ -85,7 +85,7 @@ def signed_in_to_codex() -> None:
 
 
 async def picker_rows(app: HXApp) -> list[str]:
-    from hx.tui.commands import _reachable
+    from hx.tui.legacy.commands import _reachable
 
     return [model.id for model in _reachable(app._command_context(), app.models.all())]
 
@@ -224,7 +224,7 @@ async def test_the_login_modal_hands_a_pasted_url_to_the_flow(
 
     from textual.widgets import Input
 
-    from hx.tui.widgets.login import LoginModal
+    from hx.tui.legacy.widgets.login import LoginModal
 
     app = build_app(tmp_path)
     modal = LoginModal("OpenAI (ChatGPT Plus/Pro)")
@@ -244,7 +244,7 @@ async def test_the_login_modal_hands_a_pasted_url_to_the_flow(
 async def test_cancelling_the_login_modal_unblocks_the_flow(hx_home: Path, tmp_path: Path) -> None:
     import asyncio
 
-    from hx.tui.widgets.login import LoginModal
+    from hx.tui.legacy.widgets.login import LoginModal
 
     app = build_app(tmp_path)
     modal = LoginModal("OpenAI (ChatGPT Plus/Pro)")

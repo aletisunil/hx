@@ -19,12 +19,12 @@ from textual import events
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
-from hx.tui.renderers import ToolCall, renderer_for
+from hx.tui.legacy.renderers import ToolCall, renderer_for
+from hx.tui.legacy.widgets.selectable import SelectableBlock
 from hx.tui.theme import THEME, syntax_style
-from hx.tui.widgets.selectable import SelectableBlock
 
 if TYPE_CHECKING:
-    from hx.tui.widgets.permission import PermissionPrompt
+    from hx.tui.legacy.widgets.permission import PermissionPrompt
 
 
 class _PlainHeading(Heading):
@@ -75,7 +75,7 @@ class MessageBlock(Static, SelectableBlock):
     a partial fenced block is not parseable, so incremental parsing would flick
     between two layouts on every token.
 
-    :class:`~hx.tui.widgets.selectable.SelectableBlock` is what makes a mouse
+    :class:`~hx.tui.legacy.widgets.selectable.SelectableBlock` is what makes a mouse
     selection over this block copy anything: the render is a Rich renderable,
     which Textual cannot extract text from on its own.
     """
@@ -460,7 +460,7 @@ class Transcript(VerticalScroll):
 
     def pending_permission_prompts(self) -> list[PermissionPrompt]:
         """Unanswered prompts, oldest first - the order they must be answered in."""
-        from hx.tui.widgets.permission import PermissionPrompt
+        from hx.tui.legacy.widgets.permission import PermissionPrompt
 
         return [
             child

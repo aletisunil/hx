@@ -16,9 +16,9 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
 
+from hx.tui.legacy.widgets.input import PromptInput
+from hx.tui.legacy.widgets.working import WorkingIndicator, centred_rule
 from hx.tui.theme import THEME
-from hx.tui.widgets.input import PromptInput
-from hx.tui.widgets.working import WorkingIndicator, centred_rule
 
 
 class BottomRule(Static):

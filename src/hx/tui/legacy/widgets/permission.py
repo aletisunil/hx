@@ -23,7 +23,7 @@ from textual.binding import Binding, BindingType
 from textual.widgets import Static
 
 from hx.permissions.engine import GrantScope, PermissionAnswer, PermissionRequest
-from hx.tui.renderers import render_diff
+from hx.tui.legacy.renderers import render_diff
 from hx.tui.theme import THEME
 
 MAX_DETAIL_LINES = 24

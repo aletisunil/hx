@@ -22,11 +22,11 @@ from hx.providers.base import StreamDelta, StreamEnd
 from hx.providers.fake import FakeProvider, text_turn
 from hx.providers.models import ModelRegistry
 from hx.tools.registry import ToolRegistry
-from hx.tui.app import HXApp
-from hx.tui.commands import Command
-from hx.tui.widgets.input import PromptInput
-from hx.tui.widgets.statusbar import StatusBar
-from hx.tui.widgets.transcript import Transcript
+from hx.tui.legacy.app import HXApp
+from hx.tui.legacy.commands import Command
+from hx.tui.legacy.widgets.input import PromptInput
+from hx.tui.legacy.widgets.statusbar import StatusBar
+from hx.tui.legacy.widgets.transcript import Transcript
 
 
 def _plain(renderable: object, width: int = 90) -> str:
@@ -328,7 +328,7 @@ async def test_permission_prompt_shows_the_diff_before_approval(
 ) -> None:
     """An approval prompt that hides what it is approving is not consent."""
     from hx.permissions.engine import PermissionRequest
-    from hx.tui.widgets.permission import PermissionPrompt
+    from hx.tui.legacy.widgets.permission import PermissionPrompt
 
     diff = "--- a.py\n+++ a.py\n@@ -1 +1 @@\n-old line\n+new line\n"
     request = PermissionRequest(
@@ -355,7 +355,7 @@ async def test_permission_prompt_shows_the_diff_before_approval(
 
 async def test_asking_inline_returns_the_chosen_scope(hx_home: Path, tmp_path: Path) -> None:
     from hx.permissions.engine import GrantScope, PermissionRequest
-    from hx.tui.widgets.permission import PermissionPrompt
+    from hx.tui.legacy.widgets.permission import PermissionPrompt
 
     request = PermissionRequest(
         "Bash", "rm -rf build", {}, True, "Bash(rm -rf build)", "rm -rf build"
@@ -424,7 +424,7 @@ async def test_the_ui_still_works_while_a_prompt_is_pending(hx_home: Path, tmp_p
 async def test_a_subagent_prompt_names_who_is_asking(hx_home: Path, tmp_path: Path) -> None:
     """An approval prompt with no visible origin is not an informed approval."""
     from hx.permissions.engine import PermissionRequest
-    from hx.tui.widgets.permission import PermissionPrompt
+    from hx.tui.legacy.widgets.permission import PermissionPrompt
 
     request = PermissionRequest(
         "Bash",
@@ -756,7 +756,7 @@ async def test_model_command_opens_the_picker_from_a_submission(
     Submissions run outside worker context, where push_screen_wait raises.
     """
     from hx.providers.models import CacheMode, ModelInfo, ModelPricing
-    from hx.tui.widgets.palette import ModelPicker
+    from hx.tui.legacy.widgets.palette import ModelPicker
 
     def info(model_id: str) -> ModelInfo:
         return ModelInfo(
@@ -854,7 +854,7 @@ async def test_exit_is_an_alias_for_quit(hx_home: Path, tmp_path: Path) -> None:
 async def test_configure_saves_and_applies_a_new_key(hx_home: Path, tmp_path: Path) -> None:
     """A key that can only be set at first run leaves a revoked key unfixable."""
     from hx.providers.openrouter import load_api_key
-    from hx.tui.widgets.configure import ConfigureModal
+    from hx.tui.legacy.widgets.configure import ConfigureModal
 
     class FakeProviderWithKey:
         name = "fake"
@@ -897,7 +897,7 @@ async def test_configure_warns_when_the_environment_wins(
     hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Saving a key while an env var is set looks like a no-op otherwise."""
-    from hx.tui.widgets.configure import ConfigureModal
+    from hx.tui.legacy.widgets.configure import ConfigureModal
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-from-the-environment")
     app = build_app(tmp_path)
@@ -947,7 +947,7 @@ async def test_the_picker_is_navigable_from_the_filter_box(hx_home: Path, tmp_pa
     nothing was ever highlighted and Enter picked whatever sorted first."""
     from textual.widgets import OptionList
 
-    from hx.tui.widgets.palette import ModelPicker
+    from hx.tui.legacy.widgets.palette import ModelPicker
 
     app = build_app(tmp_path)
     _catalogue(app, "openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-opus-5")
@@ -1005,7 +1005,7 @@ async def test_typing_in_the_picker_narrows_and_keeps_a_selection(
 async def test_a_model_query_pre_fills_the_filter_box(hx_home: Path, tmp_path: Path) -> None:
     """`/model gpt-5` narrows the list; leaving the box empty made that look
     like the filter had failed to apply."""
-    from hx.tui.widgets.palette import ModelPicker
+    from hx.tui.legacy.widgets.palette import ModelPicker
 
     app = build_app(tmp_path)
     _catalogue(app, "openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-opus-5")
@@ -1078,7 +1078,7 @@ async def test_ctrl_d_exits_only_from_an_empty_prompt(hx_home: Path, tmp_path: P
 
 async def test_typing_a_slash_opens_the_completion_popup(hx_home: Path, tmp_path: Path) -> None:
     """The placeholder has always promised this; now it happens."""
-    from hx.tui.widgets.autocomplete import Autocomplete
+    from hx.tui.legacy.widgets.autocomplete import Autocomplete
 
     app = build_app(tmp_path)
     async with app.run_test() as pilot:
@@ -1113,7 +1113,7 @@ async def test_enter_runs_an_exact_slash_command_with_completion_open(
     hx_home: Path, tmp_path: Path
 ) -> None:
     """A complete command executes on the first Enter, even with autocomplete open."""
-    from hx.tui.widgets.palette import ModelPicker
+    from hx.tui.legacy.widgets.palette import ModelPicker
 
     app = build_app(tmp_path)
     app.models._models["openai/gpt-5"] = _gpt5()

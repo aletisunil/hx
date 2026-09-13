@@ -14,8 +14,8 @@ import pytest
 from rich.console import Console
 from textual.geometry import Size
 
+from hx.tui.legacy.widgets.statusbar import DANGER_FRACTION, WARN_FRACTION, StatusBar
 from hx.tui.theme import THEME
-from hx.tui.widgets.statusbar import DANGER_FRACTION, WARN_FRACTION, StatusBar
 
 
 def _bar() -> StatusBar:

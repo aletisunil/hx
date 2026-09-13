@@ -6,7 +6,7 @@ from pathlib import Path
 
 from hx.tui.fuzzy import filter_items, match
 from hx.tui.killring import KillRing
-from hx.tui.widgets.autocomplete import Autocomplete, Candidate, Completion
+from hx.tui.legacy.widgets.autocomplete import Autocomplete, Candidate, Completion
 
 
 def test_fuzzy_matches_characters_in_order() -> None:
@@ -80,7 +80,7 @@ def test_descriptions_line_up_under_each_other() -> None:
 
 
 def test_path_completion_ignores_noise_directories(tmp_path: Path) -> None:
-    from hx.tui.widgets.input import FileCompleter
+    from hx.tui.legacy.widgets.input import FileCompleter
 
     (tmp_path / "src").mkdir()
     (tmp_path / "node_modules").mkdir()
@@ -112,7 +112,7 @@ def test_accepting_a_completion_keeps_the_rest_of_the_draft(tmp_path: Path) -> N
     Rebuilding it threw away everything past the cursor, so tab-completing a
     path mentioned early in a sentence deleted the sentence.
     """
-    from hx.tui.widgets.input import PromptInput
+    from hx.tui.legacy.widgets.input import PromptInput
 
     (tmp_path / "src").mkdir()
     prompt = PromptInput(tmp_path)
@@ -128,7 +128,7 @@ def test_accepting_a_completion_keeps_the_rest_of_the_draft(tmp_path: Path) -> N
 
 
 def test_accepting_a_completion_leaves_later_lines_intact(tmp_path: Path) -> None:
-    from hx.tui.widgets.input import PromptInput
+    from hx.tui.legacy.widgets.input import PromptInput
 
     (tmp_path / "src").mkdir()
     prompt = PromptInput(tmp_path)
@@ -143,7 +143,7 @@ def test_accepting_a_completion_leaves_later_lines_intact(tmp_path: Path) -> Non
 
 
 def test_yank_pop_replaces_the_yank_it_follows(tmp_path: Path) -> None:
-    from hx.tui.widgets.input import PromptInput
+    from hx.tui.legacy.widgets.input import PromptInput
 
     prompt = PromptInput(tmp_path)
     prompt.text = "hello"
@@ -160,7 +160,7 @@ def test_yank_pop_replaces_the_yank_it_follows(tmp_path: Path) -> None:
 def test_yank_pop_does_nothing_once_the_buffer_has_moved_on(tmp_path: Path) -> None:
     """The recorded range is stale after any other edit, and replacing it blind
     mangled whatever had shifted into those columns."""
-    from hx.tui.widgets.input import PromptInput
+    from hx.tui.legacy.widgets.input import PromptInput
 
     prompt = PromptInput(tmp_path)
     prompt.text = "hello"

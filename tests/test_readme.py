@@ -22,8 +22,8 @@ from hx.config import (
     PromptSettings,
     Settings,
 )
-from hx.tui.app import HXApp
-from hx.tui.commands import build_default_commands
+from hx.tui.legacy.app import HXApp
+from hx.tui.legacy.commands import build_default_commands
 
 README = Path(__file__).resolve().parent.parent / "README.md"
 
@@ -88,7 +88,7 @@ def test_every_documented_keybinding_exists(readme: str) -> None:
 
 def test_widget_level_keys_are_really_handled() -> None:
     """They are absent from App.BINDINGS, so only the widget can vouch for them."""
-    source = (README.parent / "src" / "hx" / "tui" / "widgets" / "input.py").read_text()
+    source = (README.parent / "src" / "hx" / "tui" / "legacy" / "widgets" / "input.py").read_text()
     for action in WIDGET_ACTIONS:
         assert f'"{action}"' in source, f"{action} is bound but the prompt does not handle it"
 

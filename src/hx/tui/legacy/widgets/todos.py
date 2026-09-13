@@ -14,8 +14,8 @@ from rich.console import RenderableType
 from rich.text import Text
 from textual.widgets import Static
 
+from hx.tui.legacy.widgets.working import FRAMES
 from hx.tui.theme import THEME
-from hx.tui.widgets.working import FRAMES
 
 MARKERS: dict[str, tuple[str, str]] = {
     "completed": ("✓", "success"),

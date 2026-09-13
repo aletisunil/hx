@@ -80,7 +80,7 @@ def test_bindings_carry_every_key_for_an_action() -> None:
 
 def test_help_lists_keys_from_the_registry() -> None:
     """The point of the registry: no second, hand-maintained copy of the keys."""
-    from hx.tui.commands import help_keys
+    from hx.tui.legacy.commands import help_keys
 
     rows = dict(help_keys())
     assert rows["esc"] == KEYMAP.description("app.interrupt")
@@ -129,7 +129,7 @@ def test_the_prompt_spells_the_steer_key_the_way_help_does() -> None:
     key differently, and a rebind left the placeholder pointing at a key that
     no longer steered.
     """
-    from hx.tui.widgets.input import running_placeholder
+    from hx.tui.legacy.widgets.input import running_placeholder
 
     steer = KEYMAP.primary("tui.input.steer")
 

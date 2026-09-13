@@ -7,10 +7,10 @@ from pathlib import Path
 
 from rich.console import Console
 
-from hx.tui.renderers import expand_hint
+from hx.tui.legacy.renderers import expand_hint
+from hx.tui.legacy.widgets.transcript import MessageBlock, Notice, ToolBlock, markdown
+from hx.tui.legacy.widgets.working import WorkingIndicator
 from hx.tui.theme import THEME
-from hx.tui.widgets.transcript import MessageBlock, Notice, ToolBlock, markdown
-from hx.tui.widgets.working import WorkingIndicator
 
 
 def _plain(renderable: object, width: int = 90) -> str:

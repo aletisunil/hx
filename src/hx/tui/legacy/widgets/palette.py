@@ -16,8 +16,8 @@ from textual.widgets.option_list import Option
 from hx.core.usage import format_tokens
 from hx.providers.models import match_models
 from hx.tui.fuzzy import filter_items
+from hx.tui.legacy.widgets.rule import Rule
 from hx.tui.theme import THEME
-from hx.tui.widgets.rule import Rule
 
 #: Marks the row Enter will take, the way pi marks a selection. A highlight
 #: colour alone is ambiguous on a terminal that renders it faintly.

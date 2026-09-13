@@ -93,7 +93,7 @@ async def cmd_model(ctx: CommandContext, args: str) -> None:
     """``/model [query]`` - fuzzy picker over the models this machine can reach,
     showing route, context window, price per Mtok, and cache support."""
     from hx.providers.models import ModelRegistry
-    from hx.tui.widgets.palette import ModelPicker
+    from hx.tui.legacy.widgets.palette import ModelPicker
 
     registry: ModelRegistry = ctx.app.models
     models = _reachable(ctx, registry.all())
@@ -267,7 +267,7 @@ async def cmd_effort(ctx: CommandContext, args: str) -> None:
     so nothing has to be rebuilt and a turn already running is left alone.
     """
     from hx.providers.codex_catalogue import EFFORT_ORDER
-    from hx.tui.widgets.palette import DEFAULT_EFFORT_ROW, EffortPicker
+    from hx.tui.legacy.widgets.palette import DEFAULT_EFFORT_ROW, EffortPicker
 
     model_id = ctx.app.loop.model
     info = ctx.app.models.get_or_default(model_id)
@@ -371,7 +371,7 @@ async def cmd_todos(ctx: CommandContext, args: str) -> None:
 async def cmd_resume(ctx: CommandContext, args: str) -> None:
     """``/resume`` - pick a previous session in this directory."""
     from hx.core.session import list_sessions
-    from hx.tui.widgets.palette import SessionPicker
+    from hx.tui.legacy.widgets.palette import SessionPicker
 
     if ctx.app.is_busy:
         ctx.app.notice("Interrupt the running turn before resuming another.", "warning")
@@ -388,7 +388,7 @@ async def cmd_resume(ctx: CommandContext, args: str) -> None:
 
 async def cmd_rewind(ctx: CommandContext, args: str) -> None:
     """``/rewind`` - take the session back to an earlier prompt, files and all."""
-    from hx.tui.widgets.palette import RewindPicker
+    from hx.tui.legacy.widgets.palette import RewindPicker
 
     if ctx.app.is_busy:
         ctx.app.notice("Interrupt the running turn before rewinding.", "warning")
@@ -610,7 +610,7 @@ async def cmd_configure(ctx: CommandContext, args: str) -> None:
     """``/configure`` - session settings, and set or replace the OpenRouter key."""
     from hx.auth.store import OPENROUTER
     from hx.providers.openrouter import api_key_source, mask_api_key, save_api_key
-    from hx.tui.widgets.configure import ConfigureModal, build_summary
+    from hx.tui.legacy.widgets.configure import ConfigureModal, build_summary
 
     source = api_key_source()
     hint = "not set"
@@ -652,7 +652,7 @@ async def cmd_configure(ctx: CommandContext, args: str) -> None:
 async def cmd_login(ctx: CommandContext, args: str) -> None:
     """``/login [provider]`` - sign in to a model route."""
     from hx.providers import registry
-    from hx.tui.widgets.login import ProviderPicker, provider_options
+    from hx.tui.legacy.widgets.login import ProviderPicker, provider_options
 
     provider_id = args.strip()
     if not provider_id:
@@ -683,7 +683,7 @@ async def _run_oauth_login(ctx: CommandContext, spec: Any) -> None:
     from hx.auth.oauth.callback import CallbackError
     from hx.auth.store import AuthStore
     from hx.providers import registry
-    from hx.tui.widgets.login import LoginModal
+    from hx.tui.legacy.widgets.login import LoginModal
 
     modal = LoginModal(spec.label)
     # Awaited: the flow talks to the modal immediately, and a screen that has

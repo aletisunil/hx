@@ -16,7 +16,7 @@ from textual.widgets import TextArea
 from hx.keys import KEYMAP
 from hx.tui.fuzzy import filter_items
 from hx.tui.killring import KillRing
-from hx.tui.widgets.autocomplete import Autocomplete, Candidate, Completion
+from hx.tui.legacy.widgets.autocomplete import Autocomplete, Candidate, Completion
 
 MAX_HISTORY = 500
 

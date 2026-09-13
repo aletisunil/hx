@@ -24,7 +24,7 @@ from hx.core.session import new_session
 from hx.providers.fake import FakeProvider, text_turn
 from hx.providers.models import ModelRegistry
 from hx.tools.registry import ToolRegistry
-from hx.tui.app import HXApp
+from hx.tui.legacy.app import HXApp
 
 MODEL = "anthropic/claude-sonnet-4.5"
 

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from hx.tui.widgets.frame import BottomRule
-from hx.tui.widgets.hints import HintsBar
-from hx.tui.widgets.working import WorkingIndicator
+from hx.tui.legacy.widgets.frame import BottomRule
+from hx.tui.legacy.widgets.hints import HintsBar
+from hx.tui.legacy.widgets.working import WorkingIndicator
 
 
 def _busy(label: str = "thinking") -> WorkingIndicator:

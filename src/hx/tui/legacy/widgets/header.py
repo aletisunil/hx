@@ -12,8 +12,8 @@ from rich.text import Text
 from textual.widgets import Static
 
 from hx.keys import KEYMAP
+from hx.tui.legacy.widgets.hints import LITERAL_HINTS
 from hx.tui.theme import THEME
-from hx.tui.widgets.hints import LITERAL_HINTS
 
 
 class StartupHeader(Static):

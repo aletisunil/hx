@@ -14,8 +14,8 @@ from typing import Any
 import pytest
 from textual.pilot import Pilot
 
-from hx.tui.widgets import working
-from hx.tui.widgets.working import WorkingIndicator
+from hx.tui.legacy.widgets import working
+from hx.tui.legacy.widgets.working import WorkingIndicator
 from tests.tui.test_app import build_app
 
 SIZE = (100, 32)
@@ -126,7 +126,7 @@ def test_a_pending_permission_prompt(
     and it is exactly the kind of thing only a layout snapshot notices losing.
     """
     from hx.permissions.engine import PermissionRequest
-    from hx.tui.widgets.permission import PermissionPrompt
+    from hx.tui.legacy.widgets.permission import PermissionPrompt
 
     _pin_clock(monkeypatch)
     app = build_app(tmp_path)

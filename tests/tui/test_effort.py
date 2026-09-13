@@ -15,7 +15,7 @@ from hx.paths import user_settings_file
 from hx.providers.fake import FakeProvider, text_turn
 from hx.providers.models import CODEX_MODELS, ModelRegistry
 from hx.tools.registry import ToolRegistry
-from hx.tui.app import HXApp
+from hx.tui.legacy.app import HXApp
 
 DEEPEST = max(CODEX_MODELS, key=lambda m: len(m.reasoning_levels))
 SHALLOWEST = min(CODEX_MODELS, key=lambda m: len(m.reasoning_levels))
@@ -141,7 +141,7 @@ def test_a_resume_row_leads_with_the_number_the_user_recognises() -> None:
     a one-prompt session reading "31 msgs" describes the protocol."""
     from dataclasses import dataclass
 
-    from hx.tui.widgets.palette import _size
+    from hx.tui.legacy.widgets.palette import _size
 
     @dataclass
     class _Meta:
