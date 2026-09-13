@@ -82,14 +82,22 @@ class FileCompleter:
         ]
 
 
-def placeholder_text(*, running: bool, enter_steers: bool) -> str:
+def placeholder_text(*, running: bool = False, enter_steers: bool = False) -> str:
+    """What the empty prompt says, and what Enter will do to it.
+
+    The steer key is read from the registry rather than spelled out. Hard-coded
+    it said "alt+enter" while /help said "option+enter" on macOS, and a rebind
+    left it naming a key that no longer steered.
+    """
     if not running:
         return "Ask HX…  (/ for commands)"
-    return (
-        "Ask HX…  (Enter steers · alt+enter queues)"
-        if enter_steers
-        else "Ask HX…  (Enter queues · alt+enter steers)"
-    )
+
+    from hx.keys import KEYMAP
+
+    steer = KEYMAP.primary("tui.input.steer")
+    if enter_steers:
+        return f"Ask HX…  (Enter steers · {steer} queues)"
+    return f"Ask HX…  (Enter queues · {steer} steers)"
 
 
 class Prompt(Editor):

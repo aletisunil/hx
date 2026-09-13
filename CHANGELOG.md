@@ -31,7 +31,7 @@ the project follows [semantic versioning](https://semver.org/).
 - The interface is drawn into your terminal's own scrollback instead of taking
   over the screen. Finished output belongs to the terminal: scroll it, select
   it with the mouse, copy it, pipe it, and it is still there after HX exits.
-  `HX_TUI=legacy` runs the previous interface if you need it.
+  This replaces the previous full-screen interface entirely.
 - Approving a tool call is now a framed prompt with one option per line, each
   saying what it does - `always allow` states that it writes a rule to
   `.hx/settings.local.json`. `y`/`s`/`a`/`n` still answer in one keystroke,

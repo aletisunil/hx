@@ -115,6 +115,20 @@ class StatusBar(Widget):
     def set_cache(self, read_tokens: int, write_tokens: int, hit_rate: float) -> None:
         self.update(cache_read=read_tokens, cache_write=write_tokens, cache_hit_rate=hit_rate)
 
+    def set_effort(self, effort: str | None) -> None:
+        """Reasoning depth, resolved per model.
+
+        It can change without the user asking - a new model may not offer the
+        level the last one ran at - so the bar has to say so when it happens.
+        """
+        self.update(effort=effort)
+
+    def set_cost(self, cost_usd: float) -> None:
+        self.update(cost_usd=cost_usd)
+
+    def set_queued(self, count: int) -> None:
+        self.update(queued=count)
+
     def set_mode(self, mode: str, sandbox_active: bool, backend: str = "") -> None:
         self.update(mode=mode, sandbox_active=sandbox_active, sandbox_backend=backend)
 

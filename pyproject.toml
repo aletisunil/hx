@@ -20,8 +20,6 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-  "textual>=0.85",
-  "rich>=13.7",
   "httpx>=0.27",
   "pydantic>=2.7",
   "pyyaml>=6.0",
@@ -32,6 +30,10 @@ dependencies = [
   # Cell widths for the terminal renderer. Pure Python, tables generated from
   # the Unicode data files - the one thing hx.term does not hand-roll.
   "wcwidth>=0.2.13",
+  # Syntax highlighting. Was transitive through rich; now asked for directly.
+  "pygments>=2.17",
+  # CommonMark parsing. The renderer is ours; the parser is not worth writing.
+  "markdown-it-py>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -41,10 +43,8 @@ dev = [
   "pytest-cov>=5.0",
   "ruff>=0.6",
   "mypy>=1.11",
-  "textual-dev>=1.5",
   "types-PyYAML",
   "types-Pygments",
-  "pytest-textual-snapshot>=1.0",
   # A VT emulator, so tests can assert what the differ actually paints rather
   # than what it claims to have written.
   "pyte>=0.8",
@@ -96,7 +96,7 @@ disallow_untyped_defs = true
 plugins = []
 
 [[tool.mypy.overrides]]
-module = ["textual.*", "textual_dev.*"]
+module = ["pyte.*", "wcwidth.*", "markdown_it.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

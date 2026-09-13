@@ -39,6 +39,10 @@ class UserMessage(Widget):
         super().__init__()
         self._text = text
 
+    @property
+    def text(self) -> str:
+        return self._text
+
     def draw(self, width: int) -> list[str]:
         body = Lines(
             [fg("user_text", line) for line in render_markdown(self._text, max(1, width - 2))],

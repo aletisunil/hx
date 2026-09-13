@@ -25,7 +25,7 @@ from hx.term.width import strip_ansi
 from hx.tools.registry import ToolRegistry
 from hx.tui import paint
 from hx.tui.runtime import HXSession
-from tests.tui.test_app import MODEL, FakeProvider, text_turn
+from tests.tui.support import MODEL, FakeProvider, text_turn
 
 pytestmark = pytest.mark.asyncio
 

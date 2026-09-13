@@ -18,12 +18,8 @@ import os
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 from hx.paths import keybindings_file
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from textual.binding import Binding
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,33 +255,6 @@ def primary_key(action: str) -> str:
 def key_hint(action: str, description: str | None = None) -> tuple[str, str]:
     """``(key, description)`` for the hints bar, already joined for display."""
     return key_text(action), description or KEYMAP.description(action)
-
-
-def bindings_for(*actions: str) -> list[Binding]:
-    """Textual bindings for the given actions.
-
-    The action name Textual dispatches to is the id with dots and camelCase
-    flattened - ``app.transcript.pageUp`` becomes ``transcript_page_up`` - so a
-    new keybinding needs a matching ``action_*`` method and nothing else.
-    """
-    from textual.binding import Binding
-
-    bindings: list[Binding] = []
-    for action in actions:
-        binding = KEYMAP.bindings[action]
-        keys = KEYMAP.keys_for(action)
-        if not keys:
-            continue
-        bindings.append(
-            Binding(
-                ",".join(keys),
-                action_name(action),
-                binding.description,
-                show=False,
-                priority=binding.priority,
-            )
-        )
-    return bindings
 
 
 def action_name(action: str) -> str:

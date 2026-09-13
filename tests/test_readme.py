@@ -22,8 +22,7 @@ from hx.config import (
     PromptSettings,
     Settings,
 )
-from hx.tui.legacy.app import HXApp
-from hx.tui.legacy.commands import build_default_commands
+from hx.tui.commands import build_default_commands
 
 README = Path(__file__).resolve().parent.parent / "README.md"
 
@@ -88,7 +87,7 @@ def test_every_documented_keybinding_exists(readme: str) -> None:
 
 def test_widget_level_keys_are_really_handled() -> None:
     """They are absent from App.BINDINGS, so only the widget can vouch for them."""
-    source = (README.parent / "src" / "hx" / "tui" / "legacy" / "widgets" / "input.py").read_text()
+    source = (README.parent / "src" / "hx" / "tui" / "views" / "prompt.py").read_text()
     for action in WIDGET_ACTIONS:
         assert f'"{action}"' in source, f"{action} is bound but the prompt does not handle it"
 
@@ -107,14 +106,64 @@ def test_every_binding_is_documented(readme: str) -> None:
     assert missing == set(), f"bound but undocumented: {missing}"
 
 
-def test_app_bindings_all_come_from_the_registry() -> None:
-    """No key may be added to the app without an entry the docs can find."""
+def test_every_key_the_session_handles_comes_from_the_registry() -> None:
+    """No key may be added to the session without an entry the docs can find.
+
+    Read out of the source rather than from a bindings table, because there is
+    no table any more: the session matches key names directly, and a literal
+    that is not in the registry is a key /help and the README cannot describe.
+    """
+    import ast
+
     from hx.keys import KEYMAP
 
-    registry_keys = {",".join(keys) for keys in KEYMAP.keys.values() if keys}
-    for binding in HXApp.BINDINGS:
-        key = binding[0] if isinstance(binding, tuple) else binding.key
-        assert key in registry_keys, f"{key} is bound outside the keybinding registry"
+    known = {key for keys in KEYMAP.keys.values() for key in keys}
+    # Keys the editor and the dialogs own outright. They are not app actions -
+    # nothing rebinds "backspace" - so they are not registry entries either.
+    primitives = {
+        "text",
+        "paste",
+        "enter",
+        "escape",
+        "backspace",
+        "delete",
+        "tab",
+        "up",
+        "down",
+        "left",
+        "right",
+        "home",
+        "end",
+        "pageup",
+        "pagedown",
+        "ctrl+a",
+        "ctrl+e",
+        "ctrl+u",
+        "ctrl+k",
+        "ctrl+w",
+        "alt+backspace",
+    }
+
+    source = (README.parent / "src" / "hx" / "tui" / "runtime.py").read_text()
+    tree = ast.parse(source)
+    compared: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        if not (isinstance(node.left, ast.Name) and node.left.id == "name"):
+            continue
+        for comparator in node.comparators:
+            if isinstance(comparator, ast.Constant) and isinstance(comparator.value, str):
+                compared.add(comparator.value)
+            elif isinstance(comparator, ast.Tuple):
+                compared.update(
+                    element.value
+                    for element in comparator.elts
+                    if isinstance(element, ast.Constant) and isinstance(element.value, str)
+                )
+
+    unknown = compared - known - primitives
+    assert not unknown, f"bound outside the keybinding registry: {sorted(unknown)}"
 
 
 def _documented_settings(readme: str) -> dict:

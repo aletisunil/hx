@@ -135,26 +135,11 @@ class EnterWhileBusy(StrEnum):
     """Put it into the running turn now. Alt+Enter queues instead."""
 
 
-class TuiRenderer(StrEnum):
-    """Which frontend draws the session."""
-
-    LEGACY = "legacy"
-    """The Textual app HX shipped through 0.1.x."""
-
-    NEW = "new"
-    """The scrollback-native renderer that replaces it."""
-
-
 @dataclass(frozen=True, slots=True)
 class TuiSettings:
     enter_while_busy: EnterWhileBusy = EnterWhileBusy.QUEUE
     """Queueing is the default because it cannot surprise anyone: a steer cuts
     off the model mid-sentence, which is worth asking for deliberately."""
-
-    renderer: TuiRenderer = TuiRenderer.NEW
-    """The scrollback-native renderer. ``HX_TUI=legacy`` selects the Textual
-    app instead, so a terminal the new one disagrees with is one environment
-    variable away from working again."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,13 +398,6 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
     except ValueError as exc:
         raise ConfigError(f"unknown tui.enterWhileBusy: {busy_raw!r}") from exc
 
-    renderer_raw = tui.get("renderer", TuiRenderer.NEW)
-    try:
-        renderer = TuiRenderer(renderer_raw)
-    except ValueError as exc:
-        known = ", ".join(sorted(r.value for r in TuiRenderer))
-        raise ConfigError(f"unknown tui.renderer: {renderer_raw!r}. Known: {known}") from exc
-
     return Settings(
         cwd=cwd,
         models=ModelSettings(
@@ -469,7 +447,7 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
             system=prompt.get("system"),
             append=tuple(_as_list(prompt.get("append", ()))),
         ),
-        tui=TuiSettings(enter_while_busy=enter_while_busy, renderer=renderer),
+        tui=TuiSettings(enter_while_busy=enter_while_busy),
         theme=data.get("theme", "dark"),
         quiet_startup=bool(data.get("quietStartup", data.get("quiet_startup", False))),
         telemetry=bool(data.get("telemetry", False)),

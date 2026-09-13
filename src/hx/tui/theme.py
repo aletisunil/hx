@@ -1,12 +1,11 @@
-"""The active theme: one palette of named roles, shared by CSS and Rich.
+"""The active theme: one palette of named roles.
 
-Widget chrome reaches colour through Textual's design tokens; the content a
-widget draws with Rich - a tool header, a diff line, a footer field - cannot.
-Both are fed from the same :class:`~hx.tui.roles.Palette`, so a colour is
-defined once and a theme switch moves the whole app rather than half of it.
+Palettes are data (see :mod:`hx.tui.theme_json`); this module tracks which one
+is live. :mod:`hx.tui.paint` turns a role into escape sequences.
 
-Palettes themselves are data (see :mod:`hx.tui.theme_json`); this module only
-tracks which one is live and turns roles into style strings.
+Every colour in the UI comes from a role, and there are no hex literals in the
+views. That is what makes a user's theme file actually reach the screen: the
+drift that matters is not a wrong colour, it is a colour nobody asked for.
 """
 
 from __future__ import annotations
@@ -133,44 +132,5 @@ def _syntax_style(active: Palette) -> Any:
         {
             "background_color": None if active.background.startswith("ansi") else active.background,
             "styles": styles,
-        },
-    )
-
-
-def textual_theme(name: str) -> Any:
-    """A Textual theme built from the HX palette of the same name.
-
-    Returned rather than registered so the caller decides when to install it;
-    the app does that once, on mount.
-    """
-    from textual.theme import Theme as TextualTheme
-
-    palette = palettes().get(name, default_palette())
-    if palette.background.startswith("ansi"):
-        return TextualTheme(name=f"hx-{palette.name}", primary="ansi_blue", ansi=True, dark=True)
-
-    return TextualTheme(
-        name=f"hx-{palette.name}",
-        primary=palette.accent,
-        secondary=palette.border,
-        accent=palette.border_accent,
-        warning=palette.warning,
-        error=palette.error,
-        success=palette.success,
-        foreground=palette.text,
-        background=palette.background,
-        surface=palette.surface,
-        panel=palette.panel,
-        dark=palette.dark,
-        variables={
-            "border-muted": palette.border_muted,
-            "selected-bg": palette.selected_bg,
-            "search-match-bg": palette.search_match_bg,
-            "block-cursor-text-style": "none",
-            "input-selection-background": f"{palette.selected_bg} 60%",
-            "scrollbar": palette.scrollbar_track,
-            "scrollbar-hover": palette.scrollbar_thumb,
-            "scrollbar-active": palette.accent,
-            "scrollbar-background": palette.background,
         },
     )

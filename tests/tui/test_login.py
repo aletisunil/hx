@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import Button
 
 from hx.auth.store import ApiKeyCredential, AuthStore, OAuthCredential
 from hx.config import load_settings
@@ -19,8 +19,9 @@ from hx.core.session import new_session
 from hx.providers.fake import FakeProvider, text_turn
 from hx.providers.models import CODEX_MODELS, ModelRegistry
 from hx.tools.registry import ToolRegistry
-from hx.tui.legacy.app import HXApp
-from hx.tui.legacy.widgets.login import LoginModal as LoginModalType
+from hx.tui.runtime import HXSession as HXApp
+from hx.tui.views.login import LoginDialog as LoginModalType
+from tests.tui.support import Driver
 
 MODEL = "anthropic/claude-sonnet-4.5"
 CODEX_MODEL = CODEX_MODELS[0].id
@@ -59,10 +60,12 @@ def build_app(tmp_path: Path, model: str = MODEL) -> HXApp:
         settings=load_settings(tmp_path),
         model_info=models.get_or_default(model),
     )
-    return HXApp(loop, bus, load_settings(tmp_path), models=models)
+    from hx.term.terminal import FakeTerminal
+
+    return HXApp(loop, bus, load_settings(tmp_path), terminal=FakeTerminal(80, 24), models=models)
 
 
-async def settle(pilot: Any, until: Callable[[], bool], *, steps: int = 200) -> None:
+async def settle(driver: Any, until: Callable[[], bool], *, steps: int = 200) -> None:
     """Pump the app until ``until`` holds, instead of waiting a fixed delay.
 
     A login runs across several tasks - the flow, the modal's mount, the token
@@ -73,7 +76,7 @@ async def settle(pilot: Any, until: Callable[[], bool], *, steps: int = 200) -> 
     for _ in range(steps):
         if until():
             return
-        await pilot.pause()
+        await driver.settle()
     raise AssertionError("the app never reached the state the test was waiting for")
 
 
@@ -84,25 +87,38 @@ def signed_in_to_codex() -> None:
     )
 
 
-async def picker_rows(app: HXApp) -> list[str]:
-    from hx.tui.legacy.commands import _reachable
+def _notices(app: HXApp) -> str:
+    """What the session has said, styling stripped."""
+    from hx.term.width import strip_ansi
+    from hx.tui.views.blocks import Notice
 
-    return [model.id for model in _reachable(app._command_context(), app.models.all())]
+    return " ".join(
+        strip_ansi(line)
+        for block in app.view.transcript.blocks
+        if isinstance(block, Notice)
+        for line in block.render(100)
+    )
+
+
+async def picker_rows(app: HXApp) -> list[str]:
+    from hx.tui.commands import _reachable
+
+    return [model.id for model in _reachable(app._command_context, app.models.all())]
 
 
 async def test_the_picker_hides_routes_with_no_credential(hx_home: Path, tmp_path: Path) -> None:
     """Offering a model that cannot be called turns a choice into a failed turn."""
     app = build_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await driver.settle()
         assert CODEX_MODEL not in await picker_rows(app)
 
 
 async def test_signing_in_makes_the_codex_models_selectable(hx_home: Path, tmp_path: Path) -> None:
     app = build_app(tmp_path)
     signed_in_to_codex()
-    async with app.run_test() as pilot:
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await driver.settle()
         assert CODEX_MODEL in await picker_rows(app)
 
 
@@ -111,8 +127,8 @@ async def test_the_running_route_stays_listed_even_without_a_stored_credential(
 ) -> None:
     """The session is demonstrably working on it; hiding it helps nobody."""
     app = build_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await driver.settle()
         assert MODEL in await picker_rows(app)
 
 
@@ -122,10 +138,10 @@ async def test_switching_to_a_subscription_model_swaps_the_provider(
     """Only the model name changing would send a Codex id to OpenRouter."""
     app = build_app(tmp_path)
     signed_in_to_codex()
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await app.submit(f"/model {CODEX_MODEL}")
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await driver.settle()
+        await app._run_command(f"/model {CODEX_MODEL}")
+        await driver.settle()
 
         assert app.loop.model == CODEX_MODEL
         assert app.loop.provider.name == "openai-codex"
@@ -136,11 +152,11 @@ async def test_switching_within_one_route_leaves_the_provider_alone(
     hx_home: Path, tmp_path: Path
 ) -> None:
     app = build_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await driver.settle()
         original = app.loop.provider
-        await app.submit("/model openai/gpt-5")
-        await pilot.pause()
+        await app._run_command("/model openai/gpt-5")
+        await driver.settle()
 
         assert app.loop.model == "openai/gpt-5"
         assert app.loop.provider is original
@@ -151,13 +167,13 @@ async def test_switching_to_a_route_without_a_credential_says_so(
 ) -> None:
     """The model must not change either - a half-applied switch is worse."""
     app = build_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await app.submit(f"/model {CODEX_MODEL}")
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await driver.settle()
+        await app._run_command(f"/model {CODEX_MODEL}")
+        await driver.settle()
 
         assert app.loop.model == MODEL
-        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        notices = _notices(app)
         assert "hx auth login openai-codex" in notices
 
 
@@ -166,14 +182,16 @@ async def test_the_status_bar_says_subscription_instead_of_a_price(
 ) -> None:
     app = build_app(tmp_path)
     signed_in_to_codex()
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await app.submit(f"/model {CODEX_MODEL}")
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await driver.settle()
+        await app._run_command(f"/model {CODEX_MODEL}")
+        await driver.settle()
 
-        status = app._status
+        status = app.status
         assert status.subscription is True
-        rendered = str(status.render())
+        from hx.term.width import strip_ansi
+
+        rendered = " ".join(strip_ansi(line) for line in status.render(100))
         assert "sub" in rendered
         assert "$" not in rendered, "a per-token price is not a number the user can act on"
 
@@ -181,25 +199,31 @@ async def test_the_status_bar_says_subscription_instead_of_a_price(
 async def test_login_lists_every_route_with_its_state(hx_home: Path, tmp_path: Path) -> None:
     app = build_app(tmp_path)
     AuthStore().save("openrouter", ApiKeyCredential(key="sk-or-test"))
-    async with app.run_test() as pilot:
-        worker = app.run_worker(app.commands.dispatch(app._command_context(), "/login"))
-        await pilot.pause(0.1)
+    async with Driver(app) as driver:
+        worker = asyncio.create_task(app.commands.dispatch(app._command_context, "/login"))
+        await driver.settle()
 
-        labels = [str(button.label) for button in app.screen.query(Button)]
-        assert any("OpenRouter" in label and "signed in" in label for label in labels)
-        assert any("ChatGPT" in label and "not signed in" in label for label in labels)
+        from hx.term.width import strip_ansi
 
-        await pilot.press("escape")
-        await worker.wait()
+        showing = app.view.showing
+        assert showing is not None, "/login showed nothing"
+        rows = [strip_ansi(line) for line in showing.render(100)]
+        # A route with a stored credential is marked; one without is not.
+        assert any("OpenRouter" in row and "✓" in row for row in rows)
+        assert any("ChatGPT" in row and "✓" not in row for row in rows)
+
+        driver.type("\x1b")
+        await driver.settle()
+        await worker
 
 
 async def test_logout_forgets_the_credential(hx_home: Path, tmp_path: Path) -> None:
     app = build_app(tmp_path)
     signed_in_to_codex()
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await app.submit("/logout openai-codex")
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await driver.settle()
+        await app._run_command("/logout openai-codex")
+        await driver.settle()
 
         assert AuthStore().read("openai-codex") is None
         assert CODEX_MODEL not in await picker_rows(app)
@@ -207,12 +231,12 @@ async def test_logout_forgets_the_credential(hx_home: Path, tmp_path: Path) -> N
 
 async def test_logout_without_a_provider_names_the_options(hx_home: Path, tmp_path: Path) -> None:
     app = build_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await app.submit("/logout")
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await driver.settle()
+        await app._run_command("/logout")
+        await driver.settle()
 
-        notices = " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+        notices = _notices(app)
         assert "openai-codex" in notices
 
 
@@ -222,20 +246,19 @@ async def test_the_login_modal_hands_a_pasted_url_to_the_flow(
     """Over SSH the browser callback never arrives, so this is the only path."""
     import asyncio
 
-    from textual.widgets import Input
-
-    from hx.tui.legacy.widgets.login import LoginModal
+    from hx.tui.views.login import LoginDialog as LoginModal
 
     app = build_app(tmp_path)
     modal = LoginModal("OpenAI (ChatGPT Plus/Pro)")
-    async with app.run_test() as pilot:
-        app.push_screen(modal)
-        await pilot.pause()
+    async with Driver(app) as driver:
+        app.show(modal)
+        await driver.settle()
 
         pasted = asyncio.ensure_future(modal.prompt_paste("paste:"))
-        await pilot.pause()
-        modal.query_one("#login-input", Input).value = "http://localhost:1455/auth/callback?code=c"
-        await pilot.press("enter")
+        await driver.settle()
+        modal.handle_input("paste", "http://localhost:1455/auth/callback?code=c")
+        modal.handle_input("enter", "")
+        await driver.settle()
         assert await asyncio.wait_for(pasted, timeout=2) == (
             "http://localhost:1455/auth/callback?code=c"
         )
@@ -244,18 +267,19 @@ async def test_the_login_modal_hands_a_pasted_url_to_the_flow(
 async def test_cancelling_the_login_modal_unblocks_the_flow(hx_home: Path, tmp_path: Path) -> None:
     import asyncio
 
-    from hx.tui.legacy.widgets.login import LoginModal
+    from hx.tui.views.login import LoginDialog as LoginModal
 
     app = build_app(tmp_path)
     modal = LoginModal("OpenAI (ChatGPT Plus/Pro)")
-    async with app.run_test() as pilot:
-        app.push_screen(modal)
-        await pilot.pause()
+    async with Driver(app) as driver:
+        app.show(modal)
+        await driver.settle()
 
         pasted = asyncio.ensure_future(modal.prompt_paste("paste:"))
-        await pilot.pause()
-        await pilot.press("escape")
-        await pilot.pause()
+        await driver.settle()
+        driver.type("\x1b")
+        await driver.settle()
+        await driver.settle()
 
         with pytest.raises(asyncio.CancelledError):
             await pasted
@@ -273,16 +297,16 @@ async def test_a_flow_that_fails_early_still_tears_the_modal_down(
     monkeypatch.setattr(codex, "login_browser", exploding_login)
 
     app = build_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await app.submit("/login openai-codex")
+    async with Driver(app) as driver:
+        await driver.settle()
+        await app._run_command("/login openai-codex")
 
         def reported_the_failure() -> bool:
-            return "boom" in " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+            return "boom" in _notices(app)
 
-        await settle(pilot, reported_the_failure)
+        await settle(driver, reported_the_failure)
 
-        assert not isinstance(app.screen, LoginModalType)
+        assert not isinstance(app.view.showing, LoginModalType)
 
 
 async def test_opening_the_browser_never_blocks_the_event_loop(

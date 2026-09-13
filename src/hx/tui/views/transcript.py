@@ -28,6 +28,11 @@ class Transcript(Container):
     contribute one and leave a double gap.
     """
 
+    def __init__(self, *children: Component) -> None:
+        super().__init__(*children)
+        self.cursor: Component | None = None
+        """The block the keyboard is pointing at, for copy and expand."""
+
     def append(self, block: Component) -> Component:
         if self.children:
             super().add(Spacer(1))
@@ -41,6 +46,45 @@ class Transcript(Container):
     def last(self) -> Component | None:
         blocks = self.blocks
         return blocks[-1] if blocks else None
+
+    # -- the reading cursor ------------------------------------------------
+
+    def navigable(self) -> list[Component]:
+        """Blocks the cursor can land on: things somebody said."""
+        from hx.tui.views.blocks import AssistantMessage, UserMessage
+
+        return [b for b in self.blocks if isinstance(b, UserMessage | AssistantMessage)]
+
+    def move_cursor(self, delta: int) -> Component | None:
+        """Step to the next or previous message.
+
+        Starting from the bottom, so the first press goes to the last message
+        rather than the first - which is where the reader just was.
+        """
+        blocks = self.navigable()
+        if not blocks:
+            return None
+        if self.cursor is None or self.cursor not in blocks:
+            index = len(blocks) - 1 if delta < 0 else 0
+        else:
+            index = max(0, min(len(blocks) - 1, blocks.index(self.cursor) + delta))
+        self.cursor = blocks[index]
+        return self.cursor
+
+    def cursored_text(self) -> str:
+        """Text of the cursored block, falling back to the last answer.
+
+        The fallback is what makes the copy key useful without navigating
+        first: the thing a user most often wants is the answer just given.
+        """
+        from hx.tui.views.blocks import AssistantMessage
+
+        if self.cursor is not None:
+            return str(getattr(self.cursor, "text", "") or "")
+        for block in reversed(self.blocks):
+            if isinstance(block, AssistantMessage):
+                return block.text
+        return ""
 
 
 @runtime_checkable

@@ -15,7 +15,8 @@ from hx.paths import user_settings_file
 from hx.providers.fake import FakeProvider, text_turn
 from hx.providers.models import CODEX_MODELS, ModelRegistry
 from hx.tools.registry import ToolRegistry
-from hx.tui.legacy.app import HXApp
+from hx.tui.runtime import HXSession as HXApp
+from tests.tui.support import Driver
 
 DEEPEST = max(CODEX_MODELS, key=lambda m: len(m.reasoning_levels))
 SHALLOWEST = min(CODEX_MODELS, key=lambda m: len(m.reasoning_levels))
@@ -39,11 +40,22 @@ def build_app(tmp_path: Path, model: str) -> HXApp:
         settings=load_settings(tmp_path),
         model_info=models.get_or_default(model),
     )
-    return HXApp(loop, bus, load_settings(tmp_path), models=models)
+    from hx.term.terminal import FakeTerminal
+
+    return HXApp(loop, bus, load_settings(tmp_path), terminal=FakeTerminal(80, 24), models=models)
 
 
 def _notices(app: HXApp) -> str:
-    return " ".join(str(n.render()) for n in app._transcript.query("Notice"))
+    """What the session has said, styling stripped."""
+    from hx.term.width import strip_ansi
+    from hx.tui.views.blocks import Notice
+
+    return " ".join(
+        strip_ansi(line)
+        for block in app.view.transcript.blocks
+        if isinstance(block, Notice)
+        for line in block.render(100)
+    )
 
 
 async def test_an_effort_applies_to_the_next_turn_and_is_saved(
@@ -52,13 +64,13 @@ async def test_an_effort_applies_to_the_next_turn_and_is_saved(
     """The provider asks per request, so nothing has to be rebuilt - and the
     choice is worth keeping for the sessions after this one."""
     app = build_app(tmp_path, DEEPEST.id)
-    async with app.run_test() as pilot:
-        await app.submit("/effort high")
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await app._run_command("/effort high")
+        await driver.settle()
 
         assert app.models.requested_effort == "high"
         assert app.models.reasoning_effort(DEEPEST.id) == "high"
-        assert app._status.effort == "high"
+        assert app.status.effort == "high"
         saved = json.loads(user_settings_file().read_text())
         assert saved["models"]["reasoning_effort"] == "high"
 
@@ -76,9 +88,9 @@ async def test_an_effort_the_model_cannot_reach_says_where_it_lands(
     )
 
     app = build_app(tmp_path, SHALLOWEST.id)
-    async with app.run_test() as pilot:
-        await app.submit(f"/effort {beyond}")
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await app._run_command(f"/effort {beyond}")
+        await driver.settle()
 
         assert app.models.reasoning_effort(SHALLOWEST.id) == ceiling
         assert f"tops out at {ceiling}" in _notices(app)
@@ -88,11 +100,11 @@ async def test_default_hands_each_model_back_its_own_depth(hx_home: Path, tmp_pa
     """One fixed depth for every model is a decision nobody asked for: the
     catalogue sets it per model."""
     app = build_app(tmp_path, DEEPEST.id)
-    async with app.run_test() as pilot:
-        await app.submit("/effort high")
-        await pilot.pause()
-        await app.submit("/effort default")
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await app._run_command("/effort high")
+        await driver.settle()
+        await app._run_command("/effort default")
+        await driver.settle()
 
         assert app.models.requested_effort is None
         assert app.models.reasoning_effort(DEEPEST.id) == DEEPEST.default_reasoning_level
@@ -101,9 +113,9 @@ async def test_default_hands_each_model_back_its_own_depth(hx_home: Path, tmp_pa
 
 async def test_an_unknown_level_lists_the_ones_that_exist(hx_home: Path, tmp_path: Path) -> None:
     app = build_app(tmp_path, DEEPEST.id)
-    async with app.run_test() as pilot:
-        await app.submit("/effort telepathic")
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await app._run_command("/effort telepathic")
+        await driver.settle()
 
         assert "Unknown effort 'telepathic'" in _notices(app)
         assert app.models.requested_effort is None
@@ -115,9 +127,9 @@ async def test_a_model_with_no_levels_has_nothing_to_pick_from(
     """Only the Codex catalogue publishes them; a picker of guesses is worse
     than a sentence saying where they come from."""
     app = build_app(tmp_path, "anthropic/claude-sonnet-4.5")
-    async with app.run_test() as pilot:
-        await app.submit("/effort")
-        await pilot.pause()
+    async with Driver(app) as driver:
+        await app._run_command("/effort")
+        await driver.settle()
 
         assert "publishes no reasoning levels" in _notices(app)
 
@@ -125,15 +137,15 @@ async def test_a_model_with_no_levels_has_nothing_to_pick_from(
 async def test_switching_models_re_resolves_the_depth(hx_home: Path, tmp_path: Path) -> None:
     """The bar has to say what will really run, at the moment it changes."""
     app = build_app(tmp_path, DEEPEST.id)
-    async with app.run_test() as pilot:
-        await app.submit(f"/effort {DEEPEST.reasoning_levels[-1]}")
-        await pilot.pause()
-        assert app._status.effort == DEEPEST.reasoning_levels[-1]
+    async with Driver(app) as driver:
+        await app._run_command(f"/effort {DEEPEST.reasoning_levels[-1]}")
+        await driver.settle()
+        assert app.status.effort == DEEPEST.reasoning_levels[-1]
 
         app.models.set_reasoning_effort(DEEPEST.reasoning_levels[-1])
-        app._status.set_effort(app.models.displayed_effort(SHALLOWEST.id))
+        app.status.set_effort(app.models.displayed_effort(SHALLOWEST.id))
 
-        assert app._status.effort == SHALLOWEST.reasoning_levels[-1]
+        assert app.status.effort == SHALLOWEST.reasoning_levels[-1]
 
 
 def test_a_resume_row_leads_with_the_number_the_user_recognises() -> None:
@@ -141,7 +153,7 @@ def test_a_resume_row_leads_with_the_number_the_user_recognises() -> None:
     a one-prompt session reading "31 msgs" describes the protocol."""
     from dataclasses import dataclass
 
-    from hx.tui.legacy.widgets.palette import _size
+    from hx.tui.views.pickers import _size
 
     @dataclass
     class _Meta:

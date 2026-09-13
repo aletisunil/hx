@@ -1,14 +1,9 @@
-"""Running a session on the scrollback-native renderer.
+"""Running an interactive session.
 
-The same event bus the Textual app consumes, dispatched to components instead
-of widgets. The match/case below is deliberately the same shape as the one in
-:mod:`hx.tui.legacy.app`, because it is the part that carries over unchanged
-and keeping it recognisable is what makes the two comparable while both exist.
-
-Read-only for now: the prompt is a stub that types a line and submits it, and
-the real editor, the dialogs and the slash commands land in later stages. What
-this is for is proving the renderer against real sessions - streaming deltas,
-long transcripts, live resizes - before more is built on top of it.
+Events arrive on the bus and are dispatched to components. The session owns the
+turn, the queue, the overlay, and whichever approval currently holds the
+keyboard - and it is the object the slash commands are written against, so the
+surface they may ask for is gathered in one block rather than scattered.
 """
 
 from __future__ import annotations
@@ -106,6 +101,8 @@ class HXSession:
         """Detached work - session renaming - held so it is not garbage
         collected mid-flight."""
         self._mouse = False
+        self._clear_armed = False
+        """Set by one ctrl+c on an empty, idle prompt; a second one exits."""
         self.commands: Any = None
         """The slash-command registry, built on start."""
         self._silent: set[str] = set()
@@ -121,7 +118,7 @@ class HXSession:
 
         self.commands = build_default_commands()
         self.prompt.commands = self.commands
-        self._context = CommandContext(
+        self._command_context = CommandContext(
             app=self, settings=self.settings, session=self.loop.session, registry=self.commands
         )
 
@@ -168,7 +165,20 @@ class HXSession:
 
     @property
     def auth(self) -> Any:
-        return self.extra.get("auth")
+        """The credential resolver.
+
+        Defaulted rather than left empty: a session started without one - a
+        test, a stand-alone run - still has to be able to switch routes, and a
+        missing resolver surfaces as an attribute error deep inside the
+        provider registry rather than as anything a user could act on.
+        """
+        resolver = self.extra.get("auth")
+        if resolver is None:
+            from hx.auth.resolve import AuthResolver
+
+            resolver = AuthResolver()
+            self.extra["auth"] = resolver
+        return resolver
 
     @property
     def skills(self) -> Any:
@@ -220,7 +230,14 @@ class HXSession:
         self.view.show(component)
         self.runner.request_immediate_render()
 
-    def dismiss_modal(self) -> None:
+    def dismiss_modal(self, component: Any = None) -> None:
+        """Take the overlay down.
+
+        The component is accepted and ignored: callers pass the one they put
+        up, and only one thing is ever on the overlay. Refusing the argument
+        raised inside a ``finally``, which left the dialog on screen after the
+        flow behind it had already failed.
+        """
         self.view.dismiss()
         self.runner.request_immediate_render()
 
@@ -447,6 +464,32 @@ class HXSession:
             self.loop.steer(text)
         self._queued.clear()
 
+    def _clear_or_exit(self) -> None:
+        """Clear the draft; on an empty prompt, interrupt; then exit.
+
+        A draft takes priority so it can be cleared without interrupting the
+        agent. With nothing typed and a turn running, the key means what every
+        terminal user expects. With neither, a second press exits - announced
+        first, because one keystroke should not end a session.
+        """
+        if self.prompt.value:
+            self.prompt.clear()
+            self._clear_armed = False
+            self.runner.request_immediate_render()
+            return
+        if self.is_busy:
+            self.loop.cancel()
+            if self._turn is not None:
+                self._turn.cancel()
+            return
+        if self._clear_armed:
+            self.runner.stop()
+            return
+        self._clear_armed = True
+        from hx.keys import KEYMAP
+
+        self._notice(f"Press {KEYMAP.text('app.clear')} again to exit.")
+
     def _terminal_rows(self) -> int:
         """How tall the terminal is, so the draft never eats the screen."""
         return self.runner.terminal.size[1]
@@ -543,7 +586,13 @@ class HXSession:
             self.runner.request_immediate_render()
 
     def _on_key(self, key: Any) -> None:
+        from hx.keys import KEYMAP
+
         name = key.name
+        if name != "ctrl+c":
+            # Any other key means the user is still working, so the pending
+            # exit is no longer what a second ctrl+c should mean.
+            self._clear_armed = False
 
         # An open approval owns the keyboard: it is the one thing on screen
         # waiting on the user, and "y" must not be typed into the prompt.
@@ -574,13 +623,27 @@ class HXSession:
                 self._turn.cancel()
             return
         if name == "ctrl+c":
-            if self.view.dock.prompt.value:
-                self.view.dock.prompt.clear()
-            else:
-                self.runner.stop()
+            self._clear_or_exit()
             return
-        if name == "ctrl+o":
-            self.view.header.toggle()
+        if name == "shift+tab":
+            self.cycle_mode()
+            return
+        if name in KEYMAP.keys_for("app.transcript.previousPrompt"):
+            self.view.transcript.move_cursor(-1)
+            self.runner.request_immediate_render()
+            return
+        if name in KEYMAP.keys_for("app.transcript.nextPrompt"):
+            self.view.transcript.move_cursor(1)
+            self.runner.request_immediate_render()
+            return
+        if name in KEYMAP.keys_for("app.message.copy"):
+            asyncio.create_task(self.copy_cursored())  # noqa: RUF006
+            return
+        if name in KEYMAP.keys_for("app.tools.expand"):
+            if self.view.transcript.blocks:
+                self.expand_cursored()
+            else:
+                self.view.header.toggle()
             return
         if name == "ctrl+t":
             self.show_todos()
@@ -594,6 +657,9 @@ class HXSession:
         self.view.handle_input(name, key.data)
 
     def _submit(self, text: str) -> None:
+        if text.startswith("!"):
+            self._turn = asyncio.create_task(self.run_shell_passthrough(text[1:].strip()))
+            return
         self.view.transcript.append(UserMessage(text))
         if text.startswith("/"):
             self._turn = asyncio.create_task(self._run_command(text))
@@ -606,9 +672,105 @@ class HXSession:
             return
         self._turn = asyncio.create_task(self._run_turn(text))
 
+    async def run_shell_passthrough(self, command: str) -> None:
+        """``!command`` - run a shell command directly, without a model turn.
+
+        It goes through the same permission engine and sandbox as a
+        model-issued command; a shortcut that skipped those would be a hole in
+        both.
+        """
+        if not command:
+            return
+        from hx.tools.base import ToolContext
+
+        self.view.transcript.append(UserMessage(f"!{command}"))
+        self.runner.request_immediate_render()
+
+        if not self.loop.tools.has("Bash"):
+            self._notice("No shell is attached to this session.", "error")
+            return
+        if not await self._permit_shell(command):
+            self._notice(f"Refused: !{command}", "warning")
+            return
+
+        block = ToolBlock(
+            ToolCall(name="Bash", params={"command": command}, cwd=Path(self.settings.cwd))
+        )
+        self.view.transcript.append(block)
+        self.runner.request_immediate_render()
+
+        context = ToolContext(
+            cwd=self.settings.cwd,
+            session_id=self.loop.session.meta.session_id,
+            tool_use_id=f"shell_{id(command):x}",
+            settings=self.settings,
+            emit_progress=lambda chunk: self._append_output(block, chunk),
+        )
+        result = await self.loop.tools.call("Bash", {"command": command}, context)
+        block.update(
+            finished=True,
+            is_error=result.is_error,
+            summary=result.summary or "",
+            output=result.content or "",
+        )
+        self.runner.request_immediate_render()
+
+    def _append_output(self, block: ToolBlock, chunk: str) -> None:
+        block.update(output=block.call.output + chunk)
+        self.runner.request_render()
+
+    async def _permit_shell(self, command: str) -> bool:
+        from hx.permissions.engine import PermissionRequest
+
+        if self.loop.permissions is None:
+            return True
+        allowed, _reason = await self.loop.permissions.request(
+            PermissionRequest(
+                tool_name="Bash",
+                specifier=command,
+                params={"command": command},
+                mutating=True,
+                description=f"Bash({command})",
+                detail=command,
+                detail_kind="command",
+            )
+        )
+        return allowed
+
+    def cycle_mode(self) -> None:
+        from hx.config import PermissionMode
+
+        order = list(PermissionMode)
+        current = PermissionMode(self.mode)
+        self.set_mode(order[(order.index(current) + 1) % len(order)].value)
+
+    async def copy_cursored(self) -> None:
+        """Copy the cursored message, or the last answer when none is cursored."""
+        text = self.view.transcript.cursored_text()
+        if not text:
+            self._notice("Nothing to copy yet.", "warning")
+            return
+        try:
+            used = await self.copy(text)
+        except Exception as error:
+            self._notice(f"Could not copy: {error}", "error")
+            return
+        self._notice(f"Copied to the clipboard ({used}).", "success")
+
+    def expand_cursored(self) -> None:
+        """Expand the cursored block, or every tool block when none is."""
+        cursor = self.view.transcript.cursor
+        if cursor is not None and hasattr(cursor, "toggle"):
+            cursor.toggle()
+        else:
+            for block in self.view.transcript.blocks:
+                if isinstance(block, ToolBlock):
+                    block.toggle()
+        self.runner.request_immediate_render()
+
     async def _run_command(self, line: str) -> None:
         try:
-            await self.commands.dispatch(self._context, line)
+            await self.commands.dispatch(self._command_context, line)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -760,12 +922,12 @@ def _tilde(path: Path) -> str:
         return str(path)
 
 
-async def run_new_tui(loop: AgentLoop, bus: EventBus, settings: Settings, **kwargs: Any) -> None:
-    """Entry point for ``tui.renderer = "new"``."""
+async def run_session(loop: AgentLoop, bus: EventBus, settings: Settings, **kwargs: Any) -> None:
+    """Run one interactive session to completion."""
     import sys
 
     if sys.platform == "win32":
         raise RuntimeError(
-            "the scrollback renderer needs a POSIX terminal. On Windows, run HX under WSL."
+            "HX's terminal interface needs a POSIX terminal. On Windows, run it under WSL."
         )
     await HXSession(loop, bus, settings, **kwargs).run()
