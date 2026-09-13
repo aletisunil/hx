@@ -488,7 +488,13 @@ class TodoRenderer(ToolRenderer):
         return header
 
     def body(self, call: ToolCall) -> list[str]:
-        """The list itself, not ``todos=[3 items]``. A plan is worth reading."""
+        """The list itself, not ``todos=[3 items]``. A plan is worth reading.
+
+        Unless it was rejected, in which case the plan on screen is not the one
+        the session holds and the reason is the only useful thing to show.
+        """
+        if call.is_error and call.output:
+            return [fg("error", line) for line in call.output.strip().split("\n")]
         return render_todos(call.params.get("todos"))
 
 

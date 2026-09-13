@@ -609,13 +609,15 @@ class AgentLoop:
         from hx.permissions.engine import PermissionRequest
 
         tool = self.tools.get(call.name)
+        detail, detail_kind = _permission_detail(call)
         request = PermissionRequest(
             tool_name=call.name,
             specifier=tool.permission_specifier(call.input),
             params=call.input,
             mutating=tool.mutating,
             description=f"{call.name}({_brief(call.input)})",
-            detail=_permission_detail(call),
+            detail=detail,
+            detail_kind=detail_kind,
             origin=self.origin,
         )
         allowed, reason = await self.permissions.request(
@@ -711,14 +713,19 @@ def _parse_tool_input(raw: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _permission_detail(call: ToolUseBlock) -> str:
-    """What the approval modal shows: the command, or the exact edit.
+def _permission_detail(call: ToolUseBlock) -> tuple[str, str]:
+    """What the approval shows, and what kind of thing it is.
 
     For an edit this previews the change against the file on disk, so the user
     approves a diff rather than a filename.
+
+    The kind is returned rather than left for the UI to infer. Guessing from
+    the text meant a file whose first line was ``---`` - YAML front matter, a
+    markdown rule - was treated as a diff and run through a painter that
+    strips exactly those lines, leaving the user approving a blank space.
     """
     if call.name == "Bash":
-        return str(call.input.get("command", ""))
+        return str(call.input.get("command", "")), "command"
 
     if call.name in {"Edit", "Write"} and (raw_path := call.input.get("file_path")):
         from pathlib import Path
@@ -736,12 +743,13 @@ def _permission_detail(call: ToolUseBlock) -> str:
                     after = after.replace(
                         edit.old_string, edit.new_string, -1 if edit.replace_all else 1
                     )
-            return unified_diff(before, after, str(path)) or f"{path} (no change)"
+            diff = unified_diff(before, after, str(path))
+            return (diff, "diff") if diff else (f"{path} (no change)", "text")
         except Exception:
             # Previewing is best effort; never block the prompt on it.
-            return str(raw_path)
+            return str(raw_path), "text"
 
-    return _brief(call.input, limit=400)
+    return _brief(call.input, limit=400), "text"
 
 
 def _brief(params: dict[str, Any], limit: int = 80) -> str:

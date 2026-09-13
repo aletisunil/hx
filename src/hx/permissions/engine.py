@@ -52,7 +52,16 @@ class PermissionRequest:
     mutating: bool
     description: str
     detail: str = ""
-    """Rendered diff or command text shown in the approval modal."""
+    """Rendered diff or command text shown in the approval prompt."""
+    detail_kind: str = "text"
+    """What ``detail`` is: ``"text"``, ``"diff"`` or ``"command"``.
+
+    Stated by whoever built the request rather than sniffed from the string.
+    The UI used to guess by looking for a leading ``---``, which meant YAML
+    front matter and a markdown rule were run through the diff painter - and
+    that painter strips exactly those lines, so the user was asked to approve a
+    blank space.
+    """
     origin: str | None = None
     """Which subagent asked, when it was not the main conversation."""
 

@@ -165,3 +165,127 @@ async def test_leaving_hands_the_terminal_back(hx_home: Path, tmp_path: Path) ->
     async with driver:
         pass
     assert driver.terminal.restored
+
+
+TODOS = [
+    {"content": "Port the renderers", "status": "completed", "active_form": "Porting them"},
+    {"content": "Draw the transcript", "status": "in_progress", "active_form": "Drawing it"},
+]
+
+
+async def _write_todos(driver: Driver, *, is_error: bool = False) -> None:
+    """The event sequence a real TodoWrite produces, in order."""
+    from hx.core import events as ev
+
+    bus = driver.session.bus
+    bus.publish(ev.ToolCallStarted(tool_use_id="t1", name="TodoWrite", input={"todos": TODOS}))
+    if not is_error:
+        bus.publish(ev.TodosUpdated(todos=TODOS))
+    bus.publish(
+        ev.ToolCallFinished(
+            tool_use_id="t1",
+            is_error=is_error,
+            duration_ms=1.0,
+            summary="error" if is_error else "Todo list updated: 1/2 complete.",
+            detail="unknown todo status 'doing'" if is_error else "",
+        )
+    )
+    await driver.settle()
+
+
+async def test_a_plan_is_drawn_once_not_once_per_block(hx_home: Path, tmp_path: Path) -> None:
+    """The call renders the list and so does the block that follows it.
+
+    In the Textual app those were two regions - an inline call and a sidebar -
+    so nobody saw them together. Here they would land in the same column.
+    """
+    async with Driver(build(tmp_path)) as driver:
+        await _write_todos(driver)
+
+        shown = driver.display()
+        assert sum("Port the renderers" in line for line in shown) == 1
+        assert any("Todos" in line for line in shown), "the plan was dropped, not deduplicated"
+
+
+async def test_a_failed_todo_write_still_shows_its_block(hx_home: Path, tmp_path: Path) -> None:
+    """A failure publishes no TodosUpdated, so the held block is all there is."""
+    async with Driver(build(tmp_path)) as driver:
+        await _write_todos(driver, is_error=True)
+
+        shown = driver.display()
+        assert any("unknown todo status" in line for line in shown)
+
+
+async def test_a_tool_call_that_needs_approval_blocks_and_is_answered(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """The whole path: the loop asks, the block appears in the transcript, one
+    key answers it, and the record is left behind."""
+    from hx.permissions.engine import Decision, PermissionEngine, Rule
+
+    session = build(tmp_path)
+    session.loop.permissions = PermissionEngine(
+        mode=session.settings.permissions.mode,
+        rules=[Rule(tool="Bash", specifier=None, decision=Decision.ASK, source="test")],
+        cwd=tmp_path,
+    )
+
+    async with Driver(session) as driver:
+        request = _request(tmp_path)
+        answer = asyncio.create_task(session.ask_permission(request))
+        await driver.settle()
+
+        shown = driver.display()
+        assert any("Permission needed" in line for line in shown)
+        assert any("$ rm -rf build/" in line for line in shown)
+        assert any("allow for this session" in line for line in shown)
+
+        driver.type("s")
+        await driver.settle()
+
+        result = await asyncio.wait_for(answer, timeout=2)
+        assert result.allowed is True
+        assert any("allowed for this session" in line for line in driver.display())
+
+
+async def test_typing_while_an_approval_is_open_does_not_reach_the_prompt(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """ "y" is an answer, not a character. The prompt must not eat it."""
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        answer = asyncio.create_task(session.ask_permission(_request(tmp_path)))
+        await driver.settle()
+
+        driver.type("y")
+        await driver.settle()
+
+        assert session.view.dock.prompt.value == ""
+        assert (await asyncio.wait_for(answer, timeout=2)).allowed is True
+
+
+async def test_an_interrupted_approval_claims_no_decision(hx_home: Path, tmp_path: Path) -> None:
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        answer = asyncio.create_task(session.ask_permission(_request(tmp_path)))
+        await driver.settle()
+        answer.cancel()
+        await driver.settle()
+
+        shown = driver.display()
+        assert any("not answered" in line for line in shown)
+        assert not any("allowed" in line for line in shown)
+
+
+def _request(cwd: Path) -> object:
+    from hx.permissions.engine import PermissionRequest
+
+    return PermissionRequest(
+        tool_name="Bash",
+        specifier="rm -rf build/",
+        params={"command": "rm -rf build/"},
+        mutating=True,
+        description="run a shell command",
+        detail="rm -rf build/",
+        detail_kind="command",
+    )
