@@ -151,10 +151,10 @@ class TuiSettings:
     """Queueing is the default because it cannot surprise anyone: a steer cuts
     off the model mid-sentence, which is worth asking for deliberately."""
 
-    renderer: TuiRenderer = TuiRenderer.LEGACY
-    """Defaults to the old app until the new one has been lived on. The
-    ``HX_TUI`` environment variable overrides this, so a bad session is one
-    ``HX_TUI=legacy`` away from being usable again."""
+    renderer: TuiRenderer = TuiRenderer.NEW
+    """The scrollback-native renderer. ``HX_TUI=legacy`` selects the Textual
+    app instead, so a terminal the new one disagrees with is one environment
+    variable away from working again."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,7 +413,7 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
     except ValueError as exc:
         raise ConfigError(f"unknown tui.enterWhileBusy: {busy_raw!r}") from exc
 
-    renderer_raw = tui.get("renderer", TuiRenderer.LEGACY)
+    renderer_raw = tui.get("renderer", TuiRenderer.NEW)
     try:
         renderer = TuiRenderer(renderer_raw)
     except ValueError as exc:

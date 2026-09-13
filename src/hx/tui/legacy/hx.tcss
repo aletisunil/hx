@@ -105,6 +105,15 @@ SubagentRows {
     padding: 0 1;
 }
 
+/* Air above and below the rows while a subagent is running. Without it the
+   rows sit flush against the transcript above and the working rule below, and
+   the three read as one paragraph. The class is dropped when nothing is
+   running, so an idle dock still costs no rows at all. */
+SubagentRows.has-rows {
+    max-height: 8;
+    padding: 1 1;
+}
+
 /* The prompt, framed by two rules. The top one carries the working status, so
    a turn starting costs no layout: the row is there either way. */
 #prompt-frame {

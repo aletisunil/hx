@@ -362,8 +362,13 @@ async def cmd_compact(ctx: CommandContext, args: str) -> None:
 
 
 async def cmd_todos(ctx: CommandContext, args: str) -> None:
-    """``/todos`` - show or hide the todo sidebar."""
-    await ctx.app.action_toggle_todos()
+    """``/todos`` - show the current plan.
+
+    A block rather than a sidebar. A document that is the terminal's own
+    scrollback has no second column to put one in, and a plan re-emitted where
+    the conversation is reads as part of it.
+    """
+    ctx.app.show_todos()
 
 
 async def cmd_resume(ctx: CommandContext, args: str) -> None:
@@ -934,7 +939,7 @@ def build_default_commands() -> CommandRegistry:
         ),
         Command("clear", "Start a fresh session", cmd_clear),
         Command("compact", "Summarise older turns now", cmd_compact, "[focus]", takes_args=True),
-        Command("todos", "Toggle the todo sidebar", cmd_todos),
+        Command("todos", "Show the current plan", cmd_todos),
         Command("resume", "Resume a previous session", cmd_resume),
         Command("rewind", "Go back to an earlier prompt", cmd_rewind),
         Command("title", "Show or set the session name", cmd_title, "[text]", takes_args=True),

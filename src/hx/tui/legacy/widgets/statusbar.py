@@ -3,7 +3,7 @@
 Two lines, the way pi lays them out::
 
     ~/src/hx (main)                                    default · sandbox seatbelt
-    ↑57k ↓3.5k R244k W12k CH81% $0.1652 1.4s 12%/200k (auto)   claude-sonnet-4.5
+    ↑57k ↓3.5k R244k W12k CH81% $0.1652 1.4s ▰▱▱▱▱▱ 24k/200k (auto)  claude-sonnet-4.5
 
 A model on a subscription route is tagged ``gpt-5.6-terra (sub)`` and its cost
 field reads ``sub`` rather than ``$0.00``: which credential paid for a turn has
@@ -23,6 +23,8 @@ from rich.text import Text
 from textual.widgets import Static
 
 from hx.core.usage import format_cost, format_tokens
+from hx.tui.format import meter_fill
+from hx.tui.glyphs import METER_EMPTY, METER_FULL
 from hx.tui.theme import THEME
 
 GAP = 2
@@ -35,6 +37,14 @@ instead of squeezing both into nonsense."""
 WARN_FRACTION = 0.75
 """Amber past here - close enough to compaction that the user should know."""
 DANGER_FRACTION = 0.90
+
+METER_CELLS = 6
+"""Width of the context gauge. Coarse on purpose: the counts beside it are
+there for anyone who wants the precise figure."""
+
+METER_MIN_WIDTH = 60
+"""Below this the gauge is dropped. It is the decoration on that field, and a
+narrow pane should spend its columns on the counts instead."""
 
 
 class StatusBar(Static):
@@ -136,7 +146,7 @@ class StatusBar(Static):
         line = Text(no_wrap=True, overflow="ellipsis", style=THEME.fg("dim"))
         line.append_text(self._justify(self._location_field(), self._mode_field(), width))
         line.append("\n")
-        line.append_text(self._justify(self._stats_field(), self._model_field(), width))
+        line.append_text(self._justify(self._stats_field(width), self._model_field(), width))
         return line
 
     @staticmethod
@@ -169,7 +179,7 @@ class StatusBar(Static):
             field.append(f"  ⧗{self.queued} queued", style=THEME.fg("muted"))
         return field
 
-    def _stats_field(self) -> Text:
+    def _stats_field(self, width: int) -> Text:
         field = Text(style=THEME.fg("dim"))
         parts: list[Text] = []
         if self.input_tokens:
@@ -186,7 +196,7 @@ class StatusBar(Static):
         )
         if self.latency_ms >= 100:
             parts.append(Text(f"{self.latency_ms / 1000:.1f}s", style=THEME.fg("dim")))
-        parts.append(self._context_field())
+        parts.append(self._context_field(width))
 
         for index, part in enumerate(parts):
             if index:
@@ -213,9 +223,14 @@ class StatusBar(Static):
             field.append(f" · {self.effort}", style=THEME.fg("dim"))
         return field
 
-    def _context_field(self) -> Text:
-        """``12%/200k`` - percentage first, because that is the number that decides
-        whether the next turn compacts."""
+    def _context_field(self, width: int) -> Text:
+        """``▰▰▱▱▱▱ 24k/200k`` - a gauge, then what it is a gauge of.
+
+        The bar is what makes the one field with a deadline legible without
+        reading it: a glance sees how full the window is, and the counts are
+        there when the exact figure matters. A pane too narrow for both keeps
+        the counts, which are the field; the bar is its decoration.
+        """
         fraction = self.context_fraction
         role = "success"
         if fraction >= DANGER_FRACTION:
@@ -224,7 +239,13 @@ class StatusBar(Static):
             role = "warning"
 
         window = format_tokens(self.context_window) if self.context_window else "?"
-        field = Text(f"{fraction * 100:.0f}%/{window}", style=THEME.fg(role))
+        field = Text()
+        if width >= METER_MIN_WIDTH:
+            filled = meter_fill(fraction, METER_CELLS)
+            field.append(METER_FULL * filled, style=THEME.fg(role))
+            field.append(METER_EMPTY * (METER_CELLS - filled), style=THEME.fg("dim"))
+            field.append(" ")
+        field.append(f"{format_tokens(self.context_used)}/{window}", style=THEME.fg(role))
         if self.auto_compact:
             field.append(" (auto)", style=THEME.fg("dim"))
         return field

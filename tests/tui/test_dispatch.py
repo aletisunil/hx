@@ -23,20 +23,20 @@ def _with(renderer: TuiRenderer) -> Settings:
     return replace(Settings(), tui=TuiSettings(renderer=renderer))
 
 
-def test_the_old_app_is_still_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_scrollback_renderer_is_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(ENV_VAR, raising=False)
-    assert selected_renderer(Settings()) is TuiRenderer.LEGACY
+    assert selected_renderer(Settings()) is TuiRenderer.NEW
 
 
 def test_the_setting_selects_the_renderer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(ENV_VAR, raising=False)
-    assert selected_renderer(_with(TuiRenderer.NEW)) is TuiRenderer.NEW
+    assert selected_renderer(_with(TuiRenderer.LEGACY)) is TuiRenderer.LEGACY
 
 
-@pytest.mark.parametrize("value", ["new", "NEW", "  new  "])
+@pytest.mark.parametrize("value", ["legacy", "LEGACY", "  legacy  "])
 def test_the_environment_overrides_the_setting(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv(ENV_VAR, value)
-    assert selected_renderer(Settings()) is TuiRenderer.NEW
+    assert selected_renderer(Settings()) is TuiRenderer.LEGACY
 
 
 def test_the_environment_can_always_get_back_to_the_old_app(
@@ -49,19 +49,21 @@ def test_the_environment_can_always_get_back_to_the_old_app(
 
 
 def test_a_typo_in_the_override_is_ignored_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """It arrives from a shell profile as often as from a deliberate choice."""
+    """It arrives from a shell profile as often as from a deliberate choice,
+    and refusing to start over one is worse than using the default."""
     monkeypatch.setenv(ENV_VAR, "nonsense")
-    assert selected_renderer(Settings()) is TuiRenderer.LEGACY
+    assert selected_renderer(_with(TuiRenderer.LEGACY)) is TuiRenderer.LEGACY
+    assert selected_renderer(Settings()) is TuiRenderer.NEW
 
 
 def test_an_empty_override_defers_to_the_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(ENV_VAR, "")
-    assert selected_renderer(_with(TuiRenderer.NEW)) is TuiRenderer.NEW
+    assert selected_renderer(_with(TuiRenderer.LEGACY)) is TuiRenderer.LEGACY
 
 
 def test_the_setting_round_trips_through_config(project: Path) -> None:
-    (project / ".hx" / "settings.json").write_text('{"tui": {"renderer": "new"}}')
-    assert load_settings(project).tui.renderer is TuiRenderer.NEW
+    (project / ".hx" / "settings.json").write_text('{"tui": {"renderer": "legacy"}}')
+    assert load_settings(project).tui.renderer is TuiRenderer.LEGACY
 
 
 def test_an_unknown_renderer_in_config_names_the_known_ones(project: Path) -> None:

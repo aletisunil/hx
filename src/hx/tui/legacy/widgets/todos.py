@@ -90,6 +90,7 @@ class SubagentRows(Static):
             "done": False,
             "error": False,
         }
+        self._sync_air()
         self.refresh(layout=True)
 
     def finish(self, subagent_id: str, is_error: bool) -> None:
@@ -98,7 +99,14 @@ class SubagentRows(Static):
             return
         row["done"] = True
         row["error"] = is_error
+        self._sync_air()
         self.refresh(layout=True)
+
+    def _sync_air(self) -> None:
+        """Padding rides a class rather than the stylesheet, because the rows
+        are only worth spacing apart while there are rows: an idle dock must
+        stay exactly zero lines tall."""
+        self.set_class(any(not row["done"] for row in self.rows.values()), "has-rows")
 
     def render(self) -> RenderableType:
         active = {k: v for k, v in self.rows.items() if not v["done"]}

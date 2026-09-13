@@ -26,6 +26,31 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The interface is drawn into your terminal's own scrollback instead of taking
+  over the screen. Finished output belongs to the terminal: scroll it, select
+  it with the mouse, copy it, pipe it, and it is still there after HX exits.
+  `HX_TUI=legacy` runs the previous interface if you need it.
+- Approving a tool call is now a framed prompt with one option per line, each
+  saying what it does - `always allow` states that it writes a rule to
+  `.hx/settings.local.json`. `y`/`s`/`a`/`n` still answer in one keystroke,
+  `esc` denies, and the arrow keys work for anyone who wants to read first.
+  The command shown is the one that will run, `$` and all.
+- Your theme reaches the whole interface. Links, list bullets, block quotes,
+  horizontal rules and inline code in the model's replies now follow the
+  palette instead of a hard-coded set of colours, and headings are visibly
+  different from each other.
+- Multi-line output from `/help`, `/cost`, `/status` and the rest lines up
+  under its own first line instead of at two different indents.
+- The todo list is a block in the conversation rather than a sidebar, and
+  `/todos` and `ctrl+t` show it. A scrollback-native interface has no second
+  column to put a sidebar in.
+- Mouse selection is the terminal's, across the whole session including what
+  has scrolled off, rather than HX's own within the visible screen.
+- The installer now opens with a terminal boot animation that draws and lights
+  the HX mark, with a clean static version for CI and redirected output.
+
 ---
 
 ## [0.1.9] - 2026-09-11

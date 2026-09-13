@@ -80,7 +80,7 @@ def _defaults() -> dict[str, KeyBinding]:
         KeyBinding("app.mode.cycle", ("shift+tab",), "Cycle permission mode"),
         KeyBinding("app.commands", ("ctrl+p",), "Open the command palette"),
         KeyBinding("app.model.select", ("ctrl+l",), "Open the model picker"),
-        KeyBinding("app.todos.toggle", ("ctrl+t",), "Toggle the todo sidebar"),
+        KeyBinding("app.todos.toggle", ("ctrl+t",), "Show the current plan"),
         # Transcript.
         KeyBinding("app.tools.expand", ("ctrl+o", "ctrl+r"), "Expand tool output", hint="expand"),
         KeyBinding("app.message.copy", ("ctrl+x",), "Copy the selected message"),

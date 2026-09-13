@@ -14,7 +14,13 @@ import pytest
 from rich.console import Console
 from textual.geometry import Size
 
-from hx.tui.legacy.widgets.statusbar import DANGER_FRACTION, WARN_FRACTION, StatusBar
+from hx.tui.glyphs import METER_EMPTY, METER_FULL
+from hx.tui.legacy.widgets.statusbar import (
+    DANGER_FRACTION,
+    METER_MIN_WIDTH,
+    WARN_FRACTION,
+    StatusBar,
+)
 from hx.tui.theme import THEME
 
 
@@ -53,7 +59,7 @@ def _lines(bar: StatusBar, width: int) -> list[str]:
 
 def test_wide_bar_shows_every_field() -> None:
     text = " ".join(_lines(_bar(), 140))
-    for fragment in ("claude-sonnet-4.5", "77%/128k", "R21k", "CH91%", "$0.4120", "hx (main)"):
+    for fragment in ("claude-sonnet-4.5", "98k/128k", "R21k", "CH91%", "$0.4120", "hx (main)"):
         assert fragment in text
 
 
@@ -89,13 +95,27 @@ def test_context_gauge_colour_escalates() -> None:
     hex, so a theme switch must not break the test."""
     bar = _bar()
     bar.set_context(int(0.5 * 128_000), 128_000)
-    assert THEME.fg("success") in _rendered_colours(bar._context_field())
+    assert THEME.fg("success") in _rendered_colours(bar._context_field(120))
 
     bar.set_context(int((WARN_FRACTION + 0.01) * 128_000), 128_000)
-    assert THEME.fg("warning") in _rendered_colours(bar._context_field())
+    assert THEME.fg("warning") in _rendered_colours(bar._context_field(120))
 
     bar.set_context(int((DANGER_FRACTION + 0.01) * 128_000), 128_000)
-    assert THEME.fg("error") in _rendered_colours(bar._context_field())
+    assert THEME.fg("error") in _rendered_colours(bar._context_field(120))
+
+
+def test_the_context_gauge_is_drawn_beside_the_counts() -> None:
+    """The bar for the glance, the counts for when the exact figure matters."""
+    field = _bar()._context_field(120).plain
+    assert "98k/128k" in field
+    assert METER_FULL in field and METER_EMPTY in field
+
+
+def test_a_narrow_pane_drops_the_gauge_and_keeps_the_counts() -> None:
+    """The bar is the decoration on that field; the numbers are the field."""
+    field = _bar()._context_field(METER_MIN_WIDTH - 1).plain
+    assert "98k/128k" in field
+    assert METER_FULL not in field and METER_EMPTY not in field
 
 
 def test_cache_field_is_explicit_when_nothing_is_cached() -> None:
@@ -106,9 +126,9 @@ def test_the_palette_drives_the_colours() -> None:
     """Switching theme must repaint the bar, not leave half of it dark-themed."""
     bar = _bar()
     THEME.use("dark")
-    dark = _rendered_colours(bar._context_field())
+    dark = _rendered_colours(bar._context_field(120))
     THEME.use("light")
-    light = _rendered_colours(bar._context_field())
+    light = _rendered_colours(bar._context_field(120))
     assert dark != light
 
 

@@ -274,6 +274,15 @@ class HXSession:
     async def submit_to_model(self, text: str) -> None:
         self._submit(text)
 
+    def show_todos(self) -> None:
+        """Re-emit the current plan as a transcript block."""
+        todos = getattr(self.loop.session, "todos", None)
+        if not todos:
+            self._notice("No plan yet.", "warning")
+            return
+        self.view.transcript.append(TodoBlock(todos))
+        self.runner.request_render()
+
     def clear_queue(self) -> None:
         self._queued.clear()
 
@@ -416,6 +425,9 @@ class HXSession:
             return
         if name == "ctrl+o":
             self.view.header.toggle()
+            return
+        if name == "ctrl+t":
+            self.show_todos()
             return
         if name == "ctrl+p":
             asyncio.create_task(self._open_commands())  # noqa: RUF006
