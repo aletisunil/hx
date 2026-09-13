@@ -65,7 +65,17 @@ def test_heading_levels_are_actually_distinguished() -> None:
 def test_paragraphs_wrap_to_the_width() -> None:
     lines = plain("the quick brown fox jumps over the lazy dog", 20)
     assert all(cell_width(line) <= 20 for line in lines)
-    assert " ".join(lines).split() == "the quick brown fox jumps over the lazy dog".split()
+    assert " ".join(lines).split() == [
+        "the",
+        "quick",
+        "brown",
+        "fox",
+        "jumps",
+        "over",
+        "the",
+        "lazy",
+        "dog",
+    ]
 
 
 def test_inline_code_uses_its_role() -> None:

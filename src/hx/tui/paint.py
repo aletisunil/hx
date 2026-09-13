@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from hx.term import ansi
+from hx.term.markdown import Painter
 from hx.tui.theme import THEME
 
 _mode: ansi.ColorMode | None = None
@@ -90,7 +91,7 @@ def link(url: str, label: str, role: str = "md_link") -> str:
     return ansi.hyperlink(url, fg(role, label))
 
 
-class ThemePainter:
+class ThemePainter(Painter):
     """Bridges the markdown renderer to HX's palette and syntax highlighting.
 
     :mod:`hx.term.markdown` deliberately knows nothing about HX's roles, so
