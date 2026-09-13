@@ -21,6 +21,7 @@ from hx.core.loop import AgentLoop
 from hx.core.session import new_session
 from hx.providers.models import ModelRegistry
 from hx.term.terminal import FakeTerminal
+from hx.term.width import strip_ansi
 from hx.tools.registry import ToolRegistry
 from hx.tui import paint
 from hx.tui.runtime import HXSession
@@ -395,3 +396,79 @@ async def test_the_prompt_says_what_enter_does_while_a_turn_runs(
         session.bus.publish(ev.TurnStarted(turn_index=0, model=MODEL))
         await driver.settle()
         assert "queues" in session.prompt.placeholder or "steers" in session.prompt.placeholder
+
+
+async def test_a_new_session_clears_the_transcript_and_the_counters(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        driver.type("a question\r")
+        await driver.settle(rounds=40)
+        session.view.dock.status.set_tokens(500, 100)
+
+        session.start_new_session()
+        await driver.settle()
+
+        # The document is cleared, not the scrollback. Anything already
+        # committed to the terminal belongs to the terminal now - that is the
+        # whole point of the renderer, and it is not something to undo.
+        assert session.view.transcript.blocks != []
+        assert not any(
+            "a question" in strip_ansi("".join(block.render(80)))
+            for block in session.view.transcript.blocks[:-1]
+        )
+        assert session.view.dock.status.input_tokens == 0
+        assert any("New session started" in line for line in driver.display())
+
+
+async def test_resuming_an_unknown_session_reports_rather_than_raises(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        session.resume_session("does-not-exist")
+        await driver.settle()
+        assert any("Could not resume" in line for line in driver.display())
+
+
+async def test_a_rewind_hands_the_cut_prompt_back_to_the_editor(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A rewind is nearly always the first half of "say that differently"."""
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        driver.type("the original question\r")
+        await driver.settle(rounds=40)
+
+        index = next(
+            i for i, message in enumerate(session.loop.session.messages) if message.role == "user"
+        )
+        session.rewind_to(index)
+        await driver.settle()
+
+        assert session.prompt.text == "the original question"
+
+
+async def test_replaying_rebuilds_the_transcript_from_the_session(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    session = build(tmp_path, [text_turn("the model answered")])
+    async with Driver(session) as driver:
+        driver.type("the user asked\r")
+        await driver.settle(rounds=40)
+
+        session._replay_transcript()
+        await driver.settle()
+
+        shown = driver.display()
+        assert any("the user asked" in line for line in shown)
+        assert any("the model answered" in line for line in shown)
+
+
+async def test_showing_the_plan_without_one_says_so(hx_home: Path, tmp_path: Path) -> None:
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        session.show_todos()
+        await driver.settle()
+        assert any("No plan yet" in line for line in driver.display())

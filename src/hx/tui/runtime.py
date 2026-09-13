@@ -102,6 +102,9 @@ class HXSession:
         self._overlay_finished: asyncio.Event | None = None
         """Set when whatever is on the overlay reports that it is done."""
         self._queued: list[str] = []
+        self._background: set[asyncio.Task[Any]] = set()
+        """Detached work - session renaming - held so it is not garbage
+        collected mid-flight."""
         self._mouse = False
         self.commands: Any = None
         """The slash-command registry, built on start."""
@@ -273,6 +276,159 @@ class HXSession:
 
     async def submit_to_model(self, text: str) -> None:
         self._submit(text)
+
+    @property
+    def checkpoints(self) -> Any:
+        return self.extra.get("checkpoints")
+
+    @property
+    def tracker(self) -> Any:
+        return self.extra.get("tracker")
+
+    def set_api_key(self, key: str) -> None:
+        """Apply a new credential to the running provider.
+
+        Saved keys are picked up on the next start; this is what makes the
+        change take effect now, without losing the session.
+        """
+        setter = getattr(getattr(self.loop, "provider", None), "set_api_key", None)
+        if setter is not None:
+            setter(key)
+
+    async def use_route_for(self, model_id: str) -> None:
+        """Point the session at whichever provider serves ``model_id``.
+
+        A model id carries its route, so switching from an OpenRouter model to
+        a subscription one has to replace the provider - not just the model
+        name, which would send a Codex id to OpenRouter.
+
+        Routes are compared by model id rather than by the live provider's
+        name, so an injected or wrapped provider is left alone as long as the
+        route has not actually changed.
+        """
+        from hx.providers import registry
+
+        spec = registry.provider_for(model_id)
+        if spec.id == registry.provider_for(self.loop.model).id:
+            return
+
+        provider = registry.build_provider(
+            model_id,
+            self.auth,
+            session_id=self.loop.session.meta.session_id,
+            models=self.models,
+        )
+        previous = self.loop.set_provider(provider)
+        self._retarget_subagents(provider)
+        with contextlib.suppress(Exception):
+            await previous.aclose()
+
+    def _retarget_subagents(self, provider: Any) -> None:
+        """Subagents share the parent's provider; they must follow the switch."""
+        with contextlib.suppress(Exception):
+            task_tool = self.loop.tools.get("Task")
+            setter = getattr(task_tool, "set_provider", None)
+            if setter is not None:
+                setter(provider)
+
+    def rename_outgoing_session(self, session: Any) -> None:
+        """Name the session being left behind for what it ended up being.
+
+        Detached: the user asked for a new session, not to wait on a name for
+        the old one. It lands in that session's meta.json when it arrives,
+        which is all /resume reads.
+        """
+        if not session.messages:
+            return
+        task = asyncio.create_task(self.loop.retitle_session(session))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    def start_new_session(self) -> None:
+        """Fresh transcript, same directory. The old session stays on disk."""
+        from hx.core.session import new_session
+
+        self.rename_outgoing_session(self.loop.session)
+        self.loop.session = new_session(self.settings.cwd, self.loop.model)
+        # The session id is the prompt-cache key on routes that use one; a
+        # stale id would keep the new conversation hitting the old cache.
+        setter = getattr(self.loop.provider, "set_session_id", None)
+        if setter is not None:
+            setter(self.loop.session.meta.session_id)
+        self._attach_checkpoints()
+        self.view.transcript.clear()
+        self._notice("New session started.", "success")
+        window = self.loop.model_info.context_window if self.loop.model_info else 0
+        self.status.set_tokens(0, 0)
+        self.status.set_cache(0, 0, 0.0)
+        self.status.update(cost_usd=0.0)
+        self.status.set_context(0, window)
+        self.runner.request_immediate_render()
+
+    def resume_session(self, session_id: str) -> None:
+        from hx.core.session import load_session
+
+        try:
+            session = load_session(session_id)
+        except Exception as exc:
+            self._notice(f"Could not resume {session_id}: {exc}", "error")
+            return
+
+        self.rename_outgoing_session(self.loop.session)
+        self.loop.session = session
+        setter = getattr(self.loop.provider, "set_session_id", None)
+        if setter is not None:
+            setter(session.meta.session_id)
+        self._attach_checkpoints()
+        self._replay_transcript()
+        self._notice(f"Resumed {session_id}.", "success")
+        self.runner.request_immediate_render()
+
+    def rewind_to(self, index: int) -> Any:
+        """Take the session back to just before message ``index``.
+
+        Files first, then the transcript: if the restore fails the session
+        still describes the tree as it actually is. The prompt that was cut is
+        handed back to the input rather than dropped - a rewind is nearly
+        always the first half of "say that differently".
+        """
+        session = self.loop.session
+        prompt = session.messages[index].text() if index < len(session.messages) else ""
+        report = None
+        if self.checkpoints is not None:
+            report = self.checkpoints.restore_to(index, self.tracker)
+        session.rewind_to(index)
+        self._replay_transcript()
+        if prompt:
+            self.prompt.text = prompt
+            self.prompt.buffer.cursor = len(prompt)
+        self.runner.request_immediate_render()
+        return report
+
+    def _attach_checkpoints(self) -> None:
+        """Point the store at whichever session the tools are now writing to."""
+        if self.checkpoints is None:
+            return
+        from hx.paths import session_checkpoints_dir
+
+        session = self.loop.session
+        self.checkpoints.attach(session, session_checkpoints_dir(session.meta.session_id))
+
+    def _replay_transcript(self) -> None:
+        """Redraw the transcript from the session.
+
+        Rebuilt rather than patched: the screen no longer matches the history,
+        and there is no reliable way to reconcile the two.
+        """
+        transcript = self.view.transcript
+        transcript.clear()
+        self._assistant = None
+        self._thinking = None
+        for message in self.loop.session.active_messages():
+            if message.role == "user":
+                transcript.append(UserMessage(message.text()))
+            elif text := message.text():
+                transcript.append(AssistantMessage(text))
 
     def show_todos(self) -> None:
         """Re-emit the current plan as a transcript block."""
