@@ -29,6 +29,9 @@ dependencies = [
   # System trust store, so a corporate proxy CA the machine already trusts is
   # enough - certifi alone is why `hx` fails on networks where browsers work.
   "truststore>=0.10",
+  # Cell widths for the terminal renderer. Pure Python, tables generated from
+  # the Unicode data files - the one thing hx.term does not hand-roll.
+  "wcwidth>=0.2.13",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +45,9 @@ dev = [
   "types-PyYAML",
   "types-Pygments",
   "pytest-textual-snapshot>=1.0",
+  # A VT emulator, so tests can assert what the differ actually paints rather
+  # than what it claims to have written.
+  "pyte>=0.8",
 ]
 
 [project.scripts]
