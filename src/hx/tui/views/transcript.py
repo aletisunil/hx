@@ -88,6 +88,17 @@ class Transcript(Container):
 
 
 @runtime_checkable
+class Dockable(Protocol):
+    """A framed block that can be told the dock will close it.
+
+    A protocol rather than the :class:`~hx.tui.views.dialog.Framed` mixin
+    itself, so this module does not have to import the dialogs it lays out.
+    """
+
+    def set_docked(self, docked: bool) -> None: ...
+
+
+@runtime_checkable
 class Prompt(Protocol):
     """What the dock needs from whatever is taking the user's typing.
 
@@ -243,16 +254,55 @@ class Session(Container):
         self.transcript = Transcript()
         self.overlay = Container()
         self.dock = Dock(prompt)
+        self._docked: Dockable | None = None
+        """Whichever framed block is currently letting the dock close it."""
 
         self.add(self.header)
         self.add(self.transcript)
         self.add(self.overlay)
         self.add(self.dock)
 
+    OVERLAY_GAP = 1
+    """Blank rows :meth:`show` puts between the transcript and the overlay.
+
+    Named because :meth:`overlay_rows` has to subtract it: a picker sized to
+    the screen less the dock is exactly this much too tall, and the row it
+    overruns by is the one its own top rule is drawn on.
+    """
+
     def show(self, component: Component) -> None:
         self.overlay.clear()
-        self.overlay.add(Spacer(1))
+        self.overlay.add(Spacer(self.OVERLAY_GAP))
         self.overlay.add(component)
+
+    def render(self, width: int) -> list[str]:
+        self._seat_frames()
+        return super().render(width)
+
+    def _seat_frames(self) -> None:
+        """Tell whatever lands directly above the dock that the dock closes it.
+
+        The dock opens with a blank line and then the prompt's own rule, so a
+        framed block that also closes with a rule produces rule, blank, rule -
+        three lines of frame for one edge, which reads as a rendering fault.
+
+        Which block that is changes as the conversation grows: a picker while
+        one is up, an approval when it is the last thing said, nothing at all
+        once a tool block lands under it. So it is decided per frame here,
+        rather than fixed when the block was made.
+        """
+        last = self.showing
+        if last is None:
+            blocks = self.transcript.blocks
+            last = blocks[-1] if blocks else None
+        bottom = last if isinstance(last, Dockable) else None
+        if bottom is self._docked:
+            return
+        if self._docked is not None:
+            self._docked.set_docked(False)
+        self._docked = bottom
+        if bottom is not None:
+            bottom.set_docked(True)
 
     def dismiss(self) -> None:
         self.overlay.clear()
@@ -262,6 +312,23 @@ class Session(Container):
         """Whatever currently owns the keyboard, if anything."""
         blocks = [child for child in self.overlay.children if not isinstance(child, Spacer)]
         return blocks[-1] if blocks else None
+
+    def footer_height(self, width: int) -> int:
+        """Rows the renderer holds on the bottom of the screen.
+
+        The dock, and only the dock: the prompt a user is typing into should be
+        where they last saw it, not wherever the conversation above happened to
+        end.
+        """
+        return len(self.dock.render(width))
+
+    def overlay_rows(self, width: int, rows: int) -> int:
+        """How tall a thing on the overlay may be, on a terminal this size.
+
+        The screen, less the dock it sits above and the gap :meth:`show` puts
+        above it.
+        """
+        return max(1, rows - self.footer_height(width) - self.OVERLAY_GAP)
 
     def handle_input(self, key: str, data: str) -> bool:
         showing = self.showing

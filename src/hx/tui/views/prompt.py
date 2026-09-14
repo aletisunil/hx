@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from hx.term.editor import Editor
+from hx.term.sanitize import plain_text
 from hx.tui.format import columns
 from hx.tui.fuzzy import filter_items
 from hx.tui.glyphs import CURSOR, GUTTER
@@ -191,7 +192,12 @@ class Prompt(Editor):
         buffer = self.buffer
 
         if key in ("text", "paste"):
-            self.insert(data, coalesce=key == "text")
+            # A paste is whatever was on the clipboard, and the decoder's
+            # "printable" run admits the C1 range, where a terminal reads 0x9b
+            # as CSI. Sanitized here rather than on submit: the draft is drawn
+            # to the terminal as it is typed, so an escape in it would act
+            # before anyone pressed enter.
+            self.insert(plain_text(data), coalesce=key == "text")
             self._sync_completion()
             return True
         if key == "backspace":
@@ -235,6 +241,8 @@ class Prompt(Editor):
             self._yank()
         elif bound("tui.editor.yankPop"):
             self._yank_pop()
+        elif bound("tui.editor.undo"):
+            self.undo()
         elif bound("tui.editor.redo"):
             self.redo()
         else:
@@ -348,7 +356,7 @@ class Prompt(Editor):
             return False
         if key in ("up", "down"):
             completion.move(-1 if key == "up" else 1)
-            self._sync_footer()
+            self._sync_completions()
             return True
         if bound("tui.input.submit"):
             # Once the prompt already contains the highlighted completion,
@@ -376,11 +384,11 @@ class Prompt(Editor):
         """
         if self.completion is not None:
             self.completion.move(1)
-            self._sync_footer()
+            self._sync_completions()
             return
         self._completion_dismissed = False
         self.completion = self._build_completion()
-        self._sync_footer()
+        self._sync_completions()
 
     def _sync_completion(self) -> None:
         """Open, refilter or close for whatever is under the cursor.
@@ -399,12 +407,12 @@ class Prompt(Editor):
             if self.completion is not None and self.completion.start == built.start:
                 built.index = min(self.completion.index, max(0, len(built.candidates) - 1))
             self.completion = built
-        self._sync_footer()
+        self._sync_completions()
 
     def close_completion(self) -> None:
         self._completion_dismissed = self.completion is not None
         self.completion = None
-        self._sync_footer()
+        self._sync_completions()
 
     def accept_completion(self) -> None:
         completion = self.completion
@@ -422,7 +430,7 @@ class Prompt(Editor):
         self.completion = None
         self._completion_dismissed = False
         self.invalidate()
-        self._sync_footer()
+        self._sync_completions()
 
     def _build_completion(self) -> Completion | None:
         text = self.text[: self.buffer.cursor]
@@ -449,19 +457,23 @@ class Prompt(Editor):
         return Completion(start=0, prefix="/", candidates=candidates) if candidates else None
 
     def _path_completion(self, text: str, at: int) -> Completion | None:
-        matches = self.completer.complete(text[at + 1 :])
+        # A filename is bytes off a disk, not something HX wrote.
+        matches = [plain_text(path) for path in self.completer.complete(text[at + 1 :])]
         candidates = [Candidate(value=path, label=path) for path in matches]
         return Completion(start=at, prefix="@", candidates=candidates) if candidates else None
 
-    def _sync_footer(self) -> None:
+    def _sync_completions(self) -> None:
         """Draw the completion list inside the editor's own line array.
 
         Part of the same component, so the list cannot end up positioned
-        somewhere other than directly under the text it is completing.
+        somewhere other than against the text it is completing. Above it: the
+        prompt is on the bottom row of the screen, and a list below it would
+        shove the prompt and the status bar up by one row per match as the
+        query narrows.
         """
         completion = self.completion
         if completion is None or not completion.candidates:
-            self.set_footer([])
+            self.set_completions([])
             return
 
         total = len(completion.candidates)
@@ -479,7 +491,7 @@ class Prompt(Editor):
             lines.append(marker + fg("accent" if chosen else "text", row))
         if total > LIST_VISIBLE:
             lines.append(GUTTER + fg("muted", f"({completion.index + 1}/{total})"))
-        self.set_footer(lines)
+        self.set_completions(lines)
 
 
 __all__ = ["Candidate", "Completion", "FileCompleter", "Prompt", "placeholder_text"]

@@ -99,6 +99,11 @@ def _defaults() -> dict[str, KeyBinding]:
         KeyBinding("tui.editor.deleteWordForward", ("alt+d",), "Delete the word ahead"),
         KeyBinding("tui.editor.yank", ("ctrl+y",), "Yank the last kill"),
         KeyBinding("tui.editor.yankPop", ("alt+y",), "Cycle back through kills"),
+        # ctrl+z is the app's suspend, as it is in every other terminal
+        # program, so undo takes readline's own key rather than the one a
+        # windowed editor would use. The editor had the operation and no
+        # binding at all, which made ctrl+z-undoes a documented fiction.
+        KeyBinding("tui.editor.undo", ("ctrl+underscore",), "Undo"),
         KeyBinding("tui.editor.redo", ("ctrl+shift+z",), "Redo"),
     ]
     return {binding.id: binding for binding in bindings}
@@ -148,6 +153,13 @@ _DISPLAY = {
     "pageup": "pgup",
     "pagedown": "pgdn",
     "delete": "del",
+    # The decoder names C0 controls after the character, which is what a
+    # keybindings file is written against; what the user presses is the
+    # punctuation on the key.
+    "underscore": "_",
+    "backslash": "\\",
+    "circumflex_accent": "^",
+    "right_square_bracket": "]",
 }
 
 

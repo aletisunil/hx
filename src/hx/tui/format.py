@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from hx.term.sanitize import plain_text
 from hx.term.width import cell_width, truncate_to_width
 from hx.tui.glyphs import ELLIPSIS
 
@@ -59,9 +60,11 @@ def one_line(text: str, width: int) -> str:
     """Collapse to a single line, ellipsized to fit.
 
     For anywhere a multi-line value has to be summarised in a row - a queued
-    prompt, a session title, the target of an approval.
+    prompt, a session title, the target of an approval. Every one of those is
+    something a model or a tool wrote, so it is sanitized on the way in: a row
+    is one line by definition, and text that can move the cursor is not.
     """
-    flat = " ".join(text.split())
+    flat = " ".join(plain_text(text).split())
     if cell_width(flat) <= width:
         return flat
     return truncate_to_width(flat, max(0, width - cell_width(ELLIPSIS))) + ELLIPSIS

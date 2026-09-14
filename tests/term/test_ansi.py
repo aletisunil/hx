@@ -171,3 +171,20 @@ def test_wrapping_never_splits_an_escape_sequence() -> None:
     for line in wrap(styled, 9):
         assert "\x1b" not in strip_ansi(line)
         assert cell_width(line) <= 9
+
+
+def test_a_truncated_background_escape_is_ignored_rather_than_read_past() -> None:
+    """A log cut mid-escape and pasted into the prompt is a normal input.
+
+    Reading past the end of the parameters raised, and the exception came out
+    of the render - which left the transcript holding a block that could never
+    be drawn again.
+    """
+    for truncated in ("\x1b[48m", "\x1b[48;5m", "\x1b[48;2m", "\x1b[48;2;10m", "\x1b[48;2;1;2m"):
+        assert active_background(f"x{truncated}y") == ""
+
+
+def test_a_truncated_escape_does_not_stop_the_text_before_it_wrapping() -> None:
+    lines = wrap("alpha beta \x1b[48;5m gamma delta epsilon", 12)
+    assert all(cell_width(line) <= 12 for line in lines)
+    assert "alpha" in strip_ansi(lines[0])

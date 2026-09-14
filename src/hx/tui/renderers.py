@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from hx.term.ansi import fg as paint_fg
+from hx.term.sanitize import plain_text
 from hx.term.syntax import highlight as highlight_source
 from hx.term.width import cell_width, truncate_to_width
 from hx.tools.edit import count_changes as _count_changes
@@ -68,6 +69,48 @@ class ToolCall:
     finished: bool = False
     expanded: bool = False
     duration_ms: float = 0.0
+
+
+#: Fields of a :class:`ToolCall` carrying text somebody else wrote.
+SANITIZED_FIELDS = frozenset({"output", "summary", "params"})
+
+
+def sanitized_fields(changes: dict[str, Any]) -> dict[str, Any]:
+    """The subset of ``changes`` that has to be cleaned, cleaned.
+
+    Split out from :func:`sanitized_call` so a caller replacing one field pays
+    for that field, rather than for re-scanning everything already on the call.
+    """
+    out = dict(changes)
+    for name in SANITIZED_FIELDS & changes.keys():
+        value = changes[name]
+        if name == "params":
+            out[name] = {
+                key: plain_text(item) if isinstance(item, str) else item
+                for key, item in (value or {}).items()
+            }
+        elif isinstance(value, str):
+            out[name] = plain_text(value)
+    return out
+
+
+def sanitized_call(call: ToolCall) -> ToolCall:
+    """A call whose strings are safe to draw.
+
+    Output, summary and the parameters alike: a tool's own arguments are as
+    likely to carry an escape as its result, because a path or a command is
+    often something the model copied out of a file it had read.
+
+    Lives beside :class:`ToolCall` because both the transcript block and the
+    approval prompt build one, and a renderer that is safe in one place and
+    not the other is a renderer nobody can reason about.
+    """
+    from dataclasses import replace
+
+    return replace(
+        call,
+        **sanitized_fields({"output": call.output, "summary": call.summary, "params": call.params}),
+    )
 
 
 def display_path(raw: Any, cwd: Path) -> str:
@@ -515,8 +558,14 @@ def render_todos(todos: Any) -> list[str]:
         marker = TodoRenderer.MARKERS.get(status, TODO_PENDING)
         # active_form is optional; falling through to content keeps a todo from
         # rendering as the literal string "None".
-        content = str(todo.get("content") or "")
-        label = str(todo.get("active_form") or content) if status == "in_progress" else content
+        # The plan is the model's own words, so it is sanitized like any
+        # other text it wrote - a todo reaches here without passing a block.
+        content = plain_text(str(todo.get("content") or ""))
+        label = (
+            plain_text(str(todo.get("active_form") or content))
+            if status == "in_progress"
+            else content
+        )
         marker_role = {"completed": "success", "in_progress": "accent"}.get(status, "dim")
         label_role = {"completed": "dim", "in_progress": "accent"}.get(status, "muted")
         out.append(fg(marker_role, f"{marker} ") + fg(label_role, label))

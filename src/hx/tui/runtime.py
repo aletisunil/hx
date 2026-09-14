@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from hx.core import events as ev
 from hx.core.usage import format_tokens
+from hx.git import BranchWatcher
 from hx.term.loop import TuiRunner
 from hx.term.terminal import Terminal
 from hx.tui.renderers import ToolCall
@@ -40,6 +41,10 @@ SPINNER_INTERVAL = 0.08
 """Seconds between spinner frames. Fast enough to read as motion, slow enough
 that it is not the thing the renderer spends its budget on."""
 
+BRANCH_POLL_SECONDS = 1.0
+"""A branch checkout should reach the status bar promptly. The watcher only
+stats ``HEAD`` between changes, so polling is cheap."""
+
 SILENT_TOOLS = frozenset({"todowrite"})
 """Tools whose own block is suppressed because something else draws the result.
 
@@ -55,10 +60,14 @@ HINTS = [
     ("ctrl+c", "clear"),
     ("ctrl+d", "exit"),
     ("ctrl+o", "expand"),
+    ("ctrl+p", "palette"),
+    ("ctrl+l", "model"),
     ("/", "commands"),
     ("!", "bash"),
     ("@", "files"),
 ]
+"""What is worth pressing, longest-lived first: the bar drops whole hints from
+the end on a narrow terminal, so the order is the priority."""
 
 
 class HXSession:
@@ -76,6 +85,7 @@ class HXSession:
         self.bus = bus
         self.settings = settings
         self.extra = extra
+        self._branch = BranchWatcher(Path(settings.cwd))
 
         from hx import __version__
 
@@ -89,11 +99,23 @@ class HXSession:
         self.view = Session(__version__, quiet=settings.quiet_startup, prompt=self.prompt)
         # Injectable so a test can drive a whole session without a tty, and
         # read back what a terminal would have shown.
-        self.runner = TuiRunner(self.view, terminal, on_key=self._on_key)
+        self.runner = TuiRunner(
+            self.view,
+            terminal,
+            on_key=self._on_key,
+            fullscreen=settings.tui.fullscreen,
+        )
 
         self._tools: dict[str, ToolBlock] = {}
-        self._pending: PermissionPrompt | None = None
-        """The approval the keyboard is currently answering, if any."""
+        self._pending: list[PermissionPrompt] = []
+        """Approvals waiting on the user, oldest first.
+
+        A list rather than one slot, because concurrent subagents - and any
+        batch of read-only calls, which the loop gathers - can each stop at an
+        approval. The keyboard goes to the oldest unanswered one; answering it
+        passes the keys to the next. With a single slot the second prompt
+        displaced the first, and the first was left on screen offering keys
+        that reached nothing while whoever asked waited on it forever."""
         self._overlay_finished: asyncio.Event | None = None
         """Set when whatever is on the overlay reports that it is done."""
         self._queued: list[str] = []
@@ -110,6 +132,15 @@ class HXSession:
         self._thinking: ThinkingMessage | None = None
         self._turn_started = 0.0
         self._turn: asyncio.Task[None] | None = None
+        """The running model turn, and nothing else.
+
+        A slash command and a ``!`` shell line used to be filed here too, which
+        meant submitting one mid-turn overwrote the handle to the turn: escape
+        then cancelled the command instead of the turn, and ``is_busy`` went
+        false the moment the command finished - while the model was still
+        talking."""
+        self._side: asyncio.Task[None] | None = None
+        """A slash command or shell line, which runs beside a turn."""
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -129,10 +160,11 @@ class HXSession:
 
         events = asyncio.create_task(self._consume_events())
         spinner = asyncio.create_task(self._spin())
+        branch = asyncio.create_task(self._watch_branch())
         try:
             await self.runner.run()
         finally:
-            for task in (events, spinner, self._turn):
+            for task in (events, spinner, branch, self._turn, self._side):
                 if task is not None and not task.done():
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
@@ -148,6 +180,17 @@ class HXSession:
             for block in self._tools.values():
                 block.tick()
             self.runner.request_render()
+
+    async def _watch_branch(self) -> None:
+        """Keep the branch in the status bar current across external checkouts."""
+        while True:
+            await asyncio.sleep(BRANCH_POLL_SECONDS)
+            previous = self._branch.branch
+            current = self._branch.poll()
+            status = self.view.dock.status
+            if current != previous or status.branch != current:
+                status.set_location(_tilde(Path(self.settings.cwd)), current)
+                self.runner.request_render()
 
     # -- the surface the slash commands expect -----------------------------
     #
@@ -227,8 +270,31 @@ class HXSession:
 
         For a flow that drives its own screen and decides when it is finished.
         """
+        self._size_overlay(component)
         self.view.show(component)
         self.runner.request_immediate_render()
+
+    def _size_overlay(self, component: Any) -> None:
+        """Tell an overlay how much room it has.
+
+        Anything that scrolls used to show a fixed eight rows whatever the
+        terminal was, which on a tall window left two thirds of the screen
+        empty under a truncated list.
+        """
+        setter = getattr(component, "set_rows_available", None)
+        if setter is not None:
+            setter(self._overlay_rows)
+
+    def _overlay_rows(self) -> int:
+        """Rows an overlay may use, asked of the view that lays it out.
+
+        The arithmetic lives there rather than here because it is a fact about
+        where the overlay sits - under the dock, and behind a gap the view puts
+        in front of it - and a number worked out from the outside goes stale
+        the first time that layout changes.
+        """
+        width, rows = self.runner.terminal.size
+        return self.view.overlay_rows(width, rows)
 
     def dismiss_modal(self, component: Any = None) -> None:
         """Take the overlay down.
@@ -280,6 +346,23 @@ class HXSession:
 
     def _write_osc52(self, payload: str) -> None:
         self.runner.terminal.write(payload)
+
+    @property
+    def fullscreen(self) -> bool:
+        return self.runner.fullscreen
+
+    def set_fullscreen(self, enabled: bool) -> None:
+        """Move the session between the alternate screen and the scrollback.
+
+        Every component is drawn by both, so this changes where the lines land
+        and nothing else - no state is rebuilt and the conversation is not
+        touched.
+        """
+        self.runner.set_fullscreen(enabled)
+
+    def clear_screen(self) -> None:
+        """Wipe the screen and the scrollback above it, then draw again."""
+        self.runner.clear_screen()
 
     def set_mouse_reporting(self, enabled: bool) -> None:
         setter = getattr(self.runner.terminal, "set_mouse", None)
@@ -456,13 +539,39 @@ class HXSession:
         self.view.transcript.append(TodoBlock(todos))
         self.runner.request_render()
 
-    def clear_queue(self) -> None:
-        self._queued.clear()
+    def clear_queue(self) -> int:
+        """Drop everything queued, returning how much was dropped.
 
-    def steer_queued(self) -> None:
-        for text in self._queued:
-            self.loop.steer(text)
+        The count is what ``/queue clear`` reports back, so it is returned
+        rather than left for the caller to have measured beforehand.
+        """
+        count = len(self._queued)
         self._queued.clear()
+        self.status.update(queued=0)
+        return count
+
+    def steer_queued(self, index: int = 0) -> None:
+        """Promote one queued message into the running turn."""
+        if not 0 <= index < len(self._queued):
+            return
+        self.loop.steer(self._queued.pop(index))
+        self.status.update(queued=len(self._queued))
+
+    def _drain_queue(self) -> None:
+        """Send the next message that was typed while the last turn ran.
+
+        One at a time, in order: each turn drains the head on its way out, so
+        a queue of three is three turns rather than one turn with three
+        prompts concatenated into it. The text is already in the transcript -
+        it was appended when the user pressed enter - so this starts the turn
+        and nothing else.
+        """
+        if not self._queued:
+            return
+        text = self._queued.pop(0)
+        self.status.update(queued=len(self._queued))
+        self._turn = asyncio.create_task(self._run_turn(text))
+        self.runner.request_immediate_render()
 
     def _clear_or_exit(self) -> None:
         """Clear the draft; on an empty prompt, interrupt; then exit.
@@ -478,9 +587,7 @@ class HXSession:
             self.runner.request_immediate_render()
             return
         if self.is_busy:
-            self.loop.cancel()
-            if self._turn is not None:
-                self._turn.cancel()
+            self._interrupt()
             return
         if self._clear_armed:
             self.runner.stop()
@@ -489,6 +596,47 @@ class HXSession:
         from hx.keys import KEYMAP
 
         self._notice(f"Press {KEYMAP.text('app.clear')} again to exit.")
+
+    def _interrupt(self) -> None:
+        """Stop the running turn, both halves.
+
+        The loop stops asking for more, and the task running the turn is
+        cancelled so an in-flight tool does not carry on after the user said
+        stop. A slash command or shell line running beside it goes too: the
+        key means stop what is happening, not stop one of the things.
+        """
+        self.loop.cancel()
+        for task in (self._turn, self._side):
+            if task is not None and not task.done():
+                task.cancel()
+
+    def _page(self) -> int:
+        """Rows a page key moves. Half a screen keeps a line of context."""
+        return max(1, self._terminal_rows() // 2)
+
+    def _jump(self, *, to_start: bool) -> None:
+        """Go to the top or the bottom of the conversation.
+
+        In fullscreen that is the viewport, which this renderer owns. On the
+        normal screen the terminal owns the scrollback and fighting it would be
+        a worse scrollbar than the one the user already has - so the reading
+        cursor moves instead, to the first or last thing that was said.
+        """
+        if self.runner.fullscreen:
+            if to_start:
+                self.runner.scroll_to_top()
+            else:
+                self.runner.scroll_to_bottom()
+            return
+        blocks = self.view.transcript.navigable()
+        if not blocks:
+            return
+        self.view.transcript.cursor = blocks[0] if to_start else blocks[-1]
+        self.runner.request_immediate_render()
+
+    def _suspend(self) -> None:
+        """``ctrl+z``. Raw mode means the terminal will not do this for us."""
+        self.runner.suspend()
 
     def _terminal_rows(self) -> int:
         """How tall the terminal is, so the draft never eats the screen."""
@@ -539,6 +687,7 @@ class HXSession:
         """
         finished = asyncio.Event()
         self._overlay_finished = finished
+        self._size_overlay(component)
         self.view.show(component)
         self.runner.request_immediate_render()
         try:
@@ -567,7 +716,8 @@ class HXSession:
             cwd=Path(self.settings.cwd),
         )
         self.view.transcript.append(prompt)
-        self._pending = prompt
+        self._pending.append(prompt)
+        self._keyboard_owner()
         # The turn is blocked on a person, so the indicator must stop claiming
         # the tool is running.
         self.view.dock.working.stop()
@@ -581,9 +731,29 @@ class HXSession:
             prompt.abandon()
             raise
         finally:
-            self._pending = None
-            self.view.dock.working.start()
+            if prompt in self._pending:
+                self._pending.remove(prompt)
+            # Hands the keyboard to whoever is next, so the block below stops
+            # saying it is waiting the moment this one is answered.
+            self._keyboard_owner()
+            # Only the last one out hands the indicator back: with another
+            # approval still open the turn is still blocked on a person.
+            if not self._pending:
+                self.view.dock.working.start()
             self.runner.request_immediate_render()
+
+    def _keyboard_owner(self) -> PermissionPrompt | None:
+        """The oldest approval still waiting on an answer.
+
+        Answered blocks are dropped on the way past rather than left to
+        accumulate: a prompt resolved by an interrupt never runs its own
+        ``finally`` until the task it blocks is rescheduled.
+        """
+        while self._pending and self._pending[0].answered:
+            self._pending.pop(0)
+        for position, prompt in enumerate(self._pending):
+            prompt.set_waiting(position > 0)
+        return self._pending[0] if self._pending else None
 
     def _on_key(self, key: Any) -> None:
         from hx.keys import KEYMAP
@@ -594,10 +764,15 @@ class HXSession:
             # exit is no longer what a second ctrl+c should mean.
             self._clear_armed = False
 
-        # An open approval owns the keyboard: it is the one thing on screen
-        # waiting on the user, and "y" must not be typed into the prompt.
-        pending = self._pending
-        if pending is not None and not pending.answered and pending.handle_input(name, key.data):
+        # An open approval owns the keyboard: it is the thing on screen waiting
+        # on the user, and "y" must not be typed into the prompt. With several
+        # open, the oldest answers first and the rest keep their turn.
+        pending = self._keyboard_owner()
+        if pending is not None and pending.handle_input(name, key.data):
+            # Answering it promotes the next one now, rather than on the next
+            # keystroke: the block below has to stop saying it is waiting in
+            # the same frame the one above it collapses.
+            self._keyboard_owner()
             self.runner.request_immediate_render()
             return
 
@@ -615,12 +790,7 @@ class HXSession:
             self.runner.stop()
             return
         if name == "escape" and self.is_busy:
-            # Both halves, as the old app does: the loop stops asking for more,
-            # and the task running the turn is cancelled so an in-flight tool
-            # does not carry on after the user said stop.
-            self.loop.cancel()
-            if self._turn is not None:
-                self._turn.cancel()
+            self._interrupt()
             return
         if name == "ctrl+c":
             self._clear_or_exit()
@@ -645,6 +815,24 @@ class HXSession:
             else:
                 self.view.header.toggle()
             return
+        if name in KEYMAP.keys_for("app.transcript.top"):
+            self._jump(to_start=True)
+            return
+        if name in KEYMAP.keys_for("app.transcript.bottom"):
+            self._jump(to_start=False)
+            return
+        # Only in fullscreen, where this renderer owns the viewport. On the
+        # normal screen the terminal's own page keys are already the right
+        # answer, and swallowing them would replace something that works.
+        if self.runner.fullscreen and name in KEYMAP.keys_for("app.transcript.pageUp"):
+            self.runner.scroll(-self._page())
+            return
+        if self.runner.fullscreen and name in KEYMAP.keys_for("app.transcript.pageDown"):
+            self.runner.scroll(self._page())
+            return
+        if name in KEYMAP.keys_for("app.suspend"):
+            self._suspend()
+            return
         if name == "ctrl+t":
             self.show_todos()
             return
@@ -658,13 +846,18 @@ class HXSession:
 
     def _submit(self, text: str) -> None:
         if text.startswith("!"):
-            self._turn = asyncio.create_task(self.run_shell_passthrough(text[1:].strip()))
+            self._side = asyncio.create_task(self.run_shell_passthrough(text[1:].strip()))
             return
         self.view.transcript.append(UserMessage(text))
         if text.startswith("/"):
-            self._turn = asyncio.create_task(self._run_command(text))
+            self._side = asyncio.create_task(self._run_command(text))
             return
         if self.is_busy:
+            if self._enter_steers:
+                # The setting the placeholder has been promising: enter puts
+                # the message into the running turn instead of behind it.
+                self.loop.steer(text)
+                return
             # Held rather than refused: the user typed it while a turn was
             # running, and dropping it loses the message.
             self._queued.append(text)
@@ -716,7 +909,7 @@ class HXSession:
         self.runner.request_immediate_render()
 
     def _append_output(self, block: ToolBlock, chunk: str) -> None:
-        block.update(output=block.call.output + chunk)
+        block.append_output(chunk)
         self.runner.request_render()
 
     async def _permit_shell(self, command: str) -> bool:
@@ -784,10 +977,18 @@ class HXSession:
         With nothing in flight there is no tail to drain a queue, so a steer
         with no turn running is just a submission - otherwise the message sits
         there being described as waiting on a turn that does not exist.
+
+        With nothing typed it promotes the head of the queue, which is the only
+        reading of "steer" that means anything on an empty prompt: steering the
+        empty string would put a blank message into the turn and print a blank
+        one in the transcript.
         """
         if not self.is_busy:
             if text:
                 self._submit(text)
+            return
+        if not text:
+            self.steer_queued()
             return
         self.view.transcript.append(UserMessage(text))
         self.loop.steer(text)
@@ -796,6 +997,16 @@ class HXSession:
         try:
             await self.loop.run(text)
         except asyncio.CancelledError:
+            # An interrupt stops the agent without draining the queue into a
+            # new turn - the user said stop, and starting another turn is the
+            # opposite of that. The messages are kept rather than dropped, so
+            # what is held is named: a queue nobody is told about is a queue of
+            # messages that look sent.
+            if self._queued:
+                self._notice(
+                    f"{len(self._queued)} message(s) still queued · /queue to see them",
+                    "warning",
+                )
             raise
         except Exception as error:
             self._notice(str(error), "error")
@@ -803,6 +1014,10 @@ class HXSession:
             self._turn_started = 0.0
             self.view.dock.working.stop()
             self.runner.request_immediate_render()
+
+        # Only on a turn that ended on its own: an interrupt re-raises above
+        # and never reaches here.
+        self._drain_queue()
 
     # -- events ------------------------------------------------------------
 
@@ -903,7 +1118,7 @@ class HXSession:
 
     def _refresh_status(self) -> None:
         status = self.view.dock.status
-        status.set_location(_tilde(Path(self.settings.cwd)), None)
+        status.set_location(_tilde(Path(self.settings.cwd)), self._branch.poll())
         status.set_mode(
             str(self.settings.permissions.mode),
             self.extra.get("sandbox_active", True),

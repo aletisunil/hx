@@ -18,10 +18,11 @@ from typing import Any
 from hx.term.component import Widget
 from hx.term.markdown import render_markdown
 from hx.term.primitives import Box, HangingText, Lines, Text
+from hx.term.sanitize import plain_text
 from hx.tui.glyphs import NOTICE, SPINNER, TOOL_DONE, TOOL_FAILED
 from hx.tui.limits import PREVIEW_LINES
 from hx.tui.paint import ThemePainter, fg, tint
-from hx.tui.renderers import ToolCall, renderer_for
+from hx.tui.renderers import ToolCall, renderer_for, sanitized_call, sanitized_fields
 
 _PAINTER = ThemePainter()
 
@@ -30,14 +31,15 @@ class UserMessage(Widget):
     """What the user said, tinted the width of the terminal.
 
     Markdown is rendered rather than shown raw, because a user pasting a code
-    block or a list meant it as one.
+    block or a list meant it as one. Sanitized for the same reason: a paste is
+    whatever was on the clipboard, escape sequences and all.
     """
 
     __slots__ = ("_text",)
 
     def __init__(self, text: str) -> None:
         super().__init__()
-        self._text = text
+        self._text = plain_text(text)
 
     @property
     def text(self) -> str:
@@ -62,13 +64,16 @@ class AssistantMessage(Widget):
 
     def __init__(self, text: str = "") -> None:
         super().__init__()
-        self._text = text
+        self._text = plain_text(text)
 
     def append(self, chunk: str) -> None:
-        self._text += chunk
+        # Per chunk rather than over the whole buffer, so a long reply is
+        # sanitized once end to end instead of once per delta.
+        self._text += plain_text(chunk)
         self.invalidate()
 
     def set_text(self, text: str) -> None:
+        text = plain_text(text)
         if text != self._text:
             self._text = text
             self.invalidate()
@@ -90,11 +95,11 @@ class ThinkingMessage(Widget):
 
     def __init__(self, text: str = "", collapsed: bool = True) -> None:
         super().__init__()
-        self._text = text
+        self._text = plain_text(text)
         self._collapsed = collapsed
 
     def append(self, chunk: str) -> None:
-        self._text += chunk
+        self._text += plain_text(chunk)
         self.invalidate()
 
     def set_collapsed(self, collapsed: bool) -> None:
@@ -123,7 +128,7 @@ class ToolBlock(Widget):
 
     def __init__(self, call: ToolCall) -> None:
         super().__init__()
-        self._call = call
+        self._call = sanitized_call(call)
         self._frame = 0
 
     @property
@@ -131,9 +136,27 @@ class ToolBlock(Widget):
         return self._call
 
     def update(self, **changes: Any) -> None:
+        """Replace fields on the call. Whole values only.
+
+        Only what is being replaced is sanitized. The fields already on the
+        call went through this on the way in, and re-scanning them would mean a
+        ``update(status=...)`` walking every byte of a long command's stdout
+        for the sake of a field that is not a string.
+
+        Streaming output goes through :meth:`append_output` instead, for the
+        same reason one step further: passing the growing buffer here would
+        rescan it per chunk, which is quadratic in the length of the output.
+        """
         from dataclasses import replace
 
-        self._call = replace(self._call, **changes)
+        self._call = replace(self._call, **sanitized_fields(changes))
+        self.invalidate()
+
+    def append_output(self, chunk: str) -> None:
+        """Add one streamed chunk, sanitized on its own."""
+        from dataclasses import replace
+
+        self._call = replace(self._call, output=self._call.output + plain_text(chunk))
         self.invalidate()
 
     def tick(self) -> None:
@@ -181,7 +204,8 @@ class Notice(Widget):
 
     def __init__(self, text: str, level: str = "info") -> None:
         super().__init__()
-        self._text = text
+        # An error message is very often a tool's stderr wearing a sentence.
+        self._text = plain_text(text)
         self._level = level
 
     @property

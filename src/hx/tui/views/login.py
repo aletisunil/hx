@@ -20,10 +20,10 @@ from hx.term.component import Widget
 from hx.term.primitives import Lines, Rule, Spacer, Text
 from hx.tui.glyphs import CURRENT, CURSOR, GUTTER
 from hx.tui.paint import fg, link, rule
-from hx.tui.views.dialog import Hint, hints_line
+from hx.tui.views.dialog import Framed, Hint, hints_line
 
 
-class ProviderDialog(Widget):
+class ProviderDialog(Widget, Framed):
     """Which account to sign in to."""
 
     def __init__(self, providers: list[tuple[str, str, bool]]) -> None:
@@ -54,8 +54,7 @@ class ProviderDialog(Widget):
                 1,
                 0,
             ),
-            Spacer(1),
-            Rule(rule("border")),
+            *self.closing(),
         ]
         return [line for part in parts for line in part.render(width)]
 
@@ -78,7 +77,7 @@ class ProviderDialog(Widget):
         return False
 
 
-class LoginDialog(Widget):
+class LoginDialog(Widget, Framed):
     """A sign-in flow in progress.
 
     Implements the flow's interaction protocol. Every method records state and
@@ -156,8 +155,7 @@ class LoginDialog(Widget):
             Lines(body),
             Spacer(1),
             Text(hints_line(hints), 1, 0),
-            Spacer(1),
-            Rule(rule("border")),
+            *self.closing(),
         ]
         return [line for part in parts for line in part.render(width)]
 
@@ -186,7 +184,7 @@ class LoginDialog(Widget):
         return False
 
 
-class ConfigureDialog(Widget):
+class ConfigureDialog(Widget, Framed):
     """Set the API key for a provider."""
 
     def __init__(self, title: str, summary: list[tuple[str, str]], warning: str = "") -> None:
@@ -217,8 +215,7 @@ class ConfigureDialog(Widget):
             Lines(body),
             Spacer(1),
             Text(hints_line([Hint("enter", "save"), Hint("esc", "cancel")]), 1, 0),
-            Spacer(1),
-            Rule(rule("border")),
+            *self.closing(),
         ]
         return [line for part in parts for line in part.render(width)]
 

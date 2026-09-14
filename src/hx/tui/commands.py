@@ -202,7 +202,17 @@ def _persist_model_choice(ctx: CommandContext, model_id: str) -> None:
 
 
 def _persist_model_setting(ctx: CommandContext, key: str, value: Any, label: str) -> bool:
-    """Write one ``models.<key>`` to the user settings file.
+    """Write one ``models.<key>`` to the user settings file."""
+    return _persist_setting(ctx, "models", key, value, label)
+
+
+def _persist_tui_setting(ctx: CommandContext, key: str, value: Any) -> bool:
+    """Write one ``tui.<key>``, so the choice survives the session."""
+    return _persist_setting(ctx, "tui", key, value, f"tui.{key}")
+
+
+def _persist_setting(ctx: CommandContext, group: str, key: str, value: Any, label: str) -> bool:
+    """Write one ``<group>.<key>`` to the user settings file.
 
     ``label`` names the setting the way the user asked for it - "the model
     choice", "the reasoning effort" - because a failure notice naming
@@ -217,14 +227,14 @@ def _persist_model_setting(ctx: CommandContext, key: str, value: Any, label: str
     path = user_settings_file()
     try:
         data = read_settings_file(path)
-        models = data.get("models")
-        if not isinstance(models, dict):
-            models = {}
-            data["models"] = models
+        section = data.get(group)
+        if not isinstance(section, dict):
+            section = {}
+            data[group] = section
         if value is None:
-            models.pop(key, None)
+            section.pop(key, None)
         else:
-            models[key] = value
+            section[key] = value
         write_settings_file(path, data)
     except (ConfigError, OSError) as exc:
         ctx.app.notice(f"Could not save {label} to {path}: {exc}", "warning")
@@ -345,11 +355,54 @@ async def cmd_models(ctx: CommandContext, args: str) -> None:
 
 
 async def cmd_clear(ctx: CommandContext, args: str) -> None:
-    """``/clear`` - start a fresh session in the same directory."""
+    """``/clear`` - start a fresh session in the same directory.
+
+    The screen is wiped too, scrollback included. Emptying the transcript and
+    leaving the last session above it on screen is not what anybody means by
+    clear - they scroll up, the old conversation is still there, and the
+    command looks broken. Terminals that do not implement scrollback erasure -
+    Apple's Terminal.app is the one people hit - still clear the screen.
+    """
     if ctx.app.is_busy:
         ctx.app.notice("Interrupt the running turn before clearing.", "warning")
         return
     ctx.app.start_new_session()
+    ctx.app.clear_screen()
+
+
+async def cmd_fullscreen(ctx: CommandContext, args: str) -> None:
+    """``/fullscreen [on|off]`` - take the whole window, or give it back.
+
+    On the alternate screen the prompt is pinned to the bottom row and the
+    transcript scrolls above it - the shape the UI had before it became
+    scrollback-native. The trade is stated rather than hidden: what is on the
+    alternate screen is not the terminal's scrollback, so the terminal cannot
+    scroll or select it, and it is gone when HX exits.
+    """
+    from hx.keys import KEYMAP
+
+    argument = args.strip().lower()
+    if argument in {"", "toggle"}:
+        enabled = not ctx.app.fullscreen
+    elif argument in {"on", "true", "yes"}:
+        enabled = True
+    elif argument in {"off", "false", "no"}:
+        enabled = False
+    else:
+        ctx.app.notice("Usage: /fullscreen [on|off]", "warning")
+        return
+
+    ctx.app.set_fullscreen(enabled)
+    if enabled:
+        ctx.app.notice(
+            "Fullscreen on. The transcript scrolls with pgup/pgdn and "
+            f"{KEYMAP.text('app.transcript.top')}; your terminal's own scrollback, "
+            "selection and copy are not available until it is off again.",
+            "success",
+        )
+    else:
+        ctx.app.notice("Fullscreen off. The transcript is your terminal's scrollback again.")
+    _persist_tui_setting(ctx, "fullscreen", enabled)
 
 
 async def cmd_compact(ctx: CommandContext, args: str) -> None:
@@ -953,6 +1006,13 @@ def build_default_commands() -> CommandRegistry:
         Command("mode", "Set the permission mode", cmd_mode, "[mode]", takes_args=True),
         Command("init", "Generate an AGENTS.md for this project", cmd_init),
         Command("theme", "Switch the colour palette", cmd_theme, "[name]", takes_args=True),
+        Command(
+            "fullscreen",
+            "Take the whole window, or give it back",
+            cmd_fullscreen,
+            "[on|off]",
+            takes_args=True,
+        ),
         Command(
             "mouse",
             "Mouse reporting, and with it terminal text selection",

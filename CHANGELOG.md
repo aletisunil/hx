@@ -26,17 +26,36 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.0] - 2026-09-14
+
 ### Changed
 
 - The interface is drawn into your terminal's own scrollback instead of taking
   over the screen. Finished output belongs to the terminal: scroll it, select
   it with the mouse, copy it, pipe it, and it is still there after HX exits.
-  This replaces the previous full-screen interface entirely.
+  `/fullscreen` takes the whole window back for anyone who preferred it that
+  way - the prompt pinned to the bottom row, the transcript scrolling above it
+  with `pgup`, `pgdn`, `ctrl+home` and `ctrl+end` - and writes the choice to
+  `tui.fullscreen` for the next session. On either screen the prompt and the
+  status bar sit on the bottom row from the first frame - a conversation that
+  does not fill the window is padded above the dock, not below it, and rows a
+  closing picker gives back open above it too. The slash-command and `@`-path
+  completion lists draw above the prompt for the same reason: under it, every
+  keystroke that changed the number of matches moved the prompt and the status
+  bar with it. Exiting erases the whole interface - banner, conversation and
+  dock - and puts the shell prompt back on the row HX started on, rather than
+  leaving a dead prompt box and a status bar on screen above it, from either
+  screen: quitting out of `/fullscreen` also takes away the frame that was
+  parked underneath it.
 - Approving a tool call is now a framed prompt with one option per line, each
   saying what it does - `always allow` states that it writes a rule to
   `.hx/settings.local.json`. `y`/`s`/`a`/`n` still answer in one keystroke,
   `esc` denies, and the arrow keys work for anyone who wants to read first.
-  The command shown is the one that will run, `$` and all.
+  The command shown is the one that will run, `$` and all. When two subagents
+  stop at an approval at once, the older one holds the keyboard and the other
+  says it is waiting rather than offering keys that would answer the first.
 - Your theme reaches the whole interface. Links, list bullets, block quotes,
   horizontal rules and inline code in the model's replies now follow the
   palette instead of a hard-coded set of colours, and headings are visibly
@@ -48,6 +67,27 @@ the project follows [semantic versioning](https://semver.org/).
   column to put a sidebar in.
 - Mouse selection is the terminal's, across the whole session including what
   has scrolled off, rather than HX's own within the visible screen.
+- Text HX did not write - a file a tool read, a command's output, the model's
+  reply, a paste into the prompt - is drawn as plain text. Escape sequences in
+  it are removed rather than sent on to your terminal, so a file cannot set
+  your clipboard, rename your window, hide a link behind different words, or
+  erase what is already on screen by being read.
+- `/clear` now clears the screen and the scrollback above it, instead of
+  emptying the transcript and leaving the last session on screen. Terminals
+  that do not implement scrollback erasure - macOS Terminal.app - clear the
+  screen only.
+- `/model`, the command palette and every other picker are sized to the
+  terminal rather than to a fixed eight rows, so a tall window shows a long
+  list instead of leaving two thirds of itself empty.
+- `ctrl+z` suspends HX to the background and resuming redraws it; `ctrl+home`
+  and `ctrl+end` reach the ends of the conversation; `ctrl+_` undoes in the
+  prompt. All three were listed in `/help` and bound to nothing.
+- `ctrl+p` and `ctrl+l` are named in the hints line under the prompt, which is
+  where the keys a session offers are supposed to be discoverable.
+- A block drawn against the prompt no longer closes itself with a second rule,
+  which left a rule, a blank line and another rule under every picker and under
+  every approval. Whichever block ends up against the dock lets the dock's own
+  rule close it, and takes its own back as soon as something lands underneath.
 - The installer now opens with a terminal boot animation that draws and lights
   the HX mark, with a clean static version for CI and redirected output.
 
@@ -350,7 +390,9 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/aletisunil/hx/compare/v0.1.9...v0.2.0
+[0.1.9]: https://github.com/aletisunil/hx/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/aletisunil/hx/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/aletisunil/hx/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/aletisunil/hx/compare/v0.1.5...v0.1.6

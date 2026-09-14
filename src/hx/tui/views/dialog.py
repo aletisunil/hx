@@ -32,7 +32,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from hx.term.component import Widget
+from hx.term.component import Component, Widget
 from hx.term.primitives import Lines, Rule, Spacer, Text
 from hx.tui.glyphs import CURRENT, CURSOR, GUTTER
 from hx.tui.paint import fg, rule
@@ -68,8 +68,34 @@ def hints_line(hints: Sequence[Hint]) -> str:
     return "  ".join(fg("dim", h.key) + fg("muted", f" {h.description}") for h in hints)
 
 
+class Framed:
+    """The rule above, the rule below, and the one case that drops the lower one.
+
+    Mixed into every dialog, because the seam they share is where it went
+    wrong: the dock draws a blank line and then the prompt's own rule directly
+    under whatever is on the overlay, so a dialog that closed itself with a
+    rule produced rule, blank, rule - three lines of frame for one edge, which
+    reads as a rendering fault rather than as a frame.
+    """
+
+    docked: bool = False
+    """Drawn directly above the dock, which supplies the closing rule."""
+
+    def set_docked(self, docked: bool) -> None:
+        if docked == self.docked:
+            return
+        self.docked = docked
+        self.invalidate()  # type: ignore[attr-defined]  # always mixed into a Widget
+
+    def closing(self, border: str = "border") -> list[Component]:
+        """The bottom of the frame: nothing at all when the dock is under it."""
+        if self.docked:
+            return []
+        return [Spacer(1), Rule(rule(border))]
+
+
 @dataclass
-class Dialog(Widget):
+class Dialog(Widget, Framed):
     """A framed block of title, body, options and hints."""
 
     title: str = ""
@@ -103,9 +129,8 @@ class Dialog(Widget):
 
         if self.hints:
             parts.append(Text(hints_line(self.hints), 1, 0))
-            parts.append(Spacer(1))
 
-        parts.append(Rule(rule(self.border)))
+        parts.extend(self.closing(self.border))
         return [line for part in parts for line in part.render(width)]  # type: ignore[attr-defined]
 
     def _rows(self) -> list[Text]:

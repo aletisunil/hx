@@ -51,6 +51,7 @@ class TuiRunner:
         terminal: Terminal | None = None,
         *,
         on_key: KeyHandler | None = None,
+        fullscreen: bool = False,
     ) -> None:
         self._terminal = terminal or ProcessTerminal()
         self._root = root
@@ -64,6 +65,10 @@ class TuiRunner:
         self._escape_task: asyncio.Task[None] | None = None
         self._last_render = 0.0
         self._stopped: asyncio.Event | None = None
+        self._start_fullscreen = fullscreen
+        """Applied once the terminal is in raw mode - a session configured for
+        the alternate screen has to enter it after the terminal is ours, not
+        while it still belongs to the shell."""
 
     @property
     def screen(self) -> MainScreen:
@@ -81,18 +86,74 @@ class TuiRunner:
         self._running = True
         self._terminal.start(self._on_input, self._on_resize)
         try:
+            if self._start_fullscreen:
+                self._screen.set_fullscreen(True)
             self.request_immediate_render()
             await self._stopped.wait()
         finally:
             self._running = False
             await self._cancel_tasks()
             with contextlib.suppress(Exception):
-                self._screen.park_below()
+                self._screen.close()
             self._terminal.stop()
 
     def stop(self) -> None:
         if self._stopped is not None:
             self._stopped.set()
+
+    # -- the two screens ---------------------------------------------------
+
+    @property
+    def fullscreen(self) -> bool:
+        return self._screen.fullscreen
+
+    def set_fullscreen(self, enabled: bool) -> None:
+        """Draw into the alternate screen, or back into the scrollback."""
+        if enabled == self._screen.fullscreen:
+            return
+        self._screen.set_fullscreen(enabled)
+        if not enabled:
+            # Coming back, the normal screen holds whatever it held before the
+            # alternate screen covered it - including this session's own
+            # transcript up to the moment it left. Redrawing the document under
+            # that would print it twice, so the screen is cleared first.
+            #
+            # The screen only: the scrollback above it is the user's, and some
+            # of it predates hx. Erasing that to tidy up after a mode switch
+            # would throw away what they had in the terminal before they ran
+            # us, which no command they typed asked for.
+            self._terminal.write("\x1b[2J\x1b[H")
+        self.request_immediate_render()
+
+    def scroll(self, rows: int) -> None:
+        """Scroll the fullscreen viewport. A no-op on the normal screen."""
+        if self._screen.scroll_by(rows):
+            self.request_immediate_render()
+
+    def scroll_to_top(self) -> None:
+        if self._screen.scroll_to_top():
+            self.request_immediate_render()
+
+    def scroll_to_bottom(self) -> None:
+        if self._screen.scroll_to_bottom():
+            self.request_immediate_render()
+
+    def clear_screen(self) -> None:
+        """Wipe the screen and the scrollback, then draw the document again."""
+        self._screen.clear()
+
+    def suspend(self) -> None:
+        """``ctrl+z``: give the terminal back until the shell resumes us.
+
+        The screen belongs to the shell while we are stopped, so what is on it
+        afterwards is unknown and the document is repainted from scratch.
+        """
+        suspend = getattr(self._terminal, "suspend", None)
+        if suspend is None:  # pragma: no cover - a terminal that cannot stop
+            return
+        suspend()
+        self._screen.invalidate()
+        self.request_immediate_render()
 
     async def _cancel_tasks(self) -> None:
         for task in (self._render_task, self._escape_task):

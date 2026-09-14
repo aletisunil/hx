@@ -141,6 +141,14 @@ class TuiSettings:
     """Queueing is the default because it cannot surprise anyone: a steer cuts
     off the model mid-sentence, which is worth asking for deliberately."""
 
+    fullscreen: bool = False
+    """Draw into the alternate screen, with the prompt pinned to the bottom.
+
+    Off by default: in the normal screen the transcript is the terminal's own
+    scrollback, which it can scroll, select, copy and keep after HX exits.
+    ``/fullscreen`` turns it on for a session and writes it here for the next
+    one, for anyone who would rather have the window back."""
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -397,6 +405,7 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
         enter_while_busy = EnterWhileBusy(busy_raw)
     except ValueError as exc:
         raise ConfigError(f"unknown tui.enterWhileBusy: {busy_raw!r}") from exc
+    fullscreen = bool(tui.get("fullscreen", False))
 
     return Settings(
         cwd=cwd,
@@ -447,7 +456,7 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
             system=prompt.get("system"),
             append=tuple(_as_list(prompt.get("append", ()))),
         ),
-        tui=TuiSettings(enter_while_busy=enter_while_busy),
+        tui=TuiSettings(enter_while_busy=enter_while_busy, fullscreen=fullscreen),
         theme=data.get("theme", "dark"),
         quiet_startup=bool(data.get("quietStartup", data.get("quiet_startup", False))),
         telemetry=bool(data.get("telemetry", False)),

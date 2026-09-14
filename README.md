@@ -1,6 +1,7 @@
 # HX
 
-A terminal coding agent. Python core, Textual TUI, OpenRouter for models.
+A terminal coding agent. Python core, its own terminal renderer, OpenRouter for
+models.
 
 HX runs in your project directory, reads and edits your code, runs commands in
 a sandboxed shell, and shows you what every turn costs.
@@ -291,13 +292,13 @@ be rebound (see [Keybindings](#keybindings)).
 | `ctrl+p` | command palette |
 | `ctrl+l` | model picker |
 | `ctrl+o` | expand tool output (also `ctrl+r`) |
-| `ctrl+t` | toggle the todo sidebar |
+| `ctrl+t` | show the current plan |
 | `ctrl+x` | copy the selected message to the clipboard |
 | `ctrl+up` | previous message |
 | `ctrl+down` | next message |
-| `pgup` | scroll the transcript up |
-| `pgdn` | scroll the transcript down |
-| `ctrl+home` | jump to the start of the transcript |
+| `pgup` | scroll the transcript up (fullscreen; otherwise your terminal scrolls) |
+| `pgdn` | scroll the transcript down (fullscreen; otherwise your terminal scrolls) |
+| `ctrl+home` | jump to the start: the viewport in fullscreen, the first message otherwise |
 | `ctrl+end` | jump back to the newest output |
 | `@path` | complete a file path |
 | `!command` | run a shell command directly, no model turn |
@@ -309,7 +310,8 @@ The prompt is a readline-style editor: `ctrl+a`/`ctrl+e` for line start and end,
 `ctrl+b`/`ctrl+f` by character, `alt+b`/`alt+f` by word, `ctrl+w` and `alt+d` to
 kill a word, `ctrl+u` and `ctrl+k` to kill to the start or end of a line, then
 `ctrl+y` to yank it back and `alt+y` to walk further down the kill ring.
-`ctrl+z` undoes, `ctrl+shift+z` redoes.
+`ctrl+_` undoes, `ctrl+shift+z` redoes - `ctrl+z` belongs to the shell, and
+suspends HX.
 
 Typing `/` or `@` opens a completion list above the prompt; `tab` cycles it,
 `enter` accepts, `esc` dismisses.
@@ -364,17 +366,54 @@ than being silently resolved.
 | `/rewind` | go back to an earlier prompt, restoring the files HX changed |
 | `/title [text]` | show or set this session's name |
 | `/prompt` | the system prompt this session is running with |
-| `/todos` | toggle the sidebar |
+| `/todos` | show the current plan |
 | `/skills` | installed skills |
 | `/agents` | subagent types |
 | `/mcp` | server status |
 | `/theme [name]` | `dark`, `light`, `ansi`, or any theme in `~/.hx/themes` |
 | `/queue [steer <n>\|clear]` | messages waiting for the turn to end, and what to do with them |
 | `/copy` | copy the last reply to the clipboard |
+| `/fullscreen [on\|off]` | take the whole window, with the prompt pinned to the bottom |
 | `/mouse [on\|off]` | mouse reporting, and with it your terminal's own text selection |
 | `/init` | generate an `AGENTS.md` for the project |
 | `/help` | list commands and keys |
 | `/quit` | exit (also `/exit`, `/q`) |
+
+### The two screens
+
+By default HX draws into your terminal's own scrollback. Finished output belongs
+to the terminal while the session runs: it scrolls it, selects it, copies it and
+pipes it. Nothing is repainted above the fold, so a long session costs the same
+to draw as a short one.
+
+The prompt and the status bar still open on the bottom row of the window: a
+conversation too short to fill the screen is padded above them rather than
+below, so the dock stays where you last saw it instead of creeping down the
+screen a block at a time. The padding is gone by the time the terminal starts
+scrolling.
+
+Leaving takes the whole interface off the screen: the banner, the conversation
+and the dock are erased and your shell prompt comes back on the row HX started
+on, the terminal as it was found. The erase stops at the top of the window -
+lines that had already scrolled above it stay in your scrollback, because the
+only sequence that reaches them takes everything the terminal remembers,
+including what was there before HX ran. `/clear` is the command that asks for
+that.
+
+`/fullscreen` switches to the alternate screen instead - the whole window, the
+prompt pinned to the bottom row, the transcript scrolling above it with `pgup`,
+`pgdn`, `ctrl+home` and `ctrl+end`. The trade is the thing the default was
+chosen for: the alternate screen is not scrollback, so your terminal cannot
+scroll or select it, and it is gone when HX exits. `/fullscreen off` gives it
+back, and either way the choice is written to `tui.fullscreen` for the next
+session. Quitting from fullscreen leaves the same clean terminal as quitting
+from the default screen: the alternate screen goes, and so does the frame HX
+had drawn underneath it before the switch.
+
+`/clear` wipes the screen and the scrollback above it. Terminals that do not
+implement scrollback erasure - macOS Terminal.app is the one people hit - clear
+the screen only, and the old conversation stays above it until you clear it the
+terminal's own way (`cmd+k`).
 
 ### Selecting and copying text
 
@@ -489,7 +528,8 @@ along with the `.hx/.gitignore` it added to hide it.
   },
 
   "tui": {
-    "enterWhileBusy": "queue"         // queue | steer - what enter does mid-turn
+    "enterWhileBusy": "queue",        // queue | steer - what enter does mid-turn
+    "fullscreen": false               // true takes the whole window (see /fullscreen)
   }
 }
 ```
@@ -761,7 +801,8 @@ src/hx/
   permissions/  rule engine, shell decomposition, Seatbelt/bubblewrap
   skills/ agents/ mcp/
   keys.py       keybinding registry: ids, defaults, descriptions, user overrides
-  tui/          Textual app, commands, per-tool renderers, widgets
+  term/         the renderer: raw mode, input decoding, the differ, the screen
+  tui/          views, commands, per-tool renderers, themes
     themes/     the shipped palettes, as JSON
 ```
 

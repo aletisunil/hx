@@ -61,6 +61,7 @@ WIDGET_ACTIONS = {
     "tui.editor.deleteWordForward",
     "tui.editor.yank",
     "tui.editor.yankPop",
+    "tui.editor.undo",
     "tui.editor.redo",
 }
 

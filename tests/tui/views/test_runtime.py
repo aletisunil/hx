@@ -93,6 +93,24 @@ async def test_a_session_opens_with_a_header_and_a_prompt(hx_home: Path, tmp_pat
         assert any("Ask HX…" in line for line in shown)
 
 
+async def test_the_status_bar_names_the_branch_and_follows_checkouts(
+    hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    head = git_dir / "HEAD"
+    head.write_text("ref: refs/heads/main\n")
+    monkeypatch.setattr("hx.tui.runtime.BRANCH_POLL_SECONDS", 0.01)
+
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        assert session.view.dock.status.branch == "main"
+
+        head.write_text("ref: refs/heads/feature/status\n")
+        await driver.settle(rounds=20)
+        assert session.view.dock.status.branch == "feature/status"
+
+
 async def test_typing_reaches_the_prompt(hx_home: Path, tmp_path: Path) -> None:
     async with Driver(build(tmp_path)) as driver:
         driver.type("a question")

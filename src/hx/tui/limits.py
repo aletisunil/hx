@@ -21,7 +21,20 @@ EXPANDED_MAX = 400
 """Ceiling on an expanded block, so ctrl+o cannot stall the renderer."""
 
 LIST_VISIBLE = 8
-"""Rows visible in any scrolling list: completions, pickers, todos."""
+"""Rows visible in a scrolling list that has no height to work with.
+
+The floor, and the value a completion popup keeps: it hangs under a prompt that
+is still being typed into, where taking the screen would be the wrong trade. A
+picker owns the screen while it is up, so it is sized against the terminal
+instead - see :meth:`hx.tui.views.pickers.Picker.visible_rows`.
+"""
+
+LIST_MINIMUM = 4
+"""Rows a picker keeps even on a very short terminal.
+
+Below this a list stops being a list - there is no room to see that the
+selection moved - so the dialog is allowed to be taller than the screen
+instead, which the terminal can at least scroll."""
 
 RECORD_WIDTH = 72
 """Cells a one-line summary is collapsed to before being ellipsized."""

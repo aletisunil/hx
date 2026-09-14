@@ -219,6 +219,7 @@ def test_every_key_the_app_binds_can_be_produced() -> None:
         "ctrl+shift+z": "\x1b[122;6u",
         "ctrl+home": "\x1b[1;5H",
         "ctrl+end": "\x1b[1;5F",
+        "ctrl+underscore": "\x1f",
         "alt+enter": "\x1b\r",
     }
     for name in sorted(bound):

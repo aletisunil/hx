@@ -32,6 +32,8 @@ async def main():
     term = ProcessTerminal()
     term.start(lambda data: None, lambda: None)
     term.set_mouse(True)
+    if {fullscreen!r}:
+        term.set_alt_screen(True)
     term.write({marker!r} + "\\r\\n")
     await asyncio.sleep(0.02)
     how = {how!r}
@@ -58,14 +60,20 @@ OFF_SEQUENCES = {
 }
 
 
-def _run_under_pty(how: str, signum: int = 0) -> str:
+def _run_under_pty(how: str, signum: int = 0, fullscreen: bool = False) -> str:
     """Run a child that dies the given way; return everything the pty saw.
 
     The pty is allocated here and handed to :mod:`subprocess` rather than using
     :func:`pty.fork`, which forks without exec'ing and is unsafe - and warns -
     in a process that has threads running, as the test suite does.
     """
-    source = CHILD.format(repo=str(REPO / "src"), marker=MARKER, how=how, signum=signum)
+    source = CHILD.format(
+        repo=str(REPO / "src"),
+        marker=MARKER,
+        how=how,
+        signum=signum,
+        fullscreen=fullscreen,
+    )
     controller, follower = os.openpty()
     try:
         process = subprocess.Popen(
@@ -137,11 +145,42 @@ def test_a_kill_cannot_be_caught_but_the_next_start_cleans_up_after_it() -> None
         assert sequence in startup, f"a new session does not turn {name} off first"
 
 
-def test_the_alternate_screen_is_never_entered() -> None:
+def test_the_alternate_screen_is_not_entered_by_default() -> None:
     """The transcript is the terminal's own scrollback. That is the point of
-    the renderer, and it is lost the moment anything switches screens."""
+    the renderer, and it is lost the moment anything switches screens - so
+    nothing but ``/fullscreen`` may switch them."""
     for how in ("clean", "exception"):
         assert "\x1b[?1049h" not in _run_under_pty(how)
+
+
+@pytest.mark.parametrize(
+    ("how", "signum"),
+    [("clean", 0), ("exit", 0), ("exception", 0), ("signal", 15)],
+    ids=["clean exit", "sys.exit", "unhandled exception", "SIGTERM"],
+)
+def test_fullscreen_is_left_on_every_exit_path(how: str, signum: int) -> None:
+    """A shell left on the alternate screen shows an empty rectangle with no
+    way back, which reads as hx having eaten the terminal."""
+    output = _run_under_pty(how, signum, fullscreen=True)
+    assert "\x1b[?1049h" in output, "the child never entered fullscreen"
+    assert "\x1b[?1049l" in _after_startup(output), f"left on the alternate screen after {how}"
+
+
+def test_a_session_killed_in_fullscreen_is_cleaned_up_by_the_next_start() -> None:
+    killed = _run_under_pty("signal", 9, fullscreen=True)
+    assert "\x1b[?1049l" not in _after_startup(killed), "a kill cannot restore anything"
+
+    startup, _, _ = _run_under_pty("clean").partition(MARKER)
+    assert "\x1b[?1047l" in startup, "a new session does not leave the alternate screen first"
+
+
+def test_startup_never_restores_a_cursor_it_did_not_save() -> None:
+    """``?1049l`` is DECRC, and a terminal asked to restore a cursor nothing
+    saved homes it - which would put the first frame on top of the user's shell
+    output, because the renderer draws relative to where the cursor is. Startup
+    has to leave the alternate screen without touching the cursor."""
+    startup, _, _ = _run_under_pty("clean").partition(MARKER)
+    assert "\x1b[?1049l" not in startup, "startup moves the cursor before drawing"
 
 
 @pytest.fixture

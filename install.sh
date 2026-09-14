@@ -28,43 +28,86 @@ should_animate() {
     [ -t 1 ] && [ -z "${HX_NO_ANIMATION:-}" ] && [ -z "${CI:-}" ]
 }
 
-render_logo() {
-    padding=$1
-    clear_prefix=
-    [ "${2:-}" = clear ] && clear_prefix='\033[2K\r'
+paint_logo_row() {
+    row=$1
+    text=$2
+    visible=$3
+    highlight=$4
+    clear_prefix=$5
 
-    printf '\033[0;36m'
-    printf '%b%s%s\n' "$clear_prefix" "$padding" ' _   _  __  __'
-    printf '%b%s%s\n' "$clear_prefix" "$padding" '| | | | \ \/ /'
-    printf '%b%s%s\n' "$clear_prefix" "$padding" '| |_| |  >  <'
-    printf '%b%s%s\n' "$clear_prefix" "$padding" "|  _  | / /\\ \\"
-    printf '%b%s%s\n' "$clear_prefix" "$padding" "|_| |_|/_/  \\_\\"
-    printf '\033[0m'
+    if [ "$visible" -ne 0 ] && [ "$row" -gt "$visible" ]; then
+        text=
+    fi
+
+    if [ "$highlight" -eq 0 ]; then
+        colour='\033[0;36m'
+    elif [ "$row" -eq "$highlight" ]; then
+        colour='\033[1;96m'
+    else
+        colour='\033[2;36m'
+    fi
+
+    printf '%b%b%s\033[0m\n' "$clear_prefix" "$colour" "$text"
+}
+
+render_logo() {
+    # visible=0 renders the whole logo. highlight=0 uses the settled colour.
+    visible=${1:-0}
+    highlight=${2:-0}
+    clear_prefix=
+    if [ "${3:-}" = clear ]; then
+        clear_prefix='\033[2K\r'
+    fi
+
+    paint_logo_row 1 '    __  __  _  __' "$visible" "$highlight" "$clear_prefix"
+    paint_logo_row 2 '   / / / / | |/ /' "$visible" "$highlight" "$clear_prefix"
+    paint_logo_row 3 '  / /_/ /  |   /' "$visible" "$highlight" "$clear_prefix"
+    paint_logo_row 4 ' / __  /  /   |' "$visible" "$highlight" "$clear_prefix"
+    paint_logo_row 5 '/_/ /_/  /_/|_|' "$visible" "$highlight" "$clear_prefix"
+}
+
+render_boot_prompt() {
+    typed=$1
+    clear_prefix='\033[2K\r'
+
+    printf '%b\n' "$clear_prefix"
+    printf '%b\n' "$clear_prefix"
+    printf '%b\033[2;36m  > \033[1;96m%s\033[0;36m_\033[0m\n' "$clear_prefix" "$typed"
+    printf '%b\n' "$clear_prefix"
+    printf '%b\n' "$clear_prefix"
+}
+
+rewind_logo() {
+    printf '\033[5A'
 }
 
 animate_logo() {
     if ! should_animate; then
-        render_logo ''
+        render_logo
         return
     fi
 
-    # Slide in, overshoot slightly, then settle into place.
-    render_logo '            ' clear
-    sleep 0.07
-    printf '\033[5A'
-    render_logo '        ' clear
-    sleep 0.07
-    printf '\033[5A'
-    render_logo '    ' clear
-    sleep 0.07
-    printf '\033[5A'
-    render_logo '' clear
-    sleep 0.07
-    printf '\033[5A'
-    render_logo '  ' clear
-    sleep 0.07
-    printf '\033[5A'
-    render_logo '' clear
+    # Type the command, draw the mark one scanline at a time, then bounce a
+    # highlight back through it. Every frame is five rows so redraws never jump.
+    for typed in '' h hx; do
+        render_boot_prompt "$typed"
+        sleep 0.055
+        rewind_logo
+    done
+
+    for row in 1 2 3 4 5; do
+        render_logo "$row" "$row" clear
+        sleep 0.045
+        rewind_logo
+    done
+
+    for row in 4 3 2 1; do
+        render_logo 0 "$row" clear
+        sleep 0.035
+        rewind_logo
+    done
+
+    render_logo 0 0 clear
 }
 
 stream_text() {

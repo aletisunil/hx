@@ -237,6 +237,12 @@ def active_background(text: str) -> str:
     open when the break happened. Foreground can be left to the caller, but a
     background that is not re-opened leaves a filled block with a torn edge
     down the right-hand side of every wrapped paragraph.
+
+    A sequence that runs out of parameters part-way - ``\\x1b[48;5m``, which is
+    what a log cut mid-escape and pasted into the prompt looks like - is
+    ignored rather than read past the end. Text arriving here is whatever the
+    user pasted or the model said, so malformed is a normal input, not a bug
+    in the caller.
     """
     current = ""
     for match in _SGR_PATTERN.finditer(text):
@@ -250,12 +256,16 @@ def active_background(text: str) -> str:
             elif 40 <= code <= 47 or 100 <= code <= 107:
                 current = f"\x1b[{code}m"
             elif code == 48 and index + 1 < len(codes):
-                if codes[index + 1] == 5:
+                if codes[index + 1] == 5 and index + 2 < len(codes):
                     current = f"\x1b[48;5;{codes[index + 2]}m"
                     index += 2
-                elif codes[index + 1] == 2:
+                elif codes[index + 1] == 2 and index + 4 < len(codes):
                     current = f"\x1b[48;2;{codes[index + 2]};{codes[index + 3]};{codes[index + 4]}m"
                     index += 4
+                else:
+                    # Truncated. Nothing legible to re-open, and consuming the
+                    # rest would be a guess at parameters that never arrived.
+                    break
             index += 1
     return current
 

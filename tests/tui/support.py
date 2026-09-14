@@ -116,10 +116,21 @@ class Driver:
         self.terminal.feed(text)
 
     def display(self) -> list[str]:
-        """What a terminal of this size would be showing."""
+        """The non-blank lines a terminal of this size would be showing."""
+        return [line for line in self.screen() if line.strip()]
+
+    def screen(self) -> list[str]:
+        """Every row of the terminal, blank ones included.
+
+        Where a line sits is the assertion for anything that pins something to
+        a row - the dock in fullscreen - so the blanks have to survive.
+        """
         screen = pyte.Screen(COLUMNS, ROWS)
         pyte.Stream(screen).feed(self.terminal.output)
-        return [line.rstrip() for line in screen.display if line.strip()]
+        return [line.rstrip() for line in screen.display]
+
+    def screen_text(self) -> str:
+        return "\n".join(self.screen())
 
     def transcript_text(self) -> str:
         """Everything in the document, styling stripped.

@@ -25,12 +25,20 @@ from pathlib import Path
 from hx.permissions.engine import GrantScope, PermissionAnswer, PermissionRequest
 from hx.term.component import Widget
 from hx.term.primitives import Text
+from hx.term.sanitize import plain_text
 from hx.tui.format import one_line
 from hx.tui.glyphs import NOTICE, TODO_DONE, TOOL_FAILED
 from hx.tui.limits import PREVIEW_LINES, RECORD_WIDTH
 from hx.tui.paint import fg
-from hx.tui.renderers import ToolCall, expand_note, looks_like_diff, render_diff, renderer_for
-from hx.tui.views.dialog import Dialog, Hint, Option
+from hx.tui.renderers import (
+    ToolCall,
+    expand_note,
+    looks_like_diff,
+    render_diff,
+    renderer_for,
+    sanitized_call,
+)
+from hx.tui.views.dialog import Dialog, Framed, Hint, Option
 
 SCOPE_LABELS: dict[GrantScope, str] = {
     GrantScope.ONCE: "allowed once",
@@ -58,7 +66,7 @@ permission prompt is for.
 """
 
 
-class PermissionPrompt(Widget):
+class PermissionPrompt(Widget, Framed):
     """One pending approval, rendered in the transcript."""
 
     def __init__(
@@ -82,12 +90,23 @@ class PermissionPrompt(Widget):
         self.abandoned = False
         """Set when the turn was interrupted before anyone answered."""
         self.selected = 0
+        self.waiting = False
+        """Another approval is ahead of this one in the queue.
+
+        Two concurrent subagents can each stop at an approval, and only one of
+        them can have the keyboard. A block that draws the same live dialog as
+        the one being answered is a block whose keys look like they work."""
 
     # -- state -------------------------------------------------------------
 
     @property
     def answered(self) -> bool:
         return self.answer is not None or self.abandoned
+
+    def set_waiting(self, waiting: bool) -> None:
+        if waiting != self.waiting:
+            self.waiting = waiting
+            self.invalidate()
 
     def resolve(self, answer: PermissionAnswer) -> None:
         """Record the outcome and collapse. Idempotent, so a late second key
@@ -124,23 +143,31 @@ class PermissionPrompt(Widget):
             # does not shift the text sideways.
             return Text(self._record(), 1, 0).render(width)
 
+        # Queued behind another approval: the same question, without the
+        # options, because pressing them here would answer the other one.
+        options = (
+            []
+            if self.waiting
+            else [Option(key=key, label=label, note=note) for key, _scope, label, note in CHOICES]
+        )
         dialog = Dialog(
             title=fg("text", "Permission needed", bold=True) + self._who(),
-            subtitle=fg("warning", self.request.tool_name, bold=True),
+            subtitle=fg("warning", plain_text(self.request.tool_name), bold=True),
             body=self._detail(),
-            options=[
-                Option(key=key, label=label, note=note) for key, _scope, label, note in CHOICES
-            ],
+            options=options,
             hints=self._hints(),
             selected=self.selected,
-            border="warning",
+            border="warning" if not self.waiting else "border_muted",
         )
+        # An approval is usually the last thing said, which puts it directly
+        # above the dock - and the dock closes what sits against it.
+        dialog.set_docked(self.docked)
         return dialog.render(width)
 
     def _who(self) -> str:
         if not self.origin:
             return ""
-        return fg("dim", f"  (requested by {self.origin})")
+        return fg("dim", f"  (requested by {plain_text(self.origin)})")
 
     def _detail(self) -> list[str]:
         """What is actually about to happen.
@@ -156,29 +183,43 @@ class PermissionPrompt(Widget):
         return [*lines[:PREVIEW_LINES], expand_note(len(lines) - PREVIEW_LINES)]
 
     def _detail_lines(self) -> list[str]:
-        detail = (self.request.detail or "").strip("\n")
+        # Sanitized before anything reads it. This is the one block on screen
+        # whose whole job is to show the user what is about to happen, so text
+        # that can move the cursor or repaint the line is the last thing it
+        # can afford - the command shown has to be the command that runs.
+        detail = plain_text(self.request.detail or "").strip("\n")
         kind = getattr(self.request, "detail_kind", "text")
 
         if not detail:
-            specifier = self.request.specifier or self.request.description
-            return [fg("text", str(specifier))]
+            return [fg("text", self._target())]
 
         if kind == "diff" or (kind != "command" and looks_like_diff(detail)):
             return render_diff(detail)
 
-        call = ToolCall(
-            name=self.request.tool_name,
-            params=dict(self.request.params or {}),
-            cwd=self.cwd,
+        call = sanitized_call(
+            ToolCall(
+                name=self.request.tool_name,
+                params=dict(self.request.params or {}),
+                cwd=self.cwd,
+            )
         )
         if kind == "command":
             return renderer_for(self.request.tool_name).detail(call)
         return [fg("text", line) for line in detail.split("\n")]
 
+    def _target(self) -> str:
+        """What the approval is about, as one safe string."""
+        return plain_text(str(self.request.specifier or self.request.description))
+
     def _hints(self) -> list[Hint]:
         """Every key that does something, including the two the old prompt
         bound and never mentioned."""
         from hx.keys import primary_key
+
+        if self.waiting:
+            # No key here does anything yet. Saying so is the whole point of
+            # drawing this differently from the one holding the keyboard.
+            return [Hint("waiting", "- answer the approval above first")]
 
         return [
             Hint("y/s/a/n", "answer"),
@@ -190,7 +231,7 @@ class PermissionPrompt(Widget):
 
     def _record(self) -> str:
         """The one line this collapses to once it has been answered."""
-        target = one_line(str(self.request.specifier or self.request.description), RECORD_WIDTH)
+        target = one_line(self._target(), RECORD_WIDTH)
         if self.abandoned:
             return (
                 fg("muted", NOTICE["info"])

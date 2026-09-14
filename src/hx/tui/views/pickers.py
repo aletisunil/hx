@@ -18,15 +18,16 @@ from typing import Any, ClassVar
 from hx.core.usage import format_tokens
 from hx.term.component import Widget
 from hx.term.primitives import Lines, Rule, Spacer, Text
+from hx.term.sanitize import plain_text
 from hx.tui.format import columns, one_line
 from hx.tui.fuzzy import filter_items
 from hx.tui.glyphs import CURRENT, CURSOR, GUTTER
-from hx.tui.limits import LIST_VISIBLE, RECORD_WIDTH
+from hx.tui.limits import LIST_MINIMUM, LIST_VISIBLE, RECORD_WIDTH
 from hx.tui.paint import fg, rule
-from hx.tui.views.dialog import Hint, hints_line
+from hx.tui.views.dialog import Framed, Hint, hints_line
 
 
-class Picker(Widget):
+class Picker(Widget, Framed):
     """A filter box over a list. Typing narrows, Enter picks, Escape cancels.
 
     The visible window is centred on the selection, so moving through a long
@@ -36,6 +37,11 @@ class Picker(Widget):
 
     title: str = ""
     placeholder: str = "Filter…"
+
+    CHROME = 9
+    """Lines the frame spends on itself: two rules, four blank lines, the
+    title, the filter line and the hint line. Counted rather than guessed,
+    because it is what the list is then measured against."""
 
     def __init__(self, initial: str = "") -> None:
         super().__init__()
@@ -47,7 +53,38 @@ class Picker(Widget):
         self.result: str | None = None
         self.done = False
         self._rows: list[tuple[str, list[str]]] = []
+        self._rows_available: Any = None
+        """Rows the overlay may use, supplied by whoever put this on screen.
+
+        Without it the list falls back to :data:`LIST_VISIBLE`, which is what
+        every picker used to show on every terminal: eight rows of a
+        two-hundred model catalogue, with two thirds of a tall window empty
+        underneath."""
         self._refresh()
+
+    # -- the room this has to work with ------------------------------------
+
+    def set_rows_available(self, rows: Any) -> None:
+        """Tell the picker how many rows the overlay has. ``rows`` is called
+        at draw time, so a resize is picked up without re-opening anything."""
+        self._rows_available = rows
+        self.invalidate()
+
+    def visible_rows(self) -> int:
+        """How many list rows fit, given the room and what the frame costs."""
+        if self._rows_available is None:
+            return LIST_VISIBLE
+        try:
+            room = int(self._rows_available())
+        except Exception:  # pragma: no cover - a caller that cannot measure
+            return LIST_VISIBLE
+        chrome = self.CHROME - 2 if self.docked else self.CHROME
+        # The (n/total) counter appears exactly when the list is truncated,
+        # which is what this is deciding - so its line is always reserved
+        # rather than resolved, which would not terminate.
+        if len(self._rows) > 1:
+            chrome += 1
+        return max(LIST_MINIMUM, room - chrome)
 
     # -- data --------------------------------------------------------------
 
@@ -80,15 +117,22 @@ class Picker(Widget):
 
         if not self._rows:
             body.append(fg("muted", "no matches"))
-        elif len(self._rows) > LIST_VISIBLE:
+        elif len(self._rows) > self.visible_rows():
             body.append(fg("muted", f"({self.selected + 1}/{len(self._rows)})"))
 
-        typed = self.query or fg("dim", self.placeholder)
+        # An empty filter shows a hint, not entered text. Keep the cursor at the
+        # insertion point before that hint; once typing starts it follows the
+        # query as usual.
+        filter_line = (
+            fg("text", self.query) + _cursor_cell()
+            if self.query
+            else _cursor_cell() + fg("dim", self.placeholder)
+        )
         parts = [
             Rule(rule("border")),
             Spacer(1),
             Text(fg("accent", self.title, bold=True), 1, 0),
-            Text(fg("text", typed) + _cursor_cell(), 1, 0),
+            Text(filter_line, 1, 0),
             Spacer(1),
             Lines(body),
             Spacer(1),
@@ -103,19 +147,19 @@ class Picker(Widget):
                 1,
                 0,
             ),
-            Spacer(1),
-            Rule(rule("border")),
+            *self.closing(),
         ]
         return [line for part in parts for line in part.render(width)]
 
     def _window(self) -> range:
         """The visible slice, centred on the selection where it can be."""
         total = len(self._rows)
-        if total <= LIST_VISIBLE:
+        visible = self.visible_rows()
+        if total <= visible:
             return range(total)
-        half = LIST_VISIBLE // 2
-        start = max(0, min(self.selected - half, total - LIST_VISIBLE))
-        return range(start, start + LIST_VISIBLE)
+        half = visible // 2
+        start = max(0, min(self.selected - half, total - visible))
+        return range(start, start + visible)
 
     # -- input -------------------------------------------------------------
 
@@ -139,7 +183,8 @@ class Picker(Widget):
             self.invalidate()
             return True
         if key in ("pageup", "pagedown") and self._rows:
-            step = LIST_VISIBLE if key == "pagedown" else -LIST_VISIBLE
+            visible = self.visible_rows()
+            step = visible if key == "pagedown" else -visible
             self.selected = max(0, min(len(self._rows) - 1, self.selected + step))
             self.invalidate()
             return True
@@ -302,7 +347,9 @@ class SessionPicker(Picker):
                 [
                     fg("dim", _when(meta.updated_at)),
                     fg("muted", _size(meta)),
-                    fg("text", meta.title or meta.session_id),
+                    # A session title is written by the model, at the end of
+                    # the session it names.
+                    fg("text", plain_text(meta.title or meta.session_id)),
                 ],
             )
             for meta in filter_items(self.sessions, query, key=plain)

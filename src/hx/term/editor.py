@@ -16,7 +16,10 @@ candidate list up in the corner of the terminal instead of beside the text.
 
 The editor owns its own frame - a rule above and a rule below, no verticals -
 and draws any completion list inside its own line array, so a popup cannot be
-mispositioned relative to the text it completes.
+mispositioned relative to the text it completes. The list goes *above* the
+frame: the dock is pinned to the bottom row, so a list under the text would
+push the prompt, the hints and the status bar up the screen by however many
+matches the last keystroke happened to leave.
 """
 
 from __future__ import annotations
@@ -124,9 +127,9 @@ class Editor(Widget):
         # jump when a spinner appears.
         self.top_rule = LabelledRule(rule_color, align="left")
         self.bottom_rule = Rule(rule_color)
-        #: Extra rows drawn under the editor, inside its own line array, so a
+        #: Extra rows drawn above the editor, inside its own line array, so a
         #: completion list can never be mispositioned relative to the text.
-        self.footer: list[str] = []
+        self.completions: list[str] = []
 
     # -- text --------------------------------------------------------------
 
@@ -154,8 +157,9 @@ class Editor(Widget):
         self.top_rule.set_label(label)
         self.invalidate()
 
-    def set_footer(self, lines: list[str]) -> None:
-        self.footer = lines
+    def set_completions(self, lines: list[str]) -> None:
+        """Rows to draw above the frame - the completion list, or nothing."""
+        self.completions = lines
         self.invalidate()
 
     # -- rendering ---------------------------------------------------------
@@ -179,9 +183,9 @@ class Editor(Widget):
         hidden_above = self._scroll
         hidden_below = len(rows) - self._scroll - len(visible)
 
-        out = [*self._rule(self.top_rule, width, hidden_above, "↑"), *body]
+        out = [fill_line(pad + line, width) for line in self.completions]
+        out += [*self._rule(self.top_rule, width, hidden_above, "↑"), *body]
         out += self._rule(self.bottom_rule, width, hidden_below, "↓")
-        out += [fill_line(pad + line, width) for line in self.footer]
         return out
 
     def _rows(self, inner: int) -> list[LayoutLine]:

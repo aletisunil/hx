@@ -46,8 +46,8 @@ def test_the_list_marks_the_selected_row(tmp_path: Path) -> None:
         prefix="/",
         candidates=[Candidate("copy", "/copy", "Copy"), Candidate("cost", "/cost", "Cost")],
     )
-    prompt._sync_footer()
-    rows = [strip_ansi(row) for row in prompt.footer]
+    prompt._sync_completions()
+    rows = [strip_ansi(row) for row in prompt.completions]
 
     assert rows[0].startswith("→ /copy")
     assert rows[1].startswith("  /cost")
@@ -58,8 +58,8 @@ def test_nothing_is_drawn_when_there_is_nothing_to_show(tmp_path: Path) -> None:
 
     prompt = Prompt(tmp_path)
     prompt.completion = Completion(start=0, prefix="/", candidates=[])
-    prompt._sync_footer()
-    assert prompt.footer == []
+    prompt._sync_completions()
+    assert prompt.completions == []
 
 
 def test_selection_wraps_around() -> None:
@@ -83,8 +83,8 @@ def test_descriptions_line_up_under_each_other(tmp_path: Path) -> None:
         prefix="/",
         candidates=[Candidate("a", "/compact", "one"), Candidate("b", "/configure", "two")],
     )
-    prompt._sync_footer()
-    rows = [strip_ansi(row) for row in prompt.footer]
+    prompt._sync_completions()
+    rows = [strip_ansi(row) for row in prompt.completions]
     assert rows[0].index("one") == rows[1].index("two")
 
 

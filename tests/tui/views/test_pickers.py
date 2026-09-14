@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from hx.term.screen import CURSOR_MARKER
 from hx.term.width import strip_ansi
 from hx.tui import paint
 from hx.tui.limits import LIST_VISIBLE
@@ -86,6 +87,12 @@ def test_the_two_markers_answer_two_different_questions() -> None:
 
 
 # -- filtering and moving ---------------------------------------------------
+
+
+def test_an_empty_filter_places_the_cursor_before_its_placeholder() -> None:
+    picker = Letters()
+    filter_line = next(line for line in picker.render(60) if picker.placeholder in line)
+    assert filter_line.index(CURSOR_MARKER) < filter_line.index(picker.placeholder)
 
 
 def test_typing_narrows_the_list() -> None:
