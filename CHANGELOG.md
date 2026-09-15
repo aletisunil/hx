@@ -34,6 +34,12 @@ the project follows [semantic versioning](https://semver.org/).
   `mdCodeBlockBg` role, and a theme that leaves colour to the terminal, as
   `ansi` does, gets a rule above and below instead.
 
+### Fixed
+
+- The model's reasoning is shown again. It was collapsed to a bare `Thinking…`
+  with no key wired to open it, so the text never reached the screen. `ctrl+o`
+  now folds and unfolds it, the same key that expands a tool call.
+
 ---
 
 ## [0.2.0] - 2026-09-14

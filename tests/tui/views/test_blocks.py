@@ -80,6 +80,23 @@ def test_thinking_collapses_to_one_line() -> None:
     assert "reasoning" in " ".join(plain(block.render(40)))
 
 
+def test_thinking_is_shown_rather_than_hidden() -> None:
+    """The port collapsed it by default and wired no way to open it, so the
+    reasoning was simply not arriving."""
+    block = ThinkingMessage("first thought\nsecond thought")
+    shown = " ".join(plain(block.render(40)))
+    assert "first thought" in shown and "second thought" in shown
+
+
+def test_thinking_folds_with_the_same_key_as_a_tool_call() -> None:
+    block = ThinkingMessage("first thought\nsecond thought")
+    block.toggle()
+    folded = plain(block.render(40))
+    assert folded == [" Thinking… (2 lines)"], "folded, and says how much is folded"
+    block.toggle()
+    assert "second thought" in " ".join(plain(block.render(40)))
+
+
 # -- tool calls -------------------------------------------------------------
 
 

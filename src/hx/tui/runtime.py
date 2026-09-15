@@ -951,13 +951,18 @@ class HXSession:
         self._notice(f"Copied to the clipboard ({used}).", "success")
 
     def expand_cursored(self) -> None:
-        """Expand the cursored block, or every tool block when none is."""
+        """Expand the cursored block, or every foldable one when none is.
+
+        Reasoning folds with the tool calls rather than on a key of its own:
+        both are the detail under an answer, and one key for "show me the
+        detail" is the whole point of having a key for it.
+        """
         cursor = self.view.transcript.cursor
         if cursor is not None and hasattr(cursor, "toggle"):
             cursor.toggle()
         else:
             for block in self.view.transcript.blocks:
-                if isinstance(block, ToolBlock):
+                if isinstance(block, ToolBlock | ThinkingMessage):
                     block.toggle()
         self.runner.request_immediate_render()
 

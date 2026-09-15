@@ -17,7 +17,7 @@ from typing import Any
 
 from hx.term.component import Widget
 from hx.term.markdown import render_markdown
-from hx.term.primitives import Box, HangingText, Lines, Text
+from hx.term.primitives import Box, HangingText, Lines
 from hx.term.sanitize import plain_text
 from hx.tui.glyphs import NOTICE, SPINNER, TOOL_DONE, TOOL_FAILED
 from hx.tui.limits import PREVIEW_LINES
@@ -89,11 +89,18 @@ class AssistantMessage(Widget):
 
 
 class ThinkingMessage(Widget):
-    """The model's reasoning, in its own muted colour."""
+    """The model's reasoning, in its own muted colour.
+
+    Shown rather than hidden. Reasoning is the part of a turn that explains the
+    part you can see, and a reader who does not want it has a key for that -
+    ``ctrl+o``, the same one that expands a tool call. A one-line ``Thinking…``
+    with no way to open it, which is what this was, is the reasoning simply
+    not arriving.
+    """
 
     __slots__ = ("_collapsed", "_text")
 
-    def __init__(self, text: str = "", collapsed: bool = True) -> None:
+    def __init__(self, text: str = "", collapsed: bool = False) -> None:
         super().__init__()
         self._text = plain_text(text)
         self._collapsed = collapsed
@@ -107,13 +114,23 @@ class ThinkingMessage(Widget):
             self._collapsed = collapsed
             self.invalidate()
 
+    def toggle(self) -> None:
+        self.set_collapsed(not self._collapsed)
+
+    @property
+    def text(self) -> str:
+        return self._text
+
     def draw(self, width: int) -> list[str]:
         if not self._text.strip():
             return []
-        if self._collapsed:
-            return Text(fg("thinking", "Thinking…", italic=True)).render(width)
         lines = [fg("thinking", line, italic=True) for line in self._text.strip().split("\n")]
-        return Lines(lines).render(width)
+        if not self._collapsed:
+            return Lines(lines).render(width)
+        # Folded by the reader, with the key they just pressed - so the count
+        # is what is worth saying here, not the key again.
+        note = fg("dim", f" ({len(lines)} lines)") if len(lines) > 1 else ""
+        return Lines([fg("thinking", "Thinking…", italic=True) + note]).render(width)
 
 
 class ToolBlock(Widget):
