@@ -310,9 +310,7 @@ class Header(Widget):
         lines = [title]
 
         if not self._expanded:
-            lines.append(
-                fg("muted", "A terminal coding agent. Ask a question, or start with /help.")
-            )
+            lines.append(fg("muted", "An agent harness. Ask a question, or start with /help."))
             lines.append(fg("dim", f"{KEYMAP.primary('app.tools.expand')} shows every key."))
         else:
             rows = [

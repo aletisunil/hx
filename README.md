@@ -1,7 +1,7 @@
 # HX
 
-A terminal coding agent. Python core, its own terminal renderer, OpenRouter for
-models.
+An agent harness for the terminal. Python core, its own terminal renderer,
+OpenRouter for models.
 
 HX runs in your project directory, reads and edits your code, runs commands in
 a sandboxed shell, and shows you what every turn costs.

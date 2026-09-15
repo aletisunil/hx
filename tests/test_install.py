@@ -43,7 +43,7 @@ def test_installer_shows_the_hx_banner_features_and_support_contact(
     assert "    __  __  _  __" in result.stdout
     assert "/_/ /_/  /_/|_|" in result.stdout
     assert "\x1b[5A" not in result.stdout
-    assert "HX is a terminal coding agent that works inside your project." in result.stdout
+    assert "HX is an agent harness that works inside your project." in result.stdout
     assert "handles larger tasks with persistent sessions, skills, tools, and subagents" in (
         result.stdout
     )

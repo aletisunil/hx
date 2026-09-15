@@ -129,7 +129,7 @@ stream_text() {
 banner() {
     animate_logo
     printf '\n'
-    stream_text 'HX is a terminal coding agent that works inside your project.'
+    stream_text 'HX is an agent harness that works inside your project.'
     stream_text 'It reads and edits files, runs commands in a sandbox, and handles larger tasks with persistent sessions, skills, tools, and subagents.'
     stream_text 'Connect to models through OpenRouter and see context, cost, and usage for every turn.'
     printf '  Questions or issues? Contact \033[1;33m%s\033[0m\n\n' "$HX_SUPPORT_EMAIL"

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hx-cli"
 dynamic = ["version"]
-description = "HX - a terminal coding agent"
+description = "HX - an agent harness for the terminal"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

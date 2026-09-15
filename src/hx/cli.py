@@ -28,7 +28,7 @@ from hx import __version__
 from hx.paths import auth_file
 
 USAGE = """\
-hx - a terminal coding agent
+hx - an agent harness for the terminal
 
 Usage:
   hx                        Start the interactive TUI

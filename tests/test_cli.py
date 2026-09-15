@@ -17,7 +17,7 @@ def test_version(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["--help"]) == 0
-    assert "terminal coding agent" in capsys.readouterr().out
+    assert "an agent harness for the terminal" in capsys.readouterr().out
 
 
 def test_print_mode_takes_a_prompt() -> None:
