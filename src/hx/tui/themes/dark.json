@@ -20,7 +20,8 @@
 		"toolPendingBg": "#282832",
 		"toolSuccessBg": "#283228",
 		"toolErrorBg": "#3c2828",
-		"customMsgBg": "#2d2838"
+		"customMsgBg": "#2d2838",
+		"codeBg": "#22222a"
 	},
 	"colors": {
 		"background": "pageBg",
@@ -59,6 +60,7 @@
 		"mdLink": "#81a2be",
 		"mdLinkUrl": "dimGray",
 		"mdCode": "accent",
+		"mdCodeBlockBg": "codeBg",
 		"mdCodeBlock": "green",
 		"mdCodeBlockBorder": "gray",
 		"mdQuote": "gray",

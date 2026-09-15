@@ -42,6 +42,7 @@
 		"mdLink": "ansi_blue",
 		"mdLinkUrl": "faint",
 		"mdCode": "ansi_cyan",
+		"mdCodeBlockBg": "default",
 		"mdCodeBlock": "ansi_green",
 		"mdCodeBlockBorder": "faint",
 		"mdQuote": "faint",

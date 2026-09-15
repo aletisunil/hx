@@ -31,6 +31,14 @@ class Recording(Painter):
         return source.split("\n")
 
 
+class Tinting(Recording):
+    """A painter that has a background to offer, as a real theme does."""
+
+    def fill(self, role: str, text: str) -> str | None:
+        self.roles.append(f"fill:{role}")
+        return f"<{role}>{text}</{role}>"
+
+
 def plain(text: str, width: int = 60) -> list[str]:
     return [strip_ansi(line) for line in render_markdown(text, width)]
 
@@ -144,6 +152,60 @@ def test_a_fenced_block_is_highlighted_and_indented() -> None:
     assert "md_code_block_border" in painter.roles
     body = [line for line in out if "x = 1" in line]
     assert body and strip_ansi(body[0]).startswith("  ")
+
+
+def test_a_fenced_block_is_ruled_rather_than_fenced() -> None:
+    """``` is syntax, like a heading's hashes: printing it back out tells the
+    reader only that the renderer gave up."""
+    lines = plain("```json\n{}\n```")
+    assert not any("```" in line for line in lines)
+    assert lines[0].startswith("──") and lines[-1] == "─" * cell_width(lines[0])
+
+
+def test_the_language_sits_in_the_opening_rule() -> None:
+    painter = Recording()
+    out = render_markdown("```json\n{}\n```", 40, painter)
+    assert "md_code_block" in painter.roles, "the role finally does something"
+    assert "json" in strip_ansi(out[0])
+    assert "json" not in strip_ansi(out[-1]), "only the opening rule carries it"
+
+
+def test_a_block_without_a_language_gets_a_plain_rule() -> None:
+    lines = plain("```\nx\n```")
+    assert lines[0] == lines[-1] == "─" * cell_width(lines[0])
+
+
+def test_a_theme_with_a_colour_tints_the_block_instead_of_ruling_it() -> None:
+    painter = Tinting()
+    out = render_markdown("```json\n{}\n```", 40, painter)
+    assert "fill:md_code_block_bg" in painter.roles
+    assert not any("─" in line for line in out), "tinted, so no rules"
+    assert "json" in out[0], "the language is named at the top of the band"
+
+
+def test_the_band_spans_the_column_rather_than_the_longest_line() -> None:
+    """A block whose right edge follows the code is a ragged column."""
+    painter = Tinting()
+    out = render_markdown("```\nx\n```", 40, painter)
+    inner = [line.split(">", 1)[1].rsplit("</", 1)[0] for line in out]
+    assert {cell_width(line) for line in inner} == {40}
+
+
+def test_a_theme_with_no_colour_of_its_own_falls_back_to_rules() -> None:
+    """The ansi theme defers to the terminal's palette, so it has no surface
+    colour to tint with - and a band tinted in nothing is not a band."""
+    painter = Recording()
+    out = render_markdown("```json\n{}\n```", 40, painter)
+    assert any("─" in line for line in out)
+
+
+def test_the_rule_is_never_shorter_than_the_code_it_encloses() -> None:
+    """A rule the content overhangs reads as a broken block."""
+    code = "x = " + "y" * 90
+    lines = plain(f"```python\n{code}\n```", width=120)
+    span = cell_width(lines[0])
+    assert all(cell_width(line) <= span for line in lines)
+    assert span >= cell_width(lines[1])
 
 
 def test_a_table_is_the_one_place_box_drawing_is_allowed() -> None:

@@ -66,6 +66,7 @@ class Palette:
     md_link_url: str
     md_code: str
     md_code_block: str
+    md_code_block_bg: str
     md_code_block_border: str
     md_quote: str
     md_quote_border: str

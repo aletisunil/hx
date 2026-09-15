@@ -139,8 +139,9 @@ class Box(Widget):
 
     The tint is the only thing marking the block, and it reaches the full width
     of the terminal so the block reads as a band rather than a ragged column.
-    Backgrounds mean one of two things in this UI - whose turn this is, or how
-    a tool call ended - and are never used for emphasis.
+    Backgrounds mean one of three things in this UI - whose turn this is, how a
+    tool call ended, or that a run of text is code - and are never used for
+    emphasis.
     """
 
     __slots__ = ("_padding_x", "_padding_y", "_tint", "children")

@@ -13,6 +13,11 @@ Two conventions worth naming, both taken from pi:
   hashes are syntax, and leaving them in makes prose look like a source file.
   H3 and below keep theirs, because by then the level is worth stating and
   bold-on-bold no longer distinguishes them.
+* **Code blocks lose their fences.** ``` is syntax too, and printing it back
+  out tells the reader only that the renderer gave up. The block is a band of
+  its own colour instead, with the language named at the top of it - and a rule
+  above and below for a theme that has no colour to tint with, which is what
+  the ``ansi`` one deliberately is.
 * **Tables are the one place box-drawing is allowed.** A table without rules is
   not a table. Everywhere else, a rule above and below - never a rectangle.
 """
@@ -27,6 +32,7 @@ LIST_INDENT = 4
 """Columns per nesting level, wide enough that a marker and its text both fit."""
 
 CODE_INDENT = "  "
+CODE_RULE = "─"
 QUOTE_RAIL = "│ "
 HR_MAX = 80
 """A rule spanning a very wide terminal reads as a divider in a book, not a
@@ -42,6 +48,17 @@ class Painter:
 
     def paint(self, role: str, text: str, **kwargs: bool) -> str:
         return text
+
+    def fill(self, role: str, text: str) -> str | None:
+        """``text`` on a background, or ``None`` if this role has none.
+
+        A theme is allowed to have no opinion about colour - the ``ansi`` one
+        deliberately has none, deferring to the terminal's own palette - and a
+        band tinted in a colour that resolves to nothing is not a band. So the
+        renderer asks rather than assumes, and rules the block instead when the
+        answer is no.
+        """
+        return None
 
     def code(self, source: str, language: str | None) -> list[str]:
         return source.split("\n")
@@ -126,14 +143,76 @@ class _Renderer:
 
     def _fence(self, node: object, indent: int) -> None:
         language = (node.info or "").strip().split(" ")[0] or None  # type: ignore[attr-defined]
-        fence = self.painter.paint("md_code_block_border", "```" + (language or ""))
+        available = max(1, self.width - indent)
+        room = max(1, available - 2 * len(CODE_INDENT))
+        body = [
+            truncate_to_width(line, room)
+            for line in self.painter.code(node.content.rstrip("\n"), language)  # type: ignore[attr-defined]
+        ]
+
         self.blank()
-        self.emit(fence, indent)
-        room = max(1, self.width - indent - len(CODE_INDENT))
-        for line in self.painter.code(node.content.rstrip("\n"), language):  # type: ignore[attr-defined]
-            self.emit(CODE_INDENT + truncate_to_width(line, room), indent)
-        self.emit(self.painter.paint("md_code_block_border", "```"), indent)
+        if self.painter.fill("md_code_block_bg", "") is None:
+            self._ruled_block(body, language, available, indent)
+        else:
+            self._tinted_block(body, language, available, indent)
         self.blank()
+
+    def _tinted_block(
+        self, body: list[str], language: str | None, available: int, indent: int
+    ) -> None:
+        """Code on a band of its own colour, the language named at the top.
+
+        The band spans the column rather than the longest line, for the same
+        reason a tinted message does: a block whose right edge follows the code
+        is a ragged column, not a block. The language label and a blank row
+        below the code are the padding - inside the tint, so the band is a
+        rectangle rather than a highlighted run of text.
+        """
+        span = available
+        label = truncate_to_width(language or "", max(0, span - 2 * len(CODE_INDENT)))
+        head = self.painter.paint("md_code_block", label) if label else ""
+        rows = [head, *body, ""]
+        for row in rows:
+            padding = " " * max(0, span - len(CODE_INDENT) - cell_width(row))
+            filled = self.painter.fill("md_code_block_bg", CODE_INDENT + row + padding)
+            self.emit(filled if filled is not None else CODE_INDENT + row, indent)
+
+    def _ruled_block(
+        self, body: list[str], language: str | None, available: int, indent: int
+    ) -> None:
+        """The same block for a theme with no colour of its own to tint with.
+
+        Capped like a thematic break, but never shorter than the code it
+        encloses: a rule the content overhangs reads as a broken block.
+        """
+        widest = max((cell_width(line) for line in body), default=0) + len(CODE_INDENT)
+        span = min(available, max(HR_MAX, widest))
+        self.emit(self._code_rule(span, language), indent)
+        for line in body:
+            self.emit(CODE_INDENT + line, indent)
+        self.emit(self.painter.paint("md_code_block_border", CODE_RULE * span), indent)
+
+    def _code_rule(self, span: int, language: str | None) -> str:
+        """The rule opening a code block, carrying the language if there is one.
+
+        The fence markers themselves are syntax, the same way a heading's
+        hashes are: the reader is looking at source either way, and ``` in the
+        middle of rendered prose only tells them the renderer gave up. A rule
+        says the same thing in the vocabulary the rest of the UI uses, and the
+        language sits in it rather than on a line of its own.
+        """
+        paint = self.painter.paint
+        label = truncate_to_width(language or "", max(0, span - 4))
+        if not label:
+            return paint("md_code_block_border", CODE_RULE * span)
+        trail = CODE_RULE * (span - 4 - cell_width(label))
+        return (
+            paint("md_code_block_border", CODE_RULE * 2)
+            + " "
+            + paint("md_code_block", label)
+            + " "
+            + paint("md_code_block_border", trail)
+        )
 
     _code_block = _fence
 

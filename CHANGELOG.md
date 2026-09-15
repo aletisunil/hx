@@ -26,6 +26,14 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Code blocks in a reply are drawn as a block - the code on a band of its own
+  colour, syntax highlighted, with the language named at the top - instead of
+  printing the ``` fences back out as text. Themes set the band with the new
+  `mdCodeBlockBg` role, and a theme that leaves colour to the terminal, as
+  `ansi` does, gets a rule above and below instead.
+
 ---
 
 ## [0.2.0] - 2026-09-14

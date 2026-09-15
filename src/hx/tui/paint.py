@@ -66,9 +66,9 @@ def bg(role: str, text: str) -> str:
 def tint(role: str) -> Callable[[str], str]:
     """A background filler, for :class:`~hx.term.primitives.Box`.
 
-    Backgrounds mean exactly two things in this UI - whose turn this is, and
-    how a tool call ended - so there are few of these and they are never used
-    for emphasis.
+    Backgrounds mean exactly three things in this UI - whose turn this is, how
+    a tool call ended, and that a run of text is code - so there are few of
+    these and they are never used for emphasis.
     """
 
     def paint(line: str) -> str:
@@ -102,6 +102,17 @@ class ThemePainter(Painter):
 
     def paint(self, role: str, text: str, **kwargs: bool) -> str:
         return fg(role, text, **kwargs)
+
+    def fill(self, role: str, text: str) -> str | None:
+        """The role as a background, unless the theme leaves it to the terminal.
+
+        ``ansi_default`` and an empty value both mean "whatever the terminal is
+        already using", which as a background is nothing at all.
+        """
+        value = color(role)
+        if not value or value == "ansi_default":
+            return None
+        return bg(role, text)
 
     def code(self, source: str, language: str | None) -> list[str]:
         from hx.term.syntax import highlight

@@ -40,7 +40,12 @@ _EXPORT_FALLBACKS = {"background": "pageBg", "surface": "cardBg"}
 
 #: Roles that borrow another role when absent. Only for roles pi has no concept
 #: of; a role pi does define must be present or the file is rejected.
-_DERIVED = {"panel": "surface", "diff_hunk": "md_link", "user_text": "text"}
+_DERIVED = {
+    "panel": "surface",
+    "diff_hunk": "md_link",
+    "user_text": "text",
+    "md_code_block_bg": "surface",
+}
 
 _FIELDS = frozenset(f.name for f in fields(Palette)) - {"name", "dark"}
 
