@@ -66,6 +66,11 @@ terminal is already on the normal screen, which is the case every time HX
 starts after a session that exited properly."""
 _SGR_RESET = "\x1b[0m"
 
+_RESIZE_SIGNALS = (signal.SIGWINCH, signal.SIGCONT)
+"""SIGWINCH is not delivered while the process is stopped, so a resize during
+``ctrl+z`` is only discoverable on the way back - which is what SIGCONT is
+doing in a list of resize signals."""
+
 
 class Terminal(Protocol):
     """What the renderer needs from the outside world.
@@ -112,6 +117,10 @@ class ProcessTerminal:
         self._lock = threading.Lock()
 
         self._on_resize: Callable[[], None] | None = None
+        self._resize_loop: Any = None
+        self._resize_signals: list[int] = []
+        self._resize_pending = False
+        self._delivering_resize = False
         self._previous_excepthook: Callable[..., Any] | None = None
         self._previous_signals: dict[int, Any] = {}
         self._mouse = False
@@ -142,6 +151,11 @@ class ProcessTerminal:
             # The far end went away. There is nothing useful to do, and raising
             # here would turn a closed pager into a traceback.
             pass
+        # Only ever set by the fallback resize handler, which flags rather than
+        # draws; see :meth:`_install_resize_handler`. Delivering it here means
+        # the frame that the signal interrupted finishes first.
+        if self._resize_pending:
+            self._deliver_resize()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -216,6 +230,7 @@ class ProcessTerminal:
                 termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved_attributes)
             self._saved_attributes = None
 
+        self._remove_resize_handlers()
         self._remove_safety_net()
 
     # -- optional modes ----------------------------------------------------
@@ -354,17 +369,76 @@ class ProcessTerminal:
     # -- resize ------------------------------------------------------------
 
     def _install_resize_handler(self) -> None:
+        """Hear about resizes without redrawing from inside the signal frame.
+
+        A signal handler runs between two bytecodes of whatever the main thread
+        happened to be doing, and for a terminal app that is usually the middle
+        of writing a frame. Redrawing from in there re-enters the writer while
+        it still holds its buffer, and Python refuses:
+        ``RuntimeError: reentrant call inside <_io.BufferedWriter>``. A double
+        click on the window - one resize, arriving during one write - was
+        enough to end a session that way.
+
+        So the redraw is handed to the event loop, which runs it as an ordinary
+        callback between frames. ``add_signal_handler`` exists for exactly this
+        and delivers through asyncio's self-pipe.
+        """
+        loop = self._current_loop()
+        if loop is not None and self._add_loop_handlers(loop):
+            return
+
         def handler(_number: int, _frame: FrameType | None) -> None:
-            if self._on_resize is not None:
-                self._on_resize()
+            # No loop to defer to: flag it and let the next write deliver it,
+            # which is the earliest moment this can be done safely.
+            self._resize_pending = True
+
+        for number in _RESIZE_SIGNALS:
+            with contextlib.suppress(ValueError, OSError):  # not the main thread
+                signal.signal(number, handler)
+
+    @staticmethod
+    def _current_loop() -> Any:
+        import asyncio
 
         try:
-            signal.signal(signal.SIGWINCH, handler)
-            # SIGWINCH is not delivered while the process is stopped, so a
-            # resize during ctrl+z is only discoverable on the way back.
-            signal.signal(signal.SIGCONT, handler)
-        except (ValueError, OSError):  # pragma: no cover - not the main thread
-            pass
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+    def _add_loop_handlers(self, loop: Any) -> bool:
+        """Route the resize signals through ``loop``. False if it will not take them."""
+        installed: list[int] = []
+        for number in _RESIZE_SIGNALS:
+            try:
+                loop.add_signal_handler(number, self._deliver_resize)
+            except (ValueError, OSError, NotImplementedError, RuntimeError):
+                continue
+            installed.append(number)
+        if not installed:
+            return False
+        self._resize_loop = loop
+        self._resize_signals = installed
+        return True
+
+    def _remove_resize_handlers(self) -> None:
+        loop, self._resize_loop = self._resize_loop, None
+        signals, self._resize_signals = self._resize_signals, []
+        if loop is None:
+            return
+        for number in signals:
+            with contextlib.suppress(Exception):  # a closed loop is not worth raising over
+                loop.remove_signal_handler(number)
+
+    def _deliver_resize(self) -> None:
+        """Tell the app the size changed. Never called from a signal frame."""
+        self._resize_pending = False
+        if self._on_resize is None or self._delivering_resize:
+            return
+        self._delivering_resize = True
+        try:
+            self._on_resize()
+        finally:
+            self._delivering_resize = False
 
     # -- input -------------------------------------------------------------
 

@@ -8,8 +8,10 @@ and read back what the terminal would have received.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import os
+import signal
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -233,3 +235,87 @@ def test_the_fake_terminal_records_what_it_was_given() -> None:
 
     fake.stop()
     assert fake.restored
+
+
+@pytest.mark.asyncio
+async def test_a_resize_signal_never_runs_the_callback_in_the_signal_frame(
+    detached: ProcessTerminal,
+) -> None:
+    """The shape of the crash a double click on the window used to cause.
+
+    Python runs a signal handler between two bytecodes of whatever the main
+    thread was doing - usually writing a frame - so a handler that draws
+    re-enters the buffered writer and the session dies with
+    ``RuntimeError: reentrant call inside <_io.BufferedWriter>``. The handler
+    hands the resize to the loop instead, which runs it between writes.
+    """
+    resizes: list[int] = []
+    detached._on_resize = lambda: resizes.append(1)
+    detached._install_resize_handler()
+    try:
+        os.kill(os.getpid(), signal.SIGWINCH)
+        assert resizes == [], "the resize was delivered from inside the signal handler"
+
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if resizes:
+                break
+        assert resizes == [1], "the loop never delivered the resize"
+    finally:
+        detached._remove_resize_handlers()
+
+
+@pytest.mark.asyncio
+async def test_writing_survives_a_storm_of_resize_signals(
+    detached: ProcessTerminal,
+) -> None:
+    """A drag of the window corner is a burst of signals, not one.
+
+    The callback here writes, as a redraw does: nothing in the burst may land
+    inside a write already running.
+    """
+    depth = 0
+    deepest = 0
+
+    def on_resize() -> None:
+        nonlocal depth, deepest
+        depth += 1
+        deepest = max(deepest, depth)
+        try:
+            detached.write("frame" * 1000)
+        finally:
+            depth -= 1
+
+    detached._on_resize = on_resize
+    detached._install_resize_handler()
+    try:
+        for _ in range(200):
+            os.kill(os.getpid(), signal.SIGWINCH)
+            detached.write("frame" * 1000)
+            await asyncio.sleep(0)
+        assert deepest <= 1, "a redraw ran inside another write"
+    finally:
+        detached._remove_resize_handlers()
+
+
+def test_a_resize_arriving_without_a_loop_is_kept_until_the_next_write(
+    detached: ProcessTerminal,
+) -> None:
+    """Nothing to defer to, so the flag is all the handler may safely set.
+
+    The resize is delivered by the next write rather than dropped: that is the
+    first moment the writer is known not to be busy.
+    """
+    resizes: list[int] = []
+    detached._on_resize = lambda: resizes.append(1)
+    detached._install_resize_handler()
+    try:
+        assert detached._resize_signals == [], "a loop was found where there is none"
+        os.kill(os.getpid(), signal.SIGWINCH)
+        assert resizes == [], "delivered from inside the signal handler"
+
+        detached.write("a frame")
+        assert resizes == [1], "the resize was dropped"
+    finally:
+        signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+        signal.signal(signal.SIGCONT, signal.SIG_DFL)

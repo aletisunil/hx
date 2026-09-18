@@ -61,6 +61,9 @@ class TuiRunner:
 
         self._running = False
         self._render_pending = False
+        self._drawing = False
+        self._redraw_after_draw = False
+        self._resize_pending = False
         self._render_task: asyncio.Task[None] | None = None
         self._escape_task: asyncio.Task[None] | None = None
         self._last_render = 0.0
@@ -195,9 +198,28 @@ class TuiRunner:
             self._draw()
 
     def _draw(self) -> None:
+        """Paint once, and never from inside another paint.
+
+        A paint writes to stdout, and Python runs a signal handler in the
+        middle of a write that blocks. A handler that paints would re-enter the
+        buffered writer, which raises ``RuntimeError: reentrant call`` and
+        takes the session down. Nothing reaches the writer twice: the inner
+        request is remembered and drawn by the outer one on its way out, which
+        is also the frame that has the newer state in it.
+        """
+        if self._drawing:
+            self._redraw_after_draw = True
+            return
         self._render_pending = False
         self._last_render = asyncio.get_event_loop().time()
-        self._screen.render()
+        self._drawing = True
+        try:
+            self._screen.render()
+        finally:
+            self._drawing = False
+        if self._redraw_after_draw:
+            self._redraw_after_draw = False
+            self._draw()
 
     # -- input -------------------------------------------------------------
 
@@ -237,11 +259,30 @@ class TuiRunner:
     # -- resize ------------------------------------------------------------
 
     def _on_resize(self) -> None:
-        """Redraw at once: the wrapping of every line on screen just changed."""
-        if not self._running:
+        """Hand the redraw to the loop: the wrapping of every line just changed.
+
+        This runs in a signal handler, and a window manager sends a burst of
+        SIGWINCH for one drag of a window corner - so the signal that lands
+        while the previous paint is still writing is the normal case, not the
+        rare one. Painting from here would re-enter stdout mid-write and raise
+        ``RuntimeError: reentrant call``; the loop runs the paint between
+        writes instead.
+
+        The burst collapses into a single redraw, which is all a resize needs:
+        the screen is repainted from the size it has when that redraw runs, not
+        from the size that each signal announced.
+        """
+        if not self._running or self._resize_pending:
             return
         try:
-            asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:  # pragma: no cover - signal outside the loop
             return
-        self.request_immediate_render()
+        self._resize_pending = True
+        loop.call_soon_threadsafe(self._apply_resize)
+
+    def _apply_resize(self) -> None:
+        """The deferred half of :meth:`_on_resize`, back on the event loop."""
+        self._resize_pending = False
+        if self._running:
+            self.request_immediate_render()

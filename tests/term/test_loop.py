@@ -98,14 +98,88 @@ async def test_an_arrow_arriving_in_two_reads_is_not_seen_as_escape() -> None:
         assert [key.name for key in r.keys] == ["up"]
 
 
-async def test_a_resize_redraws_immediately() -> None:
+async def test_a_resize_redraws_on_the_next_tick() -> None:
+    """Not in the signal handler: the paint is handed to the loop.
+
+    A resize arrives as SIGWINCH, which Python may run in the middle of a
+    write to stdout, and painting from there re-enters the buffered writer.
+    """
     async with Runner() as r:
         r.root.add(Text("the quick brown fox jumps over the lazy dog"))
         r.runner.request_immediate_render()
         r.terminal.clear_output()
 
         r.terminal.resize(20, 12)
+        assert r.output == "", "painted from the signal handler"
+
+        await asyncio.sleep(0)
         assert r.output != "", "a resize left the screen stale"
+
+
+async def test_a_burst_of_resizes_is_one_redraw() -> None:
+    """One drag of a window corner is a burst of SIGWINCH, not one."""
+    async with Runner() as r:
+        label = r.root.add(Text("dragging"))
+        r.runner.request_immediate_render()
+        r.terminal.clear_output()
+
+        renders: list[int] = []
+        original = r.runner.screen.render
+
+        def counting() -> None:
+            renders.append(1)
+            original()
+
+        r.runner.screen.render = counting  # type: ignore[method-assign]
+        for width in range(40, 20, -1):
+            r.terminal.resize(width, 12)
+        await asyncio.sleep(0)
+
+        assert len(renders) == 1, f"drew {len(renders)} times for one drag"
+        assert "dragging" in r.output
+        assert label.text == "dragging"
+
+
+async def test_a_paint_inside_a_paint_is_drawn_once_the_outer_one_is_done() -> None:
+    """The shape of the crash: SIGWINCH lands while a paint is writing.
+
+    Python runs the handler in the middle of the write, so the redraw it asks
+    for starts inside the one already writing. Re-entering the writer raises
+    ``RuntimeError: reentrant call inside <_io.BufferedWriter>`` and the
+    session dies; instead the outer paint carries the request out with it.
+    """
+    async with Runner() as r:
+        label = r.root.add(Text("before"))
+        r.runner.request_immediate_render()
+
+        depth = 0
+        deepest = 0
+        signalled = False
+
+        class Reentrant(FakeTerminal):
+            def write(self, data: str) -> None:
+                nonlocal depth, deepest, signalled
+                depth += 1
+                deepest = max(deepest, depth)
+                try:
+                    if not signalled:
+                        signalled = True
+                        label.set_text("after")
+                        # What the signal handler does: ask for a paint from
+                        # inside the write of the paint already running.
+                        r.runner.request_immediate_render()
+                    super().write(data)
+                finally:
+                    depth -= 1
+
+        reentrant = Reentrant(40, 12)
+        r.runner._terminal = reentrant
+        r.runner.screen._terminal = reentrant
+        label.set_text("during")
+        r.runner.request_immediate_render()
+
+        assert deepest == 1, "a paint ran inside another paint"
+        assert "after" in reentrant.output, "the inner request was dropped"
 
 
 async def test_keys_reach_the_component_tree_when_there_is_no_handler() -> None:
