@@ -299,11 +299,12 @@ async def test_parallel_task_calls_run_concurrently(hx_home: Path, tmp_path: Pat
         model_info=ModelRegistry().get_or_default("m"),
     )
 
-    started = time.monotonic()
     await loop.run("do both")
-    elapsed = time.monotonic() - started
 
+    # Overlapping spans are the whole proof, and the only one a loaded CI runner
+    # cannot argue with: two subagents that ran serially cannot overlap, however
+    # slow the machine was. A wall-clock budget on top of this only measured how
+    # busy the runner happened to be.
     assert len(runner.spans) == 2
-    assert elapsed < 0.55, f"the two subagents ran serially ({elapsed:.2f}s)"
     (_a_start, a_end), (b_start, _b_end) = runner.spans
     assert b_start < a_end, "the second subagent did not start until the first finished"

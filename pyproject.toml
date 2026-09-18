@@ -105,6 +105,13 @@ plugins = []
 module = ["pyte.*", "wcwidth.*", "markdown_it.*"]
 ignore_missing_imports = true
 
+# The Symbols grammars are an optional extra, so the lint job does not install
+# them. Type-checking must pass in the configuration users actually get - the
+# one where the import fails and the tool is never registered.
+[[tool.mypy.overrides]]
+module = ["tree_sitter.*", "tree_sitter_language_pack.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
