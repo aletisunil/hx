@@ -26,6 +26,43 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Hooks: shell commands HX runs at `PreToolUse`, `PostToolUse`,
+  `UserPromptSubmit` and `Stop`. A hook can refuse an action (exit 2, or
+  `{"decision": "block"}`), rewrite a tool's arguments before the permission
+  engine sees them (`updatedInput`), or add a note for the model
+  (`additionalContext`). Configure them under `"hooks"` in
+  `~/.hx/settings.json`; `/hooks` lists what is loaded. Hooks declared in a
+  project's checked-in `.hx/settings.json` are ignored and reported, because
+  cloning a repository must not be enough to run commands on your machine.
+- `Symbols`: outline a file, find where a name is defined, or find where it is
+  used, over a tree-sitter parse tree rather than a regex - so a match inside a
+  comment or a string never counts. Python, TypeScript, JavaScript, Go and
+  Rust. Needs the grammars: `uv tool install "hx-cli[symbols]"`. Without them
+  the tool is not registered at all.
+- An example hook, `examples/hooks/check.sh`: after every `Edit`/`Write` it
+  runs the project's own checker (`ruff`, `tsc`, `go vet`, `cargo check`)
+  against just that file and hands the output back to the model, so a typo is
+  caught on the next turn instead of at test time.
+- Line anchors. `Read` now labels each line with a short content hash, and
+  `Edit` accepts those anchors in a `hashline` argument to replace a span
+  without retyping it. An anchor that no longer resolves means the file moved,
+  so the patch is rejected instead of landing at the wrong lines. Set
+  `"tools": {"hashline": false}` to go back to plain `cat -n` reads.
+
+### Removed
+
+- The `telemetry` setting, which was parsed and never read by anything.
+
+### Fixed
+
+- The README's Status section said there were two model routes; Devin made it
+  three in 0.2.2.
+- `MultiEdit` and `NotebookEdit` were listed as mutating tools and as edit
+  tools in the permission engine, but no such tools exist. A rule written
+  against either name silently matched nothing.
+
 ---
 
 ## [0.2.2] - 2026-09-17

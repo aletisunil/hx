@@ -21,6 +21,7 @@ from hx.core.events import SubagentFinished, SubagentStarted
 if TYPE_CHECKING:
     from hx.config import Settings
     from hx.core.events import EventBus
+    from hx.hooks.engine import HookEngine
     from hx.permissions.engine import PermissionEngine
     from hx.providers.base import Provider
     from hx.providers.models import ModelRegistry
@@ -57,6 +58,7 @@ class SubagentRunner:
         models: ModelRegistry | None = None,
         parent_session_id: str | None = None,
         parent_usage: object | None = None,
+        hooks: HookEngine | None = None,
     ) -> None:
         self.definitions = definitions
         self.provider = provider
@@ -67,6 +69,9 @@ class SubagentRunner:
         self.models = models
         self.parent_session_id = parent_session_id
         self.parent_usage = parent_usage
+        self.hooks = hooks
+        """Shared with the parent: a hook that guards Bash must guard a subagent's
+        Bash too, or the guard is one delegation away from being bypassed."""
         self._active: dict[str, str] = {}
 
     async def run(self, agent_type: str, prompt: str, description: str) -> SubagentResult:
@@ -155,6 +160,7 @@ class SubagentRunner:
             bus=self.bus,
             settings=self.settings,
             model_info=self.models.get_or_default(model) if self.models else None,
+            hooks=self.hooks,
         )
         loop.origin = f"{definition.name} subagent"
         return loop

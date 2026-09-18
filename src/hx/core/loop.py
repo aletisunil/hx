@@ -12,9 +12,10 @@ stay predictable.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hx.core.context import AssembledContext
@@ -44,16 +45,20 @@ from hx.core.messages import (
     user_message,
 )
 from hx.core.usage import TurnUsage, compute_cost
+from hx.hooks.spec import HookOutcome
 from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, StreamEnd
 from hx.tools.base import ToolContext
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from hx.config import Settings
     from hx.core.compaction import Compactor
     from hx.core.context import ContextBuilder
     from hx.core.events import EventBus
     from hx.core.lateinject import InjectionRegistry
     from hx.core.session import Session
+    from hx.hooks.engine import HookEngine
     from hx.permissions.engine import PermissionEngine
     from hx.providers.base import Provider
     from hx.providers.models import ModelInfo
@@ -95,6 +100,7 @@ class AgentLoop:
         active_skills: ActiveSkills | None = None,
         skills_index: str | None = None,
         project_context: str | None = None,
+        hooks: HookEngine | None = None,
     ) -> None:
         self.provider = provider
         self.session = session
@@ -109,6 +115,7 @@ class AgentLoop:
         self.active_skills = active_skills
         self.skills_index = skills_index
         self.project_context = project_context
+        self.hooks = hooks
         self._cancelled = False
         self._turn_index = 0
         self._steer: list[str] = []
@@ -153,11 +160,25 @@ class AgentLoop:
         """
         self._cancelled = False
         if user_input:
+            gate = await self._fire_hooks(lambda h: h.user_prompt_submit(user_input))
+            if gate.blocked:
+                reason = gate.reason or "blocked by hook"
+                self.bus.publish(ErrorRaised(message=reason, recoverable=True))
+                return TurnResult(StopReason.ERROR, [], error=reason)
+            if gate.context_text:
+                user_input = f"{user_input}\n\n{gate.context_text}"
             self.session.append(user_message(user_input))
 
         produced: list[Message] = []
         stop_reason = StopReason.END_TURN
 
+        try:
+            return await self._turns(produced, stop_reason)
+        finally:
+            await self._fire_stop()
+
+    async def _turns(self, produced: list[Message], stop_reason: StopReason) -> TurnResult:
+        """The turn itself. Split out so :meth:`run` can close it off in one place."""
         for _ in range(self.MAX_TURNS):
             if self._cancelled:
                 return TurnResult(StopReason.CANCELLED, produced)
@@ -555,12 +576,39 @@ class AgentLoop:
         return name if self.origin is None else f"{self.origin} > {name}"
 
     async def _run_one(self, call: ToolUseBlock) -> ToolResultBlock:
+        started = time.monotonic()
+
+        # PreToolUse runs before the call is announced. A hook that rewrites the
+        # input must not leave the transcript showing a command that never ran,
+        # and re-announcing afterwards would draw the call twice.
+        pre = await self._fire_hooks(lambda h: h.pre_tool_use(call.name, call.input))
+        if pre.updated_input is not None:
+            # Answered before the permission engine sees it too: the user
+            # approves what will actually run.
+            call = replace(call, input=dict(pre.updated_input))
+
         self.bus.publish(
             ToolCallStarted(
                 tool_use_id=call.id, name=self._display_name(call.name), input=call.input
             )
         )
-        started = time.monotonic()
+
+        if pre.blocked:
+            refusal = ToolResultBlock(
+                tool_use_id=call.id,
+                content=f"{call.name} was blocked by a hook: {pre.reason}",
+                is_error=True,
+            )
+            self.bus.publish(
+                ToolCallFinished(
+                    tool_use_id=call.id,
+                    is_error=True,
+                    duration_ms=(time.monotonic() - started) * 1000,
+                    summary="blocked by hook",
+                    detail=refusal.content,
+                )
+            )
+            return refusal
 
         denied = await self._check_permission(call)
         if denied is not None:
@@ -584,20 +632,29 @@ class AgentLoop:
         )
         result = await self.tools.call(call.name, call.input, ctx)
 
+        post = await self._fire_hooks(
+            lambda h: h.post_tool_use(call.name, call.input, result.content, result.is_error)
+        )
+        content = result.content
+        if post.blocked:
+            content = f"{content}\n\nA hook rejected this result: {post.reason}"
+        elif post.context_text:
+            content = f"{content}\n\n{post.context_text}"
+
         self.bus.publish(
             ToolCallFinished(
                 tool_use_id=call.id,
-                is_error=result.is_error,
+                is_error=result.is_error or post.blocked,
                 duration_ms=(time.monotonic() - started) * 1000,
                 summary=result.summary or ("error" if result.is_error else "done"),
-                detail=result.content if result.is_error else "",
+                detail=content if result.is_error or post.blocked else "",
                 metadata=dict(result.metadata),
             )
         )
         return ToolResultBlock(
             tool_use_id=call.id,
-            content=result.content,
-            is_error=result.is_error,
+            content=content,
+            is_error=result.is_error or post.blocked,
             spilled_path=result.spilled_path,
         )
 
@@ -645,6 +702,35 @@ class AgentLoop:
                 detail=request.detail,
             )
         )
+
+    async def _fire_stop(self) -> None:
+        """Fire ``Stop`` on every way out of a turn, not only the tidy one.
+
+        A hook that releases a lock or stops a timer is needed most on the exits
+        that were not planned - Esc, a provider that fell over, the turn limit.
+        A cancellation already in flight can still cut the hook short; nothing
+        can be awaited once the task is unwinding, and the alternative is
+        swallowing the cancellation.
+        """
+        with contextlib.suppress(Exception):
+            await self._fire_hooks(lambda h: h.stop())
+
+    async def _fire_hooks(
+        self, call: Callable[[HookEngine], Awaitable[HookOutcome]]
+    ) -> HookOutcome:
+        """Run one hook event, reporting anything that broke.
+
+        A hook that fails to run is a notice, never a block: a typo in somebody's
+        shell command must not be able to wedge the session. Only an explicit
+        refusal - exit 2, or ``{"decision": "block"}`` - stops anything.
+        """
+        if self.hooks is None:
+            return HookOutcome()
+
+        outcome = await call(self.hooks)
+        for problem in outcome.errors:
+            self.bus.publish(ErrorRaised(message=f"hook: {problem}", recoverable=True))
+        return outcome
 
     def _emit_progress(self, tool_use_id: str, chunk: str) -> None:
         from hx.core.events import ToolCallProgress
@@ -730,13 +816,18 @@ def _permission_detail(call: ToolUseBlock) -> tuple[str, str]:
     if call.name in {"Edit", "Write"} and (raw_path := call.input.get("file_path")):
         from pathlib import Path
 
-        from hx.tools.edit import parse_edits, unified_diff
+        from hx.tools.edit import apply_hashline, parse_edits, parse_hashline, unified_diff
 
         path = Path(str(raw_path))
         try:
             before = path.read_text(encoding="utf-8") if path.is_file() else ""
             if call.name == "Write":
                 after = str(call.input.get("content", ""))
+            elif call.input.get("hashline"):
+                # An anchored edit is previewed by resolving it, the same way
+                # the tool will. Without this the prompt falls back to a bare
+                # filename and the user approves an edit they never saw.
+                after = apply_hashline(before, parse_hashline(call.input))
             else:
                 after = before
                 for edit in parse_edits(call.input):

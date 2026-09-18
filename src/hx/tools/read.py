@@ -7,11 +7,14 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from hx.tools import anchors
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 
 DESCRIPTION = """Read a file from the local filesystem.
 
-Returns `cat -n` style numbered lines. Use `offset`/`limit` for large files.
+Returns numbered lines, each labelled with a short content anchor:
+`   12 a3f9\tcontent`. Pass those anchors to Edit's `hashline` argument to
+replace a span without retyping it. Use `offset`/`limit` for large files.
 Prefer reading the part you need over reading a whole large file."""
 
 DEFAULT_LINE_LIMIT = 2000
@@ -67,11 +70,26 @@ class ReadTool(Tool):
         except OSError as exc:
             raise ToolError(f"{path}: {exc}") from exc
 
-        lines = content.splitlines()
+        # Split on newlines alone, so the lines an anchor indexes are the ones
+        # Edit will reassemble. A line keeps its `\r` for hashing and loses it
+        # only on the way to the screen.
+        lines, _ = anchors.split(content)
         window = lines[offset - 1 : offset - 1 + limit]
-        rendered = "\n".join(
-            f"{number:>6}\t{_clip(line)}" for number, line in enumerate(window, start=offset)
-        )
+
+        if hashline_enabled(ctx):
+            # Anchors are computed over the whole file, not the window: the hash
+            # covers each line's neighbours, and Edit resolves against the whole
+            # file too. A window-local anchor would not survive the trip.
+            labels, _ = anchors.compute(lines)
+            rendered = "\n".join(
+                f"{number:>6} {labels[number - 1]}\t{_clip(_shown(line))}"
+                for number, line in enumerate(window, start=offset)
+            )
+        else:
+            rendered = "\n".join(
+                f"{number:>6}\t{_clip(_shown(line))}"
+                for number, line in enumerate(window, start=offset)
+            )
 
         self.tracker.mark_read(path)
 
@@ -119,6 +137,21 @@ class FileTracker:
 
     def stale_files(self) -> list[Path]:
         return [path for path in self._hashes if self.changed_since_read(path)]
+
+
+def _shown(line: str) -> str:
+    """A CRLF file's `\r` is part of the line but not part of what to print."""
+    return line.removesuffix("\r")
+
+
+def hashline_enabled(ctx: ToolContext) -> bool:
+    """Whether anchors are rendered and accepted.
+
+    Read defensively: ``ToolContext.settings`` is deliberately untyped, and a
+    headless caller may pass a stub that predates the setting.
+    """
+    tools = getattr(ctx.settings, "tools", None)
+    return bool(getattr(tools, "hashline", True))
 
 
 def resolve_path(raw: str, cwd: Path) -> Path:

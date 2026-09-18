@@ -572,6 +572,22 @@ def render_todos(todos: Any) -> list[str]:
     return out
 
 
+class SymbolsRenderer(ToolRenderer):
+    verb = "symbols"
+
+    def header(self, call: ToolCall) -> str:
+        mode = str(call.params.get("mode") or "")
+        # The subject is the symbol for a search and the file for an outline -
+        # whichever one the user would name if they described the call.
+        subject = str(call.params.get("symbol") or "")
+        header = fg("tool_title", f"symbols {mode} ", bold=True) + fg("accent", subject)
+        if shown := _elsewhere(call.params.get("file_path") or call.params.get("path"), call.cwd):
+            header += fg("muted", f"{' in ' if subject else ''}{shown}")
+        if call.finished and call.summary:
+            header += fg("dim", f"  {call.summary}")
+        return header
+
+
 class TaskRenderer(ToolRenderer):
     verb = "task"
 
@@ -588,11 +604,11 @@ RENDERERS: dict[str, ToolRenderer] = {
     "read": ReadRenderer(),
     "write": WriteRenderer(),
     "edit": EditRenderer(),
-    "multiedit": EditRenderer(),
     "bash": BashRenderer(),
     "bashoutput": BashRenderer(),
     "grep": GrepRenderer(),
     "glob": GlobRenderer(),
+    "symbols": SymbolsRenderer(),
     "todowrite": TodoRenderer(),
     "task": TaskRenderer(),
 }

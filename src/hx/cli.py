@@ -211,6 +211,8 @@ class Runtime:
     checkpoints: Any = None
     """:class:`~hx.core.checkpoints.CheckpointStore` - pre-images for ``/rewind``."""
     tracker: Any = None
+    hooks: Any = None
+    """:class:`~hx.hooks.engine.HookEngine` - what ``/hooks`` reports on."""
     notices: list[str] = field(default_factory=list)
     """Startup messages for the user - shown once, in the transcript."""
 
@@ -309,6 +311,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     from hx.core.loop import AgentLoop
     from hx.core.session import load_session, new_session
     from hx.git import GitWatcher, git_injector
+    from hx.hooks.engine import HookEngine
     from hx.mcp.manager import MCPManager
     from hx.mcp.manager import load_configs as load_mcp_configs
     from hx.net import tls_notice
@@ -394,6 +397,14 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     if skills:
         tools.register(SkillTool(skills, ActiveSkills()))
 
+    hooks = HookEngine.load(settings.cwd, session.meta.session_id)
+    if hooks.ignored:
+        notices.append(
+            f"Ignored {len(hooks.ignored)} hook(s) declared in the project's shared "
+            "settings - hooks run shell commands, so they are only loaded from your "
+            "own settings. See /hooks."
+        )
+
     agents = {agent.name: agent for agent in discover_agents(settings.cwd)}
     subagents = SubagentRunner(
         definitions=agents,
@@ -405,6 +416,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         models=models,
         parent_session_id=session.meta.session_id,
         parent_usage=session.usage,
+        hooks=hooks,
     )
     tools.register(TaskTool(subagents))
 
@@ -426,6 +438,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         model_info=model_info,
         skills_index=build_index(list(skills.values())) or None,
         project_context=build_project_context(settings.cwd),
+        hooks=hooks,
     )
 
     return Runtime(
@@ -445,6 +458,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         tools=tools,
         checkpoints=checkpoints,
         tracker=tracker,
+        hooks=hooks,
         notices=notices,
     )
 

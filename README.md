@@ -403,6 +403,7 @@ than being silently resolved.
 | `/skills` | installed skills |
 | `/agents` | subagent types |
 | `/mcp` | server status |
+| `/hooks` | configured hooks, and any that were refused |
 | `/theme [name]` | `dark`, `light`, `ansi`, or any theme in `~/.hx/themes` |
 | `/queue [steer <n>\|clear]` | messages waiting for the turn to end, and what to do with them |
 | `/copy` | copy the last reply to the clipboard |
@@ -520,7 +521,6 @@ along with the `.hx/.gitignore` it added to hide it.
 {
   "theme": "dark",                    // dark | light | ansi, or a file in ~/.hx/themes
   "quiet_startup": false,             // skip the startup header
-  "telemetry": false,
 
   "models": {
     "model": "anthropic/claude-sonnet-4.5",
@@ -563,9 +563,17 @@ along with the `.hx/.gitignore` it added to hide it.
   "tui": {
     "enterWhileBusy": "queue",        // queue | steer - what enter does mid-turn
     "fullscreen": false               // true takes the whole window (see /fullscreen)
+  },
+
+  "tools": {
+    "hashline": true                  // Read labels lines with content anchors Edit accepts
   }
 }
 ```
+
+`hooks` is configured in the same files but is deliberately not part of this
+merge: it is read per layer, and only from your own settings. See
+[Extending it](#extending-it).
 
 Environment overrides: `HX_MODEL`, `HX_SUBAGENT_MODEL`, `HX_MAX_TOKENS`,
 `HX_PERMISSION_MODE`, `HX_SANDBOX`, `HX_COMPACT_AT`, `HX_GIT_NOTICES`,
@@ -727,6 +735,54 @@ rest to the session directory, and hands the model that path to grep.
 
 ---
 
+## Reading and editing code
+
+**Line anchors.** `Read` labels every line with a short content hash:
+
+```
+     1 a3f9	def handle(request):
+     2 7c1c	    if request.method == "POST":
+```
+
+The anchor is a hash of the line and its two neighbours, truncated to the
+narrowest width that is unambiguous in that file. `Edit` takes those anchors
+instead of retyped content:
+
+```json
+{ "file_path": "app.py", "hashline": [{ "start": "a3f9", "end": "7c1c", "new_string": "..." }] }
+```
+
+The span is inclusive; omit `end` to replace one line, pass an empty
+`new_string` to delete. Anchors are recomputed from disk when the edit runs, so
+a file that moved under the model fails to resolve and the patch is rejected
+rather than applied at stale coordinates. Exact-match `old_string` still works
+and is unchanged; anchors are a second shape, not a replacement. Turn the whole
+thing off with `"tools": {"hashline": false}` and reads go back to plain
+`cat -n`.
+
+**Symbols** answers structural questions with a parse tree rather than a
+regex — three modes, `outline` for one file's shape, `definition` for where a
+name is defined, `references` for where it is used:
+
+```
+Symbols(mode="references", symbol="handle")
+```
+
+Because it matches identifier nodes, the same word in a comment or a string
+literal never matches. It cannot resolve types, so an unrelated symbol with the
+same name in another file still does; it is tighter than `Grep`, not a language
+server. Python, TypeScript, JavaScript, Go and Rust.
+
+It needs grammars that are not installed by default, and the tool is simply not
+registered without them — its schema never enters the cached prefix advertising
+something that cannot run:
+
+```sh
+uv tool install "hx-cli[symbols]"
+```
+
+---
+
 ## Extending it
 
 **Skills** are directories containing `SKILL.md` with YAML frontmatter:
@@ -783,6 +839,68 @@ Or `hx mcp add local python server.py`. Tools arrive namespaced
 with a per-server timeout; one that is broken or slow logs a warning and is
 dropped rather than taking the session with it.
 
+**Hooks** are shell commands HX runs at named points in a turn. Four events:
+`PreToolUse`, `PostToolUse`, `UserPromptSubmit` and `Stop`.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "~/.hx/guard-bash.sh", "timeout": 10 }]
+      }
+    ],
+    "PostToolUse": [
+      { "matcher": "Edit|Write", "hooks": [{ "type": "command", "command": "ruff check --quiet" }] }
+    ]
+  }
+}
+```
+
+`matcher` is a regex matched against the whole tool name; omit it, or use `*`,
+to match every tool. The hook reads a JSON event on stdin — `session_id`,
+`cwd`, `hook_event_name`, and `tool_name`/`tool_input` where they apply — and
+answers with its exit code:
+
+| Exit | Means |
+|---|---|
+| `0` | allow |
+| `2` | block. stderr becomes the reason the model is given |
+| anything else | the hook is broken. Reported as a notice; the action proceeds |
+
+That last row is deliberate: a typo in a shell command must not be able to
+wedge a session. Only an explicit refusal stops anything.
+
+A hook may also print JSON on stdout: `{"decision": "block", "reason": "..."}`
+refuses, `{"updatedInput": {...}}` rewrites a tool's arguments before the
+permission engine sees them, and `{"additionalContext": "..."}` adds a note for
+the model to read. The format matches Claude Code's, so hooks already written
+against that work here unchanged.
+
+A worked example ships in the repository:
+[`examples/hooks/check.sh`](https://github.com/aletisunil/hx/blob/main/examples/hooks/check.sh)
+runs the checker a project already has — `ruff`, `tsc`, `go vet`, `cargo
+check` — against the one file the model just edited, and returns whatever it
+says as `additionalContext`. The model sees the errors appended to its own edit
+result and fixes them on the next turn, rather than discovering them at test
+time. It exits 0 either way: by `PostToolUse` the write has already landed, so
+refusing it would be an answer to something that already happened.
+
+```sh
+curl -o ~/.hx/check.sh https://raw.githubusercontent.com/aletisunil/hx/main/examples/hooks/check.sh
+chmod +x ~/.hx/check.sh
+```
+
+**Where hooks may be declared is a security boundary.** They are loaded from
+`~/.hx/settings.json` and `~/.hx/projects/<slug>/settings.local.json` only.
+Hooks in a project's checked-in `.hx/settings.json` are ignored and listed by
+`/hooks`, because that file arrives with a clone and cloning a repository must
+never be enough to run commands on the machine that cloned it. To adopt a
+shared hook, copy it into your own settings — a deliberate act by the person
+who will run it. Subagents inherit the parent's hooks, so a guard cannot be
+bypassed by delegating through `Task`.
+
 ---
 
 ## Development
@@ -833,9 +951,10 @@ src/hx/
   core/         loop, context assembly, compaction, late injection, sessions, usage
   auth/         credential store, OAuth flows, per-route resolution
   providers/    OpenRouter, Codex, Devin, the model catalogue, a scripted provider for tests
-  tools/        Bash, Read, Write, Edit, Glob, Grep, TodoWrite, Task, WebSearch,
-                WebFetch, output capping
+  tools/        Bash, Read, Write, Edit, Glob, Grep, Symbols, TodoWrite, Task,
+                WebSearch, WebFetch, line anchors, output capping
   permissions/  rule engine, shell decomposition, Seatbelt/bubblewrap
+  hooks/        the four events, the trust boundary, subprocess execution
   skills/ agents/ mcp/
   keys.py       keybinding registry: ids, defaults, descriptions, user overrides
   term/         the renderer: raw mode, input decoding, the differ, the screen
@@ -898,12 +1017,13 @@ streaming with prefix caching and accurate cost accounting, session persistence
 and resume, the tool suite, the permission engine and OS sandbox, late
 injection, compaction, output capping, skills, subagents, MCP, and the TUI.
 
-Two routes to a model: an OpenRouter API key, or a ChatGPT Plus/Pro
-subscription over OAuth. The model id decides which.
+Three routes to a model: an OpenRouter API key, a ChatGPT Plus/Pro
+subscription over OAuth, or a Devin subscription over OAuth. The model id
+decides which.
 
 Published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/), released
 from CI on a tag.
 
-The one thing still unproven in CI is a live call on either route: the `live`
-tests exist and cover both wire formats, tool use, reasoning replay and a
+The one thing still unproven in CI is a live call on any route: the `live`
+tests exist and cover all three wire formats, tool use, reasoning replay and a
 genuine cache hit, but they need a credential and are deselected by default.

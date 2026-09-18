@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -34,14 +35,29 @@ def tracker() -> FileTracker:
 async def test_read_numbers_lines(ctx: ToolContext, tracker: FileTracker) -> None:
     (ctx.cwd / "a.py").write_text("alpha\nbeta\n")
     result = await ReadTool(tracker).run({"file_path": "a.py"}, ctx)
-    assert "     1\talpha" in result.content
-    assert "     2\tbeta" in result.content
+    assert re.search(r"^     1 [0-9a-f]{4,8}\talpha$", result.content, re.M)
+    assert re.search(r"^     2 [0-9a-f]{4,8}\tbeta$", result.content, re.M)
+
+
+async def test_read_without_hashline_is_plain_cat_n(tmp_path: Path, tracker: FileTracker) -> None:
+    """``tools.hashline: false`` restores the unlabelled format byte for byte."""
+    settings = load_settings(tmp_path, overrides={"tools": {"hashline": False}})
+    ctx = ToolContext(
+        cwd=tmp_path,
+        session_id="test-session",
+        tool_use_id="t1",
+        settings=settings,
+        emit_progress=lambda _chunk: None,
+    )
+    (tmp_path / "a.py").write_text("alpha\nbeta\n")
+    result = await ReadTool(tracker).run({"file_path": "a.py"}, ctx)
+    assert result.content == "     1\talpha\n     2\tbeta"
 
 
 async def test_read_windows_with_offset_and_limit(ctx: ToolContext, tracker: FileTracker) -> None:
     (ctx.cwd / "big.txt").write_text("\n".join(str(i) for i in range(100)))
     result = await ReadTool(tracker).run({"file_path": "big.txt", "offset": 50, "limit": 5}, ctx)
-    assert "    50\t49" in result.content
+    assert re.search(r"^    50 [0-9a-f]{4,8}\t49$", result.content, re.M)
     assert "more lines" in result.content
 
 

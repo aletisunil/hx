@@ -142,6 +142,11 @@ def build_default_registry(
     registry.register(EditTool(file_tracker, checkpoints))
     registry.register(GlobTool())
     registry.register(GrepTool())
+
+    from hx.tools.symbols import SymbolsTool, available
+
+    if available():
+        registry.register(SymbolsTool())
     if todos is not None:
         registry.register(TodoWriteTool(todos, bus))
     if auth is not None and auth.has_credential(TAVILY):

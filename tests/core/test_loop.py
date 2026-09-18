@@ -17,6 +17,8 @@ from hx.core.messages import StopReason
 from hx.core.session import new_session
 from hx.core.title import TITLE_MAX_TOKENS
 from hx.core.usage import TurnUsage
+from hx.hooks.engine import HookEngine
+from hx.hooks.spec import HookCommand, HookEvent
 from hx.providers.base import StreamDelta, StreamEnd, StreamItem
 from hx.providers.fake import FakeProvider, text_turn, tool_turn
 from hx.providers.models import ModelRegistry
@@ -67,6 +69,7 @@ def build_loop(
     tmp_path: Path,
     tools: ToolRegistry | None = None,
     title: str | None = "scripted session",
+    hooks: HookEngine | None = None,
 ) -> Harness:
     provider = FakeProvider(script)
     bus = EventBus()
@@ -87,6 +90,7 @@ def build_loop(
         bus=bus,
         settings=load_settings(tmp_path),
         model_info=ModelRegistry().get_or_default("anthropic/claude-sonnet-4.5"),
+        hooks=hooks,
     )
     return Harness(provider, loop, bus)
 
@@ -403,3 +407,127 @@ async def test_a_subagent_session_is_not_renamed_on_close(hx_home: Path, tmp_pat
 
     assert h.loop.session.meta.title is None
     assert len(h.provider.requests) == 1
+
+
+# --- hooks ------------------------------------------------------------------
+
+
+def _hooks(tmp_path: Path, event: HookEvent, *commands: HookCommand) -> HookEngine:
+    return HookEngine(hooks={event: list(commands)}, cwd=tmp_path, session_id="s1")
+
+
+async def test_pre_tool_use_hook_blocks_the_call(
+    hx_home: Path, tmp_path: Path, registry: ToolRegistry
+) -> None:
+    """The tool never runs and the model is told why."""
+    hooks = _hooks(
+        tmp_path,
+        HookEvent.PRE_TOOL_USE,
+        HookCommand("echo 'Echo is off limits' >&2; exit 2", timeout=10),
+    )
+    script = [tool_turn("Echo", {"text": "hi"}), text_turn("understood")]
+    async with build_loop(script, tmp_path, registry, hooks=hooks) as h:
+        await h.loop.run("go")
+
+    results = [m for m in h.loop.session.messages if m.tool_results()]
+    block = results[0].tool_results()[0]
+    assert block.is_error
+    assert "Echo is off limits" in block.content
+    assert "hi" not in block.content
+
+
+async def test_pre_tool_use_hook_can_rewrite_the_input(
+    hx_home: Path, tmp_path: Path, registry: ToolRegistry
+) -> None:
+    payload = '{"updatedInput": {"text": "rewritten"}}'
+    hooks = _hooks(tmp_path, HookEvent.PRE_TOOL_USE, HookCommand(f"echo '{payload}'", timeout=10))
+    script = [tool_turn("Echo", {"text": "original"}), text_turn("ok")]
+    async with build_loop(script, tmp_path, registry, hooks=hooks) as h:
+        await h.loop.run("go")
+
+    results = [m for m in h.loop.session.messages if m.tool_results()]
+    assert results[0].tool_results()[0].content == "rewritten"
+
+
+async def test_post_tool_use_hook_appends_context(
+    hx_home: Path, tmp_path: Path, registry: ToolRegistry
+) -> None:
+    payload = '{"additionalContext": "note: suite is red"}'
+    hooks = _hooks(tmp_path, HookEvent.POST_TOOL_USE, HookCommand(f"echo '{payload}'", timeout=10))
+    script = [tool_turn("Echo", {"text": "hi"}), text_turn("ok")]
+    async with build_loop(script, tmp_path, registry, hooks=hooks) as h:
+        await h.loop.run("go")
+
+    results = [m for m in h.loop.session.messages if m.tool_results()]
+    content = results[0].tool_results()[0].content
+    assert content.startswith("hi")
+    assert "note: suite is red" in content
+
+
+async def test_user_prompt_submit_hook_can_refuse_the_turn(hx_home: Path, tmp_path: Path) -> None:
+    hooks = _hooks(
+        tmp_path,
+        HookEvent.USER_PROMPT_SUBMIT,
+        HookCommand("echo 'not now' >&2; exit 2", timeout=10),
+    )
+    async with build_loop([text_turn("unreachable")], tmp_path, hooks=hooks) as h:
+        result = await h.loop.run("go")
+
+    assert result.stop_reason is StopReason.ERROR
+    assert result.error == "not now"
+    assert h.provider.requests == []
+    assert h.loop.session.messages == []
+
+
+async def test_a_broken_hook_does_not_block_the_call(
+    hx_home: Path, tmp_path: Path, registry: ToolRegistry
+) -> None:
+    """A typo in a hook is a notice, not a wedged session."""
+    hooks = _hooks(tmp_path, HookEvent.PRE_TOOL_USE, HookCommand("exit 9", timeout=10))
+    script = [tool_turn("Echo", {"text": "hi"}), text_turn("ok")]
+    async with build_loop(script, tmp_path, registry, hooks=hooks) as h:
+        await h.loop.run("go")
+
+    results = [m for m in h.loop.session.messages if m.tool_results()]
+    assert results[0].tool_results()[0].content == "hi"
+    assert any("hook" in getattr(e, "message", "") for e in h.events)
+
+
+async def test_stop_hook_fires_when_the_turn_ends(hx_home: Path, tmp_path: Path) -> None:
+    marker = tmp_path / "stopped"
+    hooks = _hooks(tmp_path, HookEvent.STOP, HookCommand(f"touch {marker}", timeout=10))
+    async with build_loop([text_turn("done")], tmp_path, hooks=hooks) as h:
+        await h.loop.run("go")
+
+    assert marker.exists()
+
+
+async def test_stop_hook_fires_when_the_turn_falls_over(hx_home: Path, tmp_path: Path) -> None:
+    """The exits nobody planned are the ones a cleanup hook is needed on."""
+    marker = tmp_path / "stopped"
+    hooks = _hooks(tmp_path, HookEvent.STOP, HookCommand(f"touch {marker}", timeout=10))
+    # An empty script makes FakeProvider raise ProviderError on the first turn.
+    async with build_loop([], tmp_path, hooks=hooks) as h:
+        result = await h.loop.run("go")
+
+    assert result.stop_reason is StopReason.ERROR
+    assert marker.exists()
+
+
+async def test_subagents_inherit_the_parent_hooks(hx_home: Path, tmp_path: Path) -> None:
+    """A guard that Task could bypass would not be a guard."""
+    from hx.agents.definitions import AgentDefinition
+    from hx.agents.subagent import SubagentRunner
+
+    hooks = _hooks(tmp_path, HookEvent.PRE_TOOL_USE, HookCommand("exit 2", timeout=10))
+    runner = SubagentRunner(
+        definitions={"probe": AgentDefinition(name="probe", description="d", system_prompt="s")},
+        provider=FakeProvider([]),
+        tools=ToolRegistry(),
+        permissions=None,
+        bus=EventBus(),
+        settings=load_settings(tmp_path),
+        hooks=hooks,
+    )
+    child = runner._build_loop(runner.definitions["probe"], "sub-1")
+    assert child.hooks is hooks

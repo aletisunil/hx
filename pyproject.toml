@@ -23,7 +23,6 @@ dependencies = [
   "httpx>=0.27",
   "pydantic>=2.7",
   "pyyaml>=6.0",
-  "click>=8.1",
   # System trust store, so a corporate proxy CA the machine already trusts is
   # enough - certifi alone is why `hx` fails on networks where browsers work.
   "truststore>=0.10",
@@ -37,6 +36,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Tree-sitter grammars for the Symbols tool. Optional because the wheels are
+# large and the rest of HX works without them - the tool is simply not
+# registered when the import fails.
+symbols = [
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.7",
+]
 dev = [
   "pytest>=8.2",
   "pytest-asyncio>=0.23",

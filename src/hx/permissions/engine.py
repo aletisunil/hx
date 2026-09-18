@@ -31,7 +31,7 @@ class GrantScope(StrEnum):
     """Persisted to ``.hx/settings.local.json``."""
 
 
-DEFAULT_MUTATING_TOOLS = frozenset({"Bash", "Write", "Edit", "MultiEdit", "Task", "NotebookEdit"})
+DEFAULT_MUTATING_TOOLS = frozenset({"Bash", "Write", "Edit", "Task"})
 """Fallback when the caller does not supply the registry's own metadata."""
 
 
@@ -85,7 +85,7 @@ Asker = Callable[[PermissionRequest], Awaitable[PermissionAnswer]]
 
 class PermissionEngine:
     #: Modes that never prompt for a file edit.
-    EDIT_TOOLS: ClassVar[frozenset[str]] = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+    EDIT_TOOLS: ClassVar[frozenset[str]] = frozenset({"Write", "Edit"})
 
     def __init__(
         self,

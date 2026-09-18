@@ -151,6 +151,15 @@ class TuiSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolSettings:
+    hashline: bool = True
+    """``Read`` labels lines with content anchors and ``Edit`` accepts them.
+
+    Off restores the plain ``cat -n`` read format. See
+    :mod:`hx.tools.anchors`."""
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     """Fully resolved configuration for one HX session."""
 
@@ -161,10 +170,10 @@ class Settings:
     bash: BashSettings = field(default_factory=BashSettings)
     prompt: PromptSettings = field(default_factory=PromptSettings)
     tui: TuiSettings = field(default_factory=TuiSettings)
+    tools: ToolSettings = field(default_factory=ToolSettings)
     theme: str = "dark"
     quiet_startup: bool = False
     """Skip the startup header. For anyone who has read it already."""
-    telemetry: bool = False
 
 
 def load_settings(
@@ -385,6 +394,7 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
     bash = data.get("bash", {})
     prompt = data.get("prompt", {})
     tui = data.get("tui", {})
+    tools = data.get("tools", {})
 
     mode_raw = permissions.get("mode", PermissionMode.DEFAULT)
     try:
@@ -457,9 +467,11 @@ def _build_settings(data: dict[str, Any], cwd: Path) -> Settings:
             append=tuple(_as_list(prompt.get("append", ()))),
         ),
         tui=TuiSettings(enter_while_busy=enter_while_busy, fullscreen=fullscreen),
+        tools=ToolSettings(
+            hashline=bool(tools.get("hashline", _default(ToolSettings, "hashline"))),
+        ),
         theme=data.get("theme", "dark"),
         quiet_startup=bool(data.get("quietStartup", data.get("quiet_startup", False))),
-        telemetry=bool(data.get("telemetry", False)),
     )
 
 

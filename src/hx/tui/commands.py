@@ -582,6 +582,38 @@ async def cmd_mcp(ctx: CommandContext, args: str) -> None:
     )
 
 
+async def cmd_hooks(ctx: CommandContext, args: str) -> None:
+    """``/hooks`` - what is wired to each event, and what was refused."""
+    engine = ctx.app.loop.hooks
+    if engine is None:
+        ctx.app.notice("Hooks are not available in this session.", "warning")
+        return
+
+    loaded = engine.all_commands()
+    lines: list[str] = []
+    if loaded:
+        total = sum(len(commands) for commands in loaded.values())
+        lines.append(f"Hooks ({total}):")
+        for event, commands in loaded.items():
+            for hook in commands:
+                matcher = hook.matcher or "*"
+                lines.append(f"  {event!s:<18} {matcher:<12} {hook.command}")
+                lines.append(f"  {'':<18} {'':<12} from {hook.source}")
+    else:
+        lines.append("No hooks configured.")
+        lines.append('  Add them to ~/.hx/settings.json under "hooks".')
+
+    if engine.ignored:
+        lines.append("")
+        lines.append(f"Ignored, declared in the project's shared settings ({len(engine.ignored)}):")
+        lines += [f"  {entry}" for entry in engine.ignored]
+        lines.append("")
+        lines.append("  Hooks run shell commands, so a file that arrives with a clone")
+        lines.append("  cannot register one. Copy it into your own settings to run it.")
+
+    ctx.app.notice("\n".join(lines), "warning" if engine.ignored else "info")
+
+
 async def cmd_permissions(ctx: CommandContext, args: str) -> None:
     """``/permissions`` - view the active rules and what is actually enforcing them."""
     engine = ctx.app.loop.permissions
@@ -1003,6 +1035,7 @@ def build_default_commands() -> CommandRegistry:
         Command("skills", "List installed skills", cmd_skills),
         Command("agents", "List subagent types", cmd_agents),
         Command("mcp", "MCP server status", cmd_mcp),
+        Command("hooks", "Show configured hooks", cmd_hooks),
         Command("permissions", "Show permission rules and sandbox", cmd_permissions),
         Command("mode", "Set the permission mode", cmd_mode, "[mode]", takes_args=True),
         Command("init", "Generate an AGENTS.md for this project", cmd_init),
