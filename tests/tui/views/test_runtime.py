@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pyte
 import pytest
@@ -18,13 +19,19 @@ from hx.core.context import ContextBuilder
 from hx.core.events import EventBus
 from hx.core.lateinject import InjectionRegistry
 from hx.core.loop import AgentLoop
+from hx.core.messages import StopReason
 from hx.core.session import new_session
+from hx.core.usage import TurnUsage
+from hx.providers.base import StreamDelta, StreamEnd
+from hx.providers.fake import tool_turn
 from hx.providers.models import ModelRegistry
 from hx.term.terminal import FakeTerminal
 from hx.term.width import strip_ansi
+from hx.tools.base import Tool, ToolContext, ToolResult
 from hx.tools.registry import ToolRegistry
 from hx.tui import paint
 from hx.tui.runtime import HXSession
+from hx.tui.views.blocks import ThinkingMessage, ToolBlock, UserMessage
 from tests.tui.support import MODEL, FakeProvider, text_turn
 
 pytestmark = pytest.mark.asyncio
@@ -35,7 +42,11 @@ def _pinned_colors() -> None:
     paint.set_color_mode("truecolor")
 
 
-def build(tmp_path: Path, script: list[object] | None = None) -> HXSession:
+def build(
+    tmp_path: Path,
+    script: list[object] | None = None,
+    tools: ToolRegistry | None = None,
+) -> HXSession:
     bus = EventBus()
     models = ModelRegistry()
     session = new_session(tmp_path, MODEL)
@@ -43,7 +54,7 @@ def build(tmp_path: Path, script: list[object] | None = None) -> HXSession:
     loop = AgentLoop(
         provider=FakeProvider(script if script is not None else [text_turn("an answer")]),
         session=session,
-        tools=ToolRegistry(),
+        tools=tools if tools is not None else ToolRegistry(),
         permissions=None,
         context=ContextBuilder("sys", tmp_path),
         compactor=None,
@@ -490,3 +501,67 @@ async def test_showing_the_plan_without_one_says_so(hx_home: Path, tmp_path: Pat
         session.show_todos()
         await driver.settle()
         assert any("No plan yet" in line for line in driver.display())
+
+
+class EchoTool(Tool):
+    """A tool with something to show: a header, a param and some output."""
+
+    name = "Echo"
+    description = "echo"
+    mutating = False
+
+    def schema(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+
+    async def run(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        return ToolResult(content=params["text"], summary="echoed")
+
+
+async def test_replaying_draws_the_tool_calls_rather_than_blank_bars(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A resumed session shows the calls it made.
+
+    Tool results ride on a ``user``-role message with no text (see
+    :func:`hx.core.messages.tool_result_message`), and replaying one as a user
+    message drew an empty tinted bar where the call had been.
+    """
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+    script = [tool_turn("Echo", {"text": "pong"}), text_turn("the model answered")]
+    session = build(tmp_path, script, tools=tools)
+    async with Driver(session) as driver:
+        driver.type("the user asked\r")
+        await driver.settle(rounds=40)
+
+        session._replay_transcript()
+        await driver.settle()
+
+        blocks = session.view.transcript.blocks
+        assert not [b for b in blocks if isinstance(b, UserMessage) and not b.text.strip()]
+        assert [b for b in blocks if isinstance(b, ToolBlock)]
+        replayed = "\n".join(strip_ansi(line) for block in blocks for line in block.render(80))
+        assert "echo" in replayed
+        assert "pong" in replayed
+
+
+async def test_replaying_brings_back_the_reasoning(hx_home: Path, tmp_path: Path) -> None:
+    """Reasoning is stored with the turn, so a resume can show it again."""
+    script = [
+        [
+            StreamDelta(thinking="weighing the options"),
+            StreamDelta(text="the model answered"),
+            StreamEnd(stop_reason=StopReason.END_TURN, usage=TurnUsage()),
+        ]
+    ]
+    session = build(tmp_path, script)
+    async with Driver(session) as driver:
+        driver.type("the user asked\r")
+        await driver.settle(rounds=40)
+
+        session._replay_transcript()
+        await driver.settle()
+
+        blocks = session.view.transcript.blocks
+        thinking = [b for b in blocks if isinstance(b, ThinkingMessage)]
+        assert [b.text for b in thinking] == ["weighing the options"]

@@ -15,6 +15,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hx.core import events as ev
+from hx.core.messages import (
+    ContentBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from hx.core.usage import format_tokens
 from hx.git import BranchWatcher
 from hx.term.loop import TuiRunner
@@ -155,6 +162,11 @@ class HXSession:
 
         self.view.dock.hints.set_hints(HINTS)
         self._refresh_status()
+        if self.loop.session.active_messages():
+            # ``hx resume <id>`` loads the session before this object exists, so
+            # nothing has drawn it: the in-TUI ``/resume`` replays on its way in
+            # and this is the same moment for the session HX started on.
+            self._replay_transcript()
         if self.loop.permissions is not None:
             self.loop.permissions.asker = self.ask_permission
 
@@ -264,6 +276,15 @@ class HXSession:
 
     def notice(self, text: str, level: str = "info") -> None:
         self._notice(text, level)
+
+    def repaint(self) -> None:
+        """Draw soon. For a component that changes without a keystroke.
+
+        A keypress already ends in a frame; a sign-in flow updating its dialog
+        from a background task does not, and without this the dialog stays on
+        its first frame while the flow behind it moves on.
+        """
+        self.runner.request_render()
 
     def show(self, component: Any) -> None:
         """Put something on the overlay without waiting for it.
@@ -519,16 +540,74 @@ class HXSession:
 
         Rebuilt rather than patched: the screen no longer matches the history,
         and there is no reliable way to reconcile the two.
+
+        Everything the turn produced is redrawn, not only its text - reasoning,
+        tool calls, and the results those calls returned. The session file is
+        the whole record of a resumed conversation, so a block skipped here is
+        one the user has no other way of ever seeing again.
         """
         transcript = self.view.transcript
         transcript.clear()
         self._assistant = None
         self._thinking = None
-        for message in self.loop.session.active_messages():
+        messages = self.loop.session.active_messages()
+        results = {
+            result.tool_use_id: result for message in messages for result in message.tool_results()
+        }
+        for message in messages:
             if message.role == "user":
-                transcript.append(UserMessage(message.text()))
-            elif text := message.text():
-                transcript.append(AssistantMessage(text))
+                # Tool results ride on a user-role message that carries no text
+                # of its own; each is drawn with the call that produced it.
+                # Replaying one as a user message drew an empty tinted bar.
+                if text := message.text():
+                    transcript.append(UserMessage(text))
+                continue
+            for block in message.content:
+                self._replay_block(block, results)
+
+    def _replay_block(self, block: ContentBlock, results: dict[str, ToolResultBlock]) -> None:
+        """Draw one stored content block the way the live turn drew it."""
+        transcript = self.view.transcript
+        match block:
+            case TextBlock():
+                if block.text.strip():
+                    transcript.append(AssistantMessage(block.text))
+            case ThinkingBlock():
+                if block.text.strip():
+                    transcript.append(ThinkingMessage(block.text))
+            case ToolUseBlock():
+                transcript.append(self._replayed_call(block, results.get(block.id)))
+            case _:
+                pass
+
+    def _replayed_call(self, call: ToolUseBlock, result: ToolResultBlock | None) -> Any:
+        """The block one stored tool call should be drawn as.
+
+        A silent tool is redrawn as whatever drew it the first time - the plan
+        itself for TodoWrite - and, exactly as live, falls back to its own tool
+        block when the call failed and there is no plan to show.
+
+        The summary, the timing and the renderer metadata are live-only: the
+        transcript keeps what the model needs to continue the conversation, not
+        what the screen needed to draw it. The result content stands in, which
+        is the part the reader came back for.
+        """
+        params = dict(call.input or {})
+        failed = result is not None and result.is_error
+        if call.name.lower() in SILENT_TOOLS and not failed:
+            return TodoBlock(params.get("todos") or [])
+        return ToolBlock(
+            ToolCall(
+                name=call.name,
+                params=params,
+                cwd=Path(self.settings.cwd),
+                output=result.content if result is not None else "",
+                is_error=failed,
+                # No result means the turn was interrupted mid-call, and the
+                # block says so rather than claiming a finish that never came.
+                finished=result is not None,
+            )
+        )
 
     def show_todos(self) -> None:
         """Re-emit the current plan as a transcript block."""
