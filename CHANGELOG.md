@@ -26,6 +26,34 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Devin subscription as a third route: `hx auth login devin` (or `/login`)
+  signs in through the browser, and `devin/<model>` ids run against the plan -
+  every model the account includes, listed by `/model` and refreshed with
+  `/models refresh`. Reasoning depths Devin ships as separate models are folded
+  into one, so `/effort` picks the depth, and router models such as
+  `devin/adaptive` are assigned per turn. A session token in `DEVIN_API_KEY`
+  works where there is no browser. Devin Enterprise accounts sign in through
+  the same command by choosing "Log in with Devin for Enterprise".
+
+### Fixed
+
+- The `/login` dialog no longer sits on "Starting…" for the whole sign-in: it
+  now updates as the flow moves on, and keeps the instructions on screen
+  alongside the link, progress and paste field instead of overwriting them.
+
+- Resizing the terminal no longer crashes the session. A window manager sends
+  a burst of SIGWINCH for one drag of a corner, and a signal landing while the
+  previous frame was still writing re-entered stdout: `RuntimeError: reentrant
+  call inside <_io.BufferedWriter>`, and HX was gone. The redraw is handed to
+  the event loop now, and the burst collapses into one repaint.
+
+- `/resume` and `hx resume` bring the whole conversation back, not only its
+  text: the reasoning, tool calls, their output and the plan are drawn again.
+  A resumed session used to show a blank tinted bar for each tool result and
+  nothing at all for the calls themselves.
+
 ---
 
 ## [0.2.1] - 2026-09-14

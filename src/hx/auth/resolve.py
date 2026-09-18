@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hx.auth.oauth import codex as codex_oauth
+from hx.auth.oauth import devin as devin_oauth
 from hx.auth.store import (
     OPENROUTER,
     TAVILY,
@@ -35,6 +36,8 @@ from hx.auth.store import (
 PROVIDER_ENV: dict[str, tuple[str, ...]] = {
     OPENROUTER: ("HX_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"),
     TAVILY: ("HX_TAVILY_API_KEY", "TAVILY_API_KEY"),
+    # A Devin session token, for a machine with no browser to sign in from.
+    devin_oauth.PROVIDER_ID: ("HX_DEVIN_API_KEY", "DEVIN_API_KEY"),
 }
 
 #: Providers whose environment variable wins over the saved credential.
@@ -237,6 +240,11 @@ def missing_message(provider_id: str) -> str:
         return (
             "Not signed in to ChatGPT. Run `hx auth login openai-codex`, or `/login` "
             "inside HX. Requires a ChatGPT Plus or Pro subscription."
+        )
+    if provider_id == devin_oauth.PROVIDER_ID:
+        return (
+            "Not signed in to Devin. Run `hx auth login devin`, or `/login` inside HX. "
+            "Requires a Devin subscription."
         )
     if provider_id == TAVILY:
         return (

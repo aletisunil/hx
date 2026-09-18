@@ -50,13 +50,14 @@ Requires Python 3.11+. macOS and Linux. Update with `hx upgrade`.
 
 ### Credentials
 
-HX reaches models over two routes. Which one serves a turn is decided by the
+HX reaches models over three routes. Which one serves a turn is decided by the
 model id alone, so "what paid for that" is always answerable by reading it:
 
 | Model id | Route | Billing |
 |---|---|---|
 | `anthropic/claude-sonnet-4.5`, `openai/gpt-5`, … | OpenRouter | per token, API key |
 | `openai-codex/gpt-5.6-terra` | ChatGPT Plus/Pro | your subscription |
+| `devin/swe-1-6`, `devin/claude-opus-5`, … | Devin | your subscription |
 
 Credentials live in `~/.hx/auth.json`, mode 0600, one entry per route.
 
@@ -150,6 +151,38 @@ They join the `/model` picker on the next start. HX cannot ask how large an
 unknown model's context window is, so it assumes a conservative 200k — that
 costs an accurate context gauge, not the use of the model.
 
+**Devin.** Sign in with the same browser flow the official `devin` CLI uses,
+and run every model your Devin plan includes - SWE-1.6, and whatever frontier
+models the plan offers - against the subscription:
+
+```sh
+hx auth login devin             # or /login inside the TUI
+hx --model devin/swe-1-6
+hx auth logout devin
+```
+
+**Devin Enterprise** signs in the same way: on the page that opens, choose
+"Log in with Devin for Enterprise", enter your company, and finish through its
+identity provider. Your admin has to grant the "Use Devin CLI" permission first.
+Usage counts toward the organization's allocation, and an enterprise tenant
+served from its own API server is followed there for both turns and the model
+list.
+
+The browser opens to `app.devin.ai` and redirects to a loopback listener on
+`127.0.0.1:59653`. Over SSH, paste the final redirect URL into the prompt
+instead. A Devin login does not refresh: when it expires, HX says so and asks
+you to sign in again. On a machine with no browser at all, a session token in
+`HX_DEVIN_API_KEY` or `DEVIN_API_KEY` is used when nothing is saved.
+
+Signing in fetches the account's own model list, and `/model` offers exactly
+that; `/models refresh` asks again. Devin publishes each reasoning depth as a
+model of its own - Claude Opus 5 High, Claude Opus 5 Max - and HX folds each
+family into one model, so `/effort` picks the depth on Devin exactly as it does
+on Codex. A fast lane or a 1M-context lane stays a separate model, since it
+changes what a turn costs or how much fits. Router models such as
+`devin/adaptive` are resolved to a concrete model on every turn by Devin itself.
+If the list cannot be fetched, `devin/swe-1-6` and `devin/swe-1-6-fast` stand in.
+
 **Web search.** Optional, and the one credential that is not a model route.
 It powers two tools:
 
@@ -235,7 +268,7 @@ hx --system-prompt @p.md    # replace the system prompt for one run
 hx --append-system-prompt "Always run the tests"   # add to it; repeatable
 hx mcp list|add|remove      # manage MCP servers
 hx auth [set|clear]         # manage the OpenRouter key
-hx auth login [provider]    # sign in (openrouter, openai-codex)
+hx auth login [provider]    # sign in (openrouter, openai-codex, devin)
 hx auth logout <provider>   # forget a stored credential
 hx docs [section]           # the manual; no argument lists its sections
 hx changelog [version]      # what shipped in each version
@@ -772,6 +805,10 @@ OPENROUTER_API_KEY=... uv run pytest -m live tests/test_live.py
 # the Codex route draws on your ChatGPT subscription instead
 hx auth login openai-codex
 uv run pytest -m live tests/test_live_codex.py
+
+# and the Devin route on your Devin subscription
+hx auth login devin
+uv run pytest -m live tests/test_live_devin.py
 ```
 
 They are the only place the wire formats, streaming, tool use and a genuine
@@ -795,7 +832,7 @@ src/hx/
   cli.py config.py paths.py frontmatter.py git.py
   core/         loop, context assembly, compaction, late injection, sessions, usage
   auth/         credential store, OAuth flows, per-route resolution
-  providers/    OpenRouter, Codex, the model catalogue, a scripted provider for tests
+  providers/    OpenRouter, Codex, Devin, the model catalogue, a scripted provider for tests
   tools/        Bash, Read, Write, Edit, Glob, Grep, TodoWrite, Task, WebSearch,
                 WebFetch, output capping
   permissions/  rule engine, shell decomposition, Seatbelt/bubblewrap

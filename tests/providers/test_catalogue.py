@@ -10,7 +10,10 @@ from typing import Any
 import httpx
 import pytest
 
-from hx.providers.models import CODEX_MODELS, ModelRegistry
+from hx.providers.models import CODEX_MODELS, DEVIN_MODELS, ModelRegistry
+
+STATIC_IDS = {m.id for m in (*CODEX_MODELS, *DEVIN_MODELS)}
+"""Every subscription route's fallback list: present with no network at all."""
 
 
 class _Resolver:
@@ -49,7 +52,7 @@ async def test_a_failed_refresh_keeps_the_cached_catalogue(
     registry = ModelRegistry()
     assert [m.id for m in registry.all()] == [
         "anthropic/claude-sonnet-4.5",
-        *sorted(m.id for m in CODEX_MODELS),
+        *sorted(STATIC_IDS),
     ]
 
     async def boom(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
@@ -95,7 +98,7 @@ async def test_a_successful_refresh_clears_the_recorded_failure(
 def test_routes_with_no_catalogue_endpoint_survive_a_missing_cache(hx_home: Path) -> None:
     """A machine whose first fetch failed still has the static routes."""
     assert not (hx_home / "models.json").exists()
-    assert {m.id for m in ModelRegistry().all()} == {m.id for m in CODEX_MODELS}
+    assert {m.id for m in ModelRegistry().all()} == STATIC_IDS
 
 
 class _CodexResolver:
@@ -144,7 +147,7 @@ async def test_the_accounts_own_list_replaces_the_shipped_guess(
 
     codex = {m.id for m in registry.all() if m.provider_id == "openai-codex"}
     assert codex == {"openai-codex/gpt-6-nova"}
-    assert registry.codex_error is None
+    assert registry.subscription_errors() == []
 
 
 async def test_an_empty_answer_is_treated_as_no_answer(
@@ -160,7 +163,7 @@ async def test_an_empty_answer_is_treated_as_no_answer(
     registry = ModelRegistry()
     await registry.refresh(_CodexResolver())
 
-    assert {m.id for m in registry.all()} == {m.id for m in CODEX_MODELS}
+    assert {m.id for m in registry.all()} == STATIC_IDS
 
 
 async def test_a_codex_failure_is_recorded_without_costing_the_rest(
@@ -188,7 +191,8 @@ async def test_a_codex_failure_is_recorded_without_costing_the_rest(
     await registry.refresh(_Both())
 
     assert registry.refresh_error is None
-    assert registry.codex_error is not None and "down" in registry.codex_error
+    failures = dict(registry.subscription_errors())
+    assert "down" in failures["Codex"]
     assert "openai/gpt-5" in {m.id for m in registry.all()}
     # The shipped list still offers models to try.
     assert {m.id for m in CODEX_MODELS} <= {m.id for m in registry.all()}

@@ -14,9 +14,10 @@ touching a widget - which is the fix for a crash where the flow spoke first.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
-from hx.term.component import Widget
+from hx.term.component import Component, Widget
 from hx.term.primitives import Lines, Rule, Spacer, Text
 from hx.tui.glyphs import CURRENT, CURSOR, GUTTER
 from hx.tui.paint import fg, link, rule
@@ -85,36 +86,49 @@ class LoginDialog(Widget, Framed):
     this is on screen - which is exactly how it used to crash.
     """
 
-    def __init__(self, title: str = "Sign in") -> None:
+    def __init__(self, title: str = "Sign in", on_change: Callable[[], None] | None = None) -> None:
+        """``on_change`` asks for a frame. The flow updates this dialog from a
+        background task, where no keystroke will draw it."""
         super().__init__()
         self.title = title
-        self._status = "Starting…"
+        self._on_change = on_change
+        self._instructions = "Starting…"
+        """What to do, from the flow. Kept for the whole sign-in: the route's
+        own advice (Devin's Enterprise button) matters most while it is waiting."""
+        self._note = ""
+        """The latest progress line - a busy port, the token exchange."""
         self._highlight = ""
         self._highlight_url = ""
+        self._paste_label = ""
         self._pasteable = False
         self._typed = ""
         self._paste_future: asyncio.Future[str] | None = None
         self.cancelled = False
+
+    def _changed(self) -> None:
+        self.invalidate()
+        if self._on_change is not None:
+            self._on_change()
 
     # -- the flow's protocol ----------------------------------------------
 
     def show_url(self, url: str, instructions: str) -> None:
         self._highlight = url
         self._highlight_url = url
-        self._status = instructions
-        self.invalidate()
+        self._instructions = instructions
+        self._changed()
 
     def show_device_code(self, user_code: str, verification_uri: str) -> None:
-        self._status = f"Open {verification_uri} and enter this code:"
+        self._instructions = f"Open {verification_uri} and enter this code:"
         self._highlight = user_code
         self._highlight_url = verification_uri
         # Nothing to paste in this flow; the poll decides when it is done.
         self._pasteable = False
-        self.invalidate()
+        self._changed()
 
     def progress(self, message: str) -> None:
-        self._status = message
-        self.invalidate()
+        self._note = message
+        self._changed()
 
     async def prompt_paste(self, message: str) -> str:
         """Resolve when the user submits, never otherwise.
@@ -122,41 +136,48 @@ class LoginDialog(Widget, Framed):
         The browser callback usually wins, in which case this future is simply
         cancelled along with the rest of the flow.
         """
-        self._status = message
+        self._paste_label = message
         self._pasteable = True
         self._typed = ""
-        self.invalidate()
+        self._changed()
         self._paste_future = asyncio.get_running_loop().create_future()
         return await self._paste_future
 
     # -- rendering ---------------------------------------------------------
 
     def draw(self, width: int) -> list[str]:
-        body: list[str] = [fg("muted", self._status)]
-        if self._highlight:
-            body.append(
-                link(self._highlight_url, self._highlight)
-                if self._highlight_url
-                else fg("accent", self._highlight, bold=True)
-            )
-        if self._pasteable:
-            body.append("")
-            body.append(fg("text", self._typed or "") + _cursor_cell())
-
-        hints = [Hint("esc", "cancel")]
-        if self._pasteable:
-            hints.insert(0, Hint("enter", "submit"))
-
-        parts = [
+        # Prose wraps; the URL is a link and is cut to the width instead, since
+        # the whole of it is still what gets opened.
+        parts: list[Component] = [
             Rule(rule("border")),
             Spacer(1),
             Text(fg("accent", self.title, bold=True), 1, 0),
             Spacer(1),
-            Lines(body),
-            Spacer(1),
-            Text(hints_line(hints), 1, 0),
-            *self.closing(),
+            Text(fg("muted", self._instructions), 1, 0),
         ]
+        if self._highlight:
+            parts.append(
+                Lines(
+                    [
+                        link(self._highlight_url, self._highlight)
+                        if self._highlight_url
+                        else fg("accent", self._highlight, bold=True)
+                    ]
+                )
+            )
+        if self._note:
+            parts += [Spacer(1), Text(fg("text", self._note), 1, 0)]
+        if self._pasteable:
+            parts += [
+                Spacer(1),
+                Text(fg("muted", self._paste_label), 1, 0),
+                Lines([fg("text", self._typed or "") + _cursor_cell()]),
+            ]
+
+        hints = [Hint("esc", "cancel")]
+        if self._pasteable:
+            hints.insert(0, Hint("enter", "submit"))
+        parts += [Spacer(1), Text(hints_line(hints), 1, 0), *self.closing()]
         return [line for part in parts for line in part.render(width)]
 
     def handle_input(self, key: str, data: str) -> bool:

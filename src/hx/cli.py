@@ -253,10 +253,8 @@ class Runtime:
 
             self.notices.append(f"Model catalogue refresh failed: {describe(exc)}")
             return
-        if self.models.codex_error:
-            self.notices.append(
-                f"Could not list this account's Codex models: {self.models.codex_error}"
-            )
+        for label, error in self.models.subscription_errors():
+            self.notices.append(f"Could not list this account's {label} models: {error}")
 
     async def aclose(self) -> None:
         if self.mcp is not None:
@@ -821,13 +819,15 @@ AUTH_USAGE = """\
 hx auth                     Show which routes have a credential
 hx auth set [provider]      Paste an API key (hidden) and save it
 hx auth clear [provider]    Remove a saved API key
-hx auth login [provider]    Sign in - openrouter, openai-codex
+hx auth login [provider]    Sign in - openrouter, openai-codex, devin
 hx auth logout <provider>   Forget a stored credential
 
 Providers:
   openrouter      API key. The environment (HX_OPENROUTER_API_KEY, then
                   OPENROUTER_API_KEY) takes precedence over the saved file.
   openai-codex    ChatGPT Plus/Pro subscription, signed in over OAuth.
+  devin           Devin subscription, signed in over OAuth. A session token in
+                  HX_DEVIN_API_KEY or DEVIN_API_KEY is used when none is saved.
   tavily          API key for WebSearch and WebFetch. Not a model route:
                   it is spent per search, not per token.
 """
@@ -863,6 +863,7 @@ class ConsoleLogin:
 def run_login(provider_id: str) -> int:
     """Sign in to one provider and store the credential."""
     from hx.auth.oauth import codex as codex_oauth
+    from hx.auth.oauth.browser import OAuthError
     from hx.auth.oauth.callback import CallbackError
     from hx.auth.resolve import AuthResolver
     from hx.auth.store import OPENROUTER, AuthStore
@@ -878,17 +879,24 @@ def run_login(provider_id: str) -> int:
         print(f"Unknown provider {provider_id!r}. Known: {known}", file=sys.stderr)
         return 2
 
-    if provider_id != codex_oauth.PROVIDER_ID:
+    browser_flow = registry.browser_login(provider_id)
+    if browser_flow is None:
         print(f"{spec.label} has no interactive login.", file=sys.stderr)
         return 2
 
     interaction = ConsoleLogin()
     use_device = not sys.stdin.isatty() or os.environ.get("HX_LOGIN_DEVICE_CODE") == "1"
-    flow = codex_oauth.login_device_code if use_device else codex_oauth.login_browser
+    # Only Codex offers a device code. Devin's browser flow still completes
+    # headless by pasting the redirect URL.
+    flow = (
+        codex_oauth.login_device_code
+        if use_device and provider_id == codex_oauth.PROVIDER_ID
+        else browser_flow
+    )
 
     try:
         credential = asyncio.run(flow(interaction))
-    except (codex_oauth.OAuthError, CallbackError) as exc:
+    except (OAuthError, CallbackError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
@@ -930,8 +938,8 @@ def _report_models_after_login(provider_id: str) -> None:
         asyncio.run(models.refresh(AuthResolver()))
     except Exception as exc:
         print(f"Could not refresh the model list: {describe(exc)}", file=sys.stderr)
-    if models.codex_error:
-        print(f"Could not list this account's models: {models.codex_error}", file=sys.stderr)
+    for label, error in models.subscription_errors():
+        print(f"Could not list this account's {label} models: {error}", file=sys.stderr)
 
     available = [m.id for m in models.all() if m.provider_id == provider_id]
     if not available:
@@ -949,7 +957,7 @@ def run_auth_command(args: list[str]) -> int:
     The TUI has /login and /configure; this is the same thing for a headless
     machine, where there is no interface to prompt from mid-session.
     """
-    from hx.auth.resolve import AuthResolver
+    from hx.auth.resolve import ENV_FIRST, AuthResolver
     from hx.auth.store import OPENROUTER, TAVILY, AuthStore
     from hx.providers import registry
 
@@ -966,7 +974,15 @@ def run_auth_command(args: list[str]) -> int:
             signed_in = True
             print(f"{spec.id:<14} {_credential_label(resolver, spec):<22} {source}")
             if source.startswith("environment"):
-                print(f"{'':<14} the environment overrides anything saved in {auth_file()}.")
+                # Only an ENV_FIRST route is actually overridden by its variable.
+                # Everywhere else the variable is the fallback, and saying it
+                # wins would send the user off to unset a variable that a login
+                # is about to stop consulting anyway.
+                print(
+                    f"{'':<14} the environment overrides anything saved in {auth_file()}."
+                    if spec.id in ENV_FIRST
+                    else f"{'':<14} a credential saved in {auth_file()} would take precedence."
+                )
         _print_tavily_status(resolver)
         if not signed_in:
             print(
@@ -1023,8 +1039,10 @@ def _credential_label(resolver: Any, spec: Any) -> str:
     if spec.is_subscription:
         from hx.providers import registry
 
-        plan = registry.subscription_plan(spec.id, resolver)
-        return f"signed in ({plan})" if plan else "signed in"
+        detail = registry.subscription_plan(spec.id, resolver) or registry.subscription_account(
+            spec.id, resolver
+        )
+        return f"signed in ({detail})" if detail else "signed in"
     try:
         return f"key {mask(resolver.resolve_static(spec.id).token)}"
     except (MissingCredential, ExpiredCredential):

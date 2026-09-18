@@ -5,6 +5,7 @@ Routing is a property of the model id, exactly as in the settings file:
 * ``anthropic/claude-sonnet-4.5`` - no known provider namespace, so OpenRouter.
   Every id that worked before this module existed still routes there.
 * ``openai-codex/gpt-5.6-terra`` - the ChatGPT subscription route.
+* ``devin/swe-1-6`` - the Devin subscription route.
 
 There is deliberately no ``/route`` command and no auto-selection: with two
 credentials installed, "which one paid for that turn" must be answerable by
@@ -13,16 +14,19 @@ reading the model id alone.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from hx.auth.oauth import codex as codex_oauth
+from hx.auth.oauth import devin as devin_oauth
 from hx.auth.resolve import AuthResolver, ResolvedAuth
 from hx.auth.store import OPENROUTER
 
 if TYPE_CHECKING:
+    from hx.auth.oauth.browser import LoginInteraction
+    from hx.auth.store import OAuthCredential
     from hx.providers.base import Provider
     from hx.providers.models import ModelRegistry
 
@@ -33,6 +37,7 @@ else:  # runtime: dataclass field annotations are evaluated lazily anyway
     BuildProvider = Callable
 
 CODEX = codex_oauth.PROVIDER_ID
+DEVIN = devin_oauth.PROVIDER_ID
 
 
 class AuthKind(StrEnum):
@@ -95,6 +100,31 @@ def _build_codex(
     )
 
 
+def _build_devin(
+    spec: ProviderSpec,
+    resolver: AuthResolver,
+    session_id: str | None,
+    models: ModelRegistry | None,
+) -> Provider:
+    from hx.auth.resolve import MissingCredential, missing_message
+    from hx.providers.devin import DevinProvider
+
+    if not resolver.has_credential(spec.id):
+        raise MissingCredential(spec.id, missing_message(spec.id))
+
+    async def token() -> ResolvedAuth:
+        return await resolver.resolve(spec.id)
+
+    # Devin serves each reasoning depth as its own backend model, so the
+    # catalogue entry is what turns "opus at high" into an id the wire accepts.
+    return DevinProvider(
+        token,
+        session_id=session_id,
+        effort=models.reasoning_effort if models is not None else None,
+        model_info=models.get_or_default if models is not None else None,
+    )
+
+
 SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         id=OPENROUTER,
@@ -109,6 +139,13 @@ SPECS: tuple[ProviderSpec, ...] = (
         kind=AuthKind.SUBSCRIPTION,
         namespace=f"{CODEX}/",
         build=_build_codex,
+    ),
+    ProviderSpec(
+        id=DEVIN,
+        label="Devin (personal or Enterprise)",
+        kind=AuthKind.SUBSCRIPTION,
+        namespace=f"{DEVIN}/",
+        build=_build_devin,
     ),
 )
 
@@ -136,6 +173,38 @@ def subscription_plan(provider_id: str, resolver: AuthResolver) -> str | None:
     if not isinstance(stored, OAuthCredential):
         return None
     return codex_oauth.plan_of(stored)
+
+
+def subscription_account(provider_id: str, resolver: AuthResolver) -> str | None:
+    """Who a stored subscription login belongs to, or ``None``.
+
+    An email or a name, never the token - enough to tell a work account from a
+    personal one, which is otherwise unanswerable without decoding a JWT by
+    hand. ``None`` where the route's credential carries no such claim.
+    """
+    from hx.auth.store import OAuthCredential
+
+    if provider_id != DEVIN:
+        return None
+    stored = resolver.store.read(provider_id)
+    if not isinstance(stored, OAuthCredential):
+        return None
+    return devin_oauth.account_of(stored)
+
+
+def browser_login(
+    provider_id: str,
+) -> Callable[[LoginInteraction], Coroutine[Any, Any, OAuthCredential]] | None:
+    """The browser sign-in for a subscription route, or ``None`` for a key route.
+
+    Looked up when called rather than stored on the spec, so the flow a test
+    or a later patch substitutes is the one that runs.
+    """
+    if provider_id == CODEX:
+        return codex_oauth.login_browser
+    if provider_id == DEVIN:
+        return devin_oauth.login_browser
+    return None
 
 
 class UnknownProvider(Exception):

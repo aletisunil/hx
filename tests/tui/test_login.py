@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -321,6 +322,7 @@ async def test_opening_the_browser_never_blocks_the_event_loop(
     import contextlib
     import threading
 
+    import hx.auth.oauth.browser as browser
     import hx.auth.oauth.codex as codex
 
     release = threading.Event()
@@ -331,7 +333,7 @@ async def test_opening_the_browser_never_blocks_the_event_loop(
         release.wait(5)
         return True
 
-    monkeypatch.setattr(codex.webbrowser, "open", slow_open)
+    monkeypatch.setattr(browser.webbrowser, "open", slow_open)
 
     alive = asyncio.Event()
 
@@ -365,3 +367,58 @@ async def test_opening_the_browser_never_blocks_the_event_loop(
 
     assert ran_on, "the browser was never opened"
     assert ran_on[0] != threading.main_thread().name, "the open ran on the event loop"
+
+
+def test_sign_in_instructions_wrap_rather_than_being_cut_off() -> None:
+    """The route-specific part comes first, so a cut would hide the part that matters."""
+    import re
+
+    from hx.tui.views.login import LoginDialog
+
+    dialog = LoginDialog("Devin (personal or Enterprise)")
+    dialog.show_url(
+        "https://app.devin.ai/auth/cli/continue",
+        'For Devin Enterprise, choose "Log in with Devin for Enterprise" and enter your '
+        "company. Complete the sign-in in your browser. On a remote machine, paste the "
+        "final redirect URL here instead.",
+    )
+    plain = " ".join(
+        re.sub(r"\x1b\][^\x07]*\x07|\x1b\[[0-9;?]*[A-Za-z]", "", line).strip()
+        for line in dialog.draw(50)
+    )
+    assert "enter your company." in plain
+    assert "final redirect URL here instead." in plain
+
+
+async def test_the_sign_in_dialog_repaints_as_the_flow_moves_on(
+    hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flow updates the dialog from a background task, where no keystroke
+    draws a frame. It used to sit on "Starting…" for the whole sign-in, hiding
+    the URL, the paste field and every error behind it."""
+    import hx.auth.oauth.browser as browser
+    import hx.auth.oauth.devin as devin
+
+    async def opened(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(browser, "open_browser", opened)
+    # Any free port: the test must not depend on 59653 being unused.
+    monkeypatch.setattr(devin, "CALLBACK_PORT", 0)
+
+    app = build_app(tmp_path)
+    async with Driver(app) as driver:
+        await driver.settle()
+        flow = asyncio.ensure_future(app._run_command("/login devin"))
+        try:
+            await settle(driver, lambda: "Log in with Devin for Enterprise" in driver.screen_text())
+            screen = driver.screen_text()
+            assert "Starting" not in screen
+            assert "https://app.devin.ai/auth/cli/continue" in screen
+            assert "Paste the redirect URL" in screen
+        finally:
+            driver.type("\x1b")
+            await driver.settle()
+            flow.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await flow

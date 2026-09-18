@@ -13,7 +13,12 @@ from hx.providers import registry
 
 @pytest.fixture(autouse=True)
 def _no_ambient_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("HX_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"):
+    for name in (
+        "HX_OPENROUTER_API_KEY",
+        "OPENROUTER_API_KEY",
+        "HX_DEVIN_API_KEY",
+        "DEVIN_API_KEY",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -25,6 +30,7 @@ def _no_ambient_keys(monkeypatch: pytest.MonkeyPatch) -> None:
         ("openai/gpt-5", "openrouter", "openai/gpt-5"),
         ("some-local-model", "openrouter", "some-local-model"),
         ("openai-codex/gpt-5.3-codex", "openai-codex", "gpt-5.3-codex"),
+        ("devin/swe-1-6", "devin", "swe-1-6"),
     ],
 )
 def test_the_model_id_alone_decides_the_route(model_id: str, provider_id: str, bare: str) -> None:
@@ -38,9 +44,15 @@ def test_openai_prefixed_openrouter_ids_are_not_mistaken_for_codex() -> None:
     assert registry.provider_for("openai/gpt-5-codex").id == "openrouter"
 
 
-def test_only_the_codex_route_is_a_subscription() -> None:
+def test_only_the_sign_in_routes_are_subscriptions() -> None:
     assert registry.get("openai-codex").is_subscription is True
+    assert registry.get("devin").is_subscription is True
     assert registry.get("openrouter").is_subscription is False
+
+
+def test_every_subscription_route_has_a_browser_sign_in() -> None:
+    for spec in registry.SPECS:
+        assert (registry.browser_login(spec.id) is not None) is spec.is_subscription
 
 
 def test_an_unknown_provider_is_named_not_swallowed() -> None:
@@ -82,3 +94,24 @@ def test_the_codex_route_carries_the_session_id(hx_home: Path) -> None:
     )
     assert provider.name == "openai-codex"
     assert provider.session_id == "sess-1"
+
+
+def test_the_devin_route_carries_the_session_id(hx_home: Path) -> None:
+    """It names the Cascade thread, so it has to reach the provider."""
+    AuthStore().save("devin", OAuthCredential(access="t", refresh="t", expires=4e9))
+    provider = registry.build_provider("devin/swe-1-6", AuthResolver(), session_id="sess-1")
+    assert provider.name == "devin"
+    assert provider.session_id == "sess-1"
+
+
+def test_building_the_devin_route_without_a_login_is_actionable(hx_home: Path) -> None:
+    with pytest.raises(MissingCredential, match="hx auth login devin"):
+        registry.build_provider("devin/swe-1-6", AuthResolver())
+
+
+def test_a_devin_session_token_in_the_environment_is_a_credential(
+    hx_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """For a machine with no browser to sign in from."""
+    monkeypatch.setenv("DEVIN_API_KEY", "session-from-env")
+    assert [spec.id for spec in registry.available(AuthResolver())] == ["devin"]

@@ -171,7 +171,7 @@ async def test_cancelling_a_login_releases_the_callback_port() -> None:
     import contextlib
     import socket
 
-    from hx.auth.oauth import codex
+    from hx.auth.oauth import browser, codex
 
     class Silent:
         def show_url(self, url: str, instructions: str) -> None: ...
@@ -185,8 +185,8 @@ async def test_cancelling_a_login_releases_the_callback_port() -> None:
     async def opened(url: str) -> bool:
         return True
 
-    original = codex._open_browser
-    codex._open_browser = opened  # type: ignore[assignment]
+    original = browser.open_browser
+    browser.open_browser = opened  # type: ignore[assignment]
     try:
         flow = asyncio.create_task(codex.login_browser(Silent()))
         await asyncio.sleep(0.1)
@@ -194,7 +194,7 @@ async def test_cancelling_a_login_releases_the_callback_port() -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await flow
     finally:
-        codex._open_browser = original  # type: ignore[assignment]
+        browser.open_browser = original  # type: ignore[assignment]
 
     probe = socket.socket()
     try:

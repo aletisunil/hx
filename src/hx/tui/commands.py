@@ -285,7 +285,7 @@ async def cmd_effort(ctx: CommandContext, args: str) -> None:
         if not info.reasoning_levels:
             ctx.app.notice(
                 f"{model_id} publishes no reasoning levels, so there is nothing to pick "
-                "from. `/models refresh` fetches them for a Codex model.",
+                "from. `/models refresh` fetches them for a subscription model.",
                 "warning",
             )
             return
@@ -327,7 +327,7 @@ async def cmd_effort(ctx: CommandContext, args: str) -> None:
     if not info.reasoning_levels and level is not None:
         ctx.app.notice(
             f"{name} does not publish its reasoning levels, so this is sent as asked "
-            "and the route decides. Only Codex models use it today.",
+            "and the route decides. Only subscription models use it today.",
             "warning",
         )
 
@@ -344,13 +344,10 @@ async def cmd_models(ctx: CommandContext, args: str) -> None:
     except Exception as exc:
         ctx.app.notice(f"Model refresh failed: {describe(exc)}", "error")
         return
-    if ctx.app.models.codex_error:
+    for label, error in ctx.app.models.subscription_errors():
         # Not fatal - the rest of the catalogue refreshed - but silence here
         # reads as "your subscription has these two models", which is a lie.
-        ctx.app.notice(
-            f"Could not list this account's Codex models: {ctx.app.models.codex_error}",
-            "warning",
-        )
+        ctx.app.notice(f"Could not list this account's {label} models: {error}", "warning")
     ctx.app.notice(f"Refreshed {len(ctx.app.models.all())} models.", "success")
 
 
@@ -736,22 +733,28 @@ async def cmd_login(ctx: CommandContext, args: str) -> None:
 
 async def _run_oauth_login(ctx: CommandContext, spec: Any) -> None:
     from hx.auth.oauth import codex as codex_oauth
+    from hx.auth.oauth.browser import OAuthError
     from hx.auth.oauth.callback import CallbackError
     from hx.auth.store import AuthStore
     from hx.providers import registry
     from hx.tui.views.login import LoginDialog
 
-    modal = LoginDialog(spec.label)
+    login = registry.browser_login(spec.id)
+    if login is None:
+        ctx.app.notice(f"{spec.label} has no sign-in flow.", "error")
+        return
+
+    modal = LoginDialog(spec.label, on_change=ctx.app.repaint)
     # Shown before the flow starts: the flow talks to it immediately, and this
     # records state and repaints rather than reaching for a widget, so there is
     # nothing to be orphaned or to raise on a first call.
     ctx.app.show(modal)
     try:
-        credential = await codex_oauth.login_browser(modal)
+        credential = await login(modal)
     except asyncio.CancelledError:
         ctx.app.notice("Sign-in cancelled.", "warning")
         return
-    except (codex_oauth.OAuthError, CallbackError) as exc:
+    except (OAuthError, CallbackError) as exc:
         ctx.app.notice(f"Sign-in failed: {exc}", "error")
         return
     except Exception as exc:
@@ -802,10 +805,8 @@ async def _refresh_after_login(ctx: CommandContext, provider_id: str) -> int:
         await ctx.app.models.refresh(ctx.app.auth)
     except Exception as exc:
         ctx.app.notice(f"Model refresh failed: {describe(exc)}", "warning")
-    if ctx.app.models.codex_error:
-        ctx.app.notice(
-            f"Could not list this account's models: {ctx.app.models.codex_error}", "warning"
-        )
+    for label, error in ctx.app.models.subscription_errors():
+        ctx.app.notice(f"Could not list this account's {label} models: {error}", "warning")
     return sum(1 for model in ctx.app.models.all() if model.provider_id == provider_id)
 
 

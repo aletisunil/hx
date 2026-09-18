@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from hx.auth.resolve import AuthResolver
+from hx.auth.store import AuthStore
 from hx.config import PermissionMode, load_settings
 from hx.core.context import ContextBuilder, load_system_prompt
 from hx.core.events import EventBus
@@ -31,14 +32,19 @@ from hx.providers.base import Provider
 from hx.providers.models import ModelRegistry
 from hx.tools.read import FileTracker
 from hx.tools.registry import build_default_registry
+from tests.conftest import REAL_AUTH_FILE
 
 pytestmark = pytest.mark.live
 
-MODEL = os.environ.get("HX_LIVE_CODEX_MODEL", "openai-codex/gpt-5.3-codex")
+# One the fallback list ships, so a subscription that runs anything runs this;
+# gpt-5.3-codex, the old default, is refused on plus accounts.
+MODEL = os.environ.get("HX_LIVE_CODEX_MODEL", "openai-codex/gpt-5.6-terra")
 
 
 def _resolver() -> AuthResolver:
-    resolver = AuthResolver()
+    # The real store, not the isolated one: a refresh has to land where the
+    # next run will read it, or the spent refresh token is all that is left.
+    resolver = AuthResolver(AuthStore(REAL_AUTH_FILE))
     if not resolver.has_credential("openai-codex"):
         pytest.skip("not signed in; run `hx auth login openai-codex`")
     return resolver

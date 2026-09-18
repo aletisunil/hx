@@ -1,26 +1,27 @@
 """Model catalogue: context windows, pricing, and caching behaviour.
 
-Populated from OpenRouter's ``/api/v1/models`` and, for a signed-in ChatGPT
-subscription, from the Codex backend's own per-account catalogue
-(:mod:`hx.providers.codex_catalogue`). Cached to ``~/.hx/models.json`` and
-refreshed on demand (``/models refresh``), after a login, or when the cache is
-older than a day. The registry drives the ``/model`` picker, the context gauge,
-and cost fallback maths.
+Populated from OpenRouter's ``/api/v1/models`` and, for each signed-in
+subscription, from that backend's own per-account catalogue
+(:mod:`hx.providers.codex_catalogue`, :mod:`hx.providers.devin_catalogue`).
+Cached to ``~/.hx/models.json`` and refreshed on demand (``/models refresh``),
+after a login, or when the cache is older than a day. The registry drives the
+``/model`` picker, the context gauge, and cost fallback maths.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hx.paths import models_cache_file
 
 if TYPE_CHECKING:
-    from hx.auth.resolve import AuthResolver
+    from hx.auth.resolve import AuthResolver, ResolvedAuth
 
 
 class CacheMode(StrEnum):
@@ -62,11 +63,22 @@ class ModelInfo:
     reasoning_levels: tuple[str, ...] = ()
     """Reasoning efforts this model accepts, weakest first.
 
-    Empty means unknown, not none: only the Codex catalogue publishes this, and
-    an unknown list is left to the backend to judge rather than guessed at."""
+    Empty means unknown, not none: only subscription catalogues publish this,
+    and an unknown list is left to the backend to judge rather than guessed at."""
     default_reasoning_level: str | None = None
     """The effort the vendor picks when the caller does not. Per model - the
     same account's models differ - so it is carried rather than assumed."""
+    effort_routes: tuple[tuple[str, str], ...] = ()
+    """``(effort, backend model id)`` pairs, for a route that serves each
+    reasoning depth as a separate model rather than as a request field.
+
+    Devin lists ``claude-opus-5-high`` and ``claude-opus-5-max`` as models of
+    their own; HX offers them as one model whose effort picks between them, so
+    ``/effort`` means the same thing on every route. Empty when the model is
+    called by its own id."""
+    model_router: bool = False
+    """The id names a server-side dispatcher, not a model: each turn has to be
+    assigned a concrete model before it can be sent."""
 
 
 CODEX_NAMESPACE = "openai-codex/"
@@ -108,6 +120,84 @@ CODEX_MODELS: tuple[ModelInfo, ...] = tuple(
     )
 )
 
+DEVIN_NAMESPACE = "devin/"
+
+#: Fallback list for a Devin subscription, used only when the backend's own
+#: catalogue cannot be reached - see :mod:`hx.providers.devin_catalogue`. These
+#: two are the ones every plan has been seen to include.
+DEVIN_MODELS: tuple[ModelInfo, ...] = tuple(
+    ModelInfo(
+        id=f"{DEVIN_NAMESPACE}{slug}",
+        name=name,
+        context_window=200_000,
+        max_output_tokens=128_000,
+        pricing=ModelPricing(),
+        cache_mode=CacheMode.IMPLICIT,
+        supports_tools=True,
+        supports_reasoning=True,
+        provider_id="devin",
+        is_subscription=True,
+    )
+    for slug, name in (("swe-1-6", "SWE-1.6"), ("swe-1-6-fast", "SWE-1.6 Fast"))
+)
+
+
+@dataclass(slots=True)
+class _Entitlement:
+    """What one subscription's backend said its login may call."""
+
+    models: tuple[ModelInfo, ...] | None = None
+    """``None`` until the backend has answered; the fallback list stands in."""
+    account: str | None = None
+    """Which login :attr:`models` describes. Entitlement is per account, so a
+    list fetched for another login means nothing here."""
+    error: str | None = None
+    """Why the list could not be fetched, in one line. Not fatal - the rest of
+    the catalogue still refreshes and the fallback still offers models - but
+    surfaced, so a picker missing the model someone just paid for says why."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Subscription:
+    """How to ask one subscription route for its models."""
+
+    provider_id: str
+    label: str
+    fallback: tuple[ModelInfo, ...]
+    fetch: Callable[[ResolvedAuth], Awaitable[list[ModelInfo]]] = field(repr=False)
+    account: Callable[[ResolvedAuth], str | None] = field(repr=False)
+
+
+async def _fetch_codex(auth: ResolvedAuth) -> list[ModelInfo]:
+    from hx.providers import codex_catalogue
+
+    return await codex_catalogue.fetch_models(auth)
+
+
+async def _fetch_devin(auth: ResolvedAuth) -> list[ModelInfo]:
+    from hx.providers import devin_catalogue
+
+    return await devin_catalogue.fetch_models(auth)
+
+
+def _codex_account(auth: ResolvedAuth) -> str | None:
+    return str(auth.extra.get("account_id") or "") or None
+
+
+def _token_fingerprint(auth: ResolvedAuth) -> str | None:
+    """Stands in for an account id on a route whose token carries none.
+
+    A new sign-in yields a new token and so drops the cached list, even for the
+    same account - a refetch, where the alternative is keeping someone else's.
+    """
+    return hashlib.sha256(auth.token.encode()).hexdigest()[:16] if auth.token else None
+
+
+SUBSCRIPTIONS: tuple[_Subscription, ...] = (
+    _Subscription("openai-codex", "Codex", CODEX_MODELS, _fetch_codex, _codex_account),
+    _Subscription("devin", "Devin", DEVIN_MODELS, _fetch_devin, _token_fingerprint),
+)
+
 
 class ModelRegistry:
     """Lookup and refresh for the model catalogue."""
@@ -126,19 +216,10 @@ class ModelRegistry:
         self._requested_effort: str | None = None
         """``models.reasoning_effort`` from settings. Clamped per model, since
         the strongest effort one model offers is off the scale on another."""
-        self._codex: tuple[ModelInfo, ...] | None = None
-        """What the Codex backend said this account may call, or ``None`` when
-        it has not answered yet. ``None`` falls back to :data:`CODEX_MODELS`."""
-        self._codex_account: str | None = None
-        """Which ChatGPT account :attr:`_codex` describes. Entitlement is per
-        account, so a list fetched for another login means nothing here."""
-        self.codex_error: str | None = None
-        """Why the Codex catalogue could not be fetched, in one line.
-
-        Separate from :attr:`refresh_error` because it is not fatal: the rest
-        of the catalogue still refreshes, and the fallback list still offers
-        models. It is surfaced so a picker missing the model someone just paid
-        for says why."""
+        self._entitled: dict[str, _Entitlement] = {
+            sub.provider_id: _Entitlement() for sub in SUBSCRIPTIONS
+        }
+        """Per subscription route, what its backend said the login may call."""
         self._models: dict[str, ModelInfo] = {}
         self._fetched_at: float = 0.0
         self._loaded = False
@@ -149,6 +230,14 @@ class ModelRegistry:
         refreshes deliberately do not interrupt the session, and a silent
         failure there is indistinguishable from having no credential at all.
         """
+
+    def subscription_errors(self) -> list[tuple[str, str]]:
+        """``(route label, reason)`` for every subscription whose list failed."""
+        return [
+            (sub.label, error)
+            for sub in SUBSCRIPTIONS
+            if (error := self._entitled[sub.provider_id].error)
+        ]
 
     def get(self, model_id: str) -> ModelInfo:
         """Raises :class:`UnknownModel` if absent even after a cache refresh."""
@@ -199,17 +288,19 @@ class ModelRegistry:
     async def refresh(self, resolver: AuthResolver) -> None:
         """Fetch every route's live catalogue and rewrite the cache.
 
-        A Codex failure is recorded but not raised: it costs the account's real
-        model list, which the fallback stands in for, and there is no reason
-        for it to also cost the OpenRouter catalogue that did arrive.
+        A subscription failure is recorded but not raised: it costs the
+        account's real model list, which the fallback stands in for, and there
+        is no reason for it to also cost the OpenRouter catalogue that did
+        arrive.
         """
         from hx.auth.store import OPENROUTER
         from hx.net import describe
         from hx.providers.openrouter import fetch_models
 
         # Asked for first: a broken OpenRouter key raises below, and it must not
-        # also cost the subscription its model list.
-        await self._refresh_codex(resolver)
+        # also cost a subscription its model list.
+        for sub in SUBSCRIPTIONS:
+            await self._refresh_subscription(sub, resolver)
 
         fetched: dict[str, ModelInfo] = {}
         if resolver.has_credential(OPENROUTER):
@@ -235,8 +326,8 @@ class ModelRegistry:
         self._fetched_at = time.time()
         self.save_cache()
 
-    async def _refresh_codex(self, resolver: AuthResolver) -> None:
-        """Ask the Codex backend which models this login may actually call.
+    async def _refresh_subscription(self, sub: _Subscription, resolver: AuthResolver) -> None:
+        """Ask a subscription backend which models this login may actually call.
 
         The answer is per account and cannot be derived from the plan name, so
         it is asked for rather than assumed. An empty answer is treated as a
@@ -245,44 +336,43 @@ class ModelRegistry:
         list HX already had.
         """
         from hx.net import describe
-        from hx.providers import codex_catalogue
-        from hx.providers.registry import CODEX
 
-        if not resolver.has_credential(CODEX):
+        entitled = self._entitled[sub.provider_id]
+        if not resolver.has_credential(sub.provider_id):
             # Signed out: the previous account's entitlements are not ours.
-            self._codex = None
-            self._codex_account = None
-            self.codex_error = None
+            self._entitled[sub.provider_id] = _Entitlement()
             return
         try:
-            auth = await resolver.resolve(CODEX)
+            auth = await resolver.resolve(sub.provider_id)
         except Exception as exc:
-            self.codex_error = describe(exc)
+            entitled.error = describe(exc)
             return
 
-        account = str(auth.extra.get("account_id") or "") or None
-        if account != self._codex_account:
+        account = sub.account(auth)
+        if account != entitled.account:
             # A different login, so what is cached describes somebody else's
             # subscription. Dropped before the fetch rather than after it: if
             # the fetch then fails, the shipped list is a better answer than
             # another account's entitlements.
-            self._codex = None
-            self._codex_account = None
+            entitled.models = None
+            entitled.account = None
 
         try:
-            fetched = await codex_catalogue.fetch_models(auth)
+            fetched = await sub.fetch(auth)
         except Exception as exc:
-            self.codex_error = describe(exc)
+            entitled.error = describe(exc)
             return
-        self.codex_error = None
+        entitled.error = None
         if fetched:
-            self._codex = tuple(fetched)
-            self._codex_account = account
+            entitled.models = tuple(fetched)
+            entitled.account = account
 
     def _merge_static(self) -> None:
-        """Add the Codex route, whose models are never in the OpenRouter fetch."""
-        for info in self._codex if self._codex is not None else CODEX_MODELS:
-            self._models[info.id] = info
+        """Add the subscription routes, whose models are never in the OpenRouter fetch."""
+        for sub in SUBSCRIPTIONS:
+            fetched = self._entitled[sub.provider_id].models
+            for info in fetched if fetched is not None else sub.fallback:
+                self._models[info.id] = info
         for info in self._extra_codex:
             # Never over a fetched entry. Settings are read before the cache is,
             # so an id named in both arrives here as an escape hatch carrying
@@ -345,7 +435,8 @@ class ModelRegistry:
             if not bare:
                 continue
             model_id = bare if bare.startswith(CODEX_NAMESPACE) else f"{CODEX_NAMESPACE}{bare}"
-            known = self._codex if self._codex is not None else CODEX_MODELS
+            fetched = self._entitled["openai-codex"].models
+            known = fetched if fetched is not None else CODEX_MODELS
             if model_id in {info.id for info in self._extra_codex} or any(
                 info.id == model_id for info in known
             ):
@@ -386,7 +477,8 @@ class ModelRegistry:
             except (OSError, json.JSONDecodeError):
                 payload = {}
         self._fetched_at = payload.get("fetched_at", 0.0)
-        self._load_cached_codex(payload.get("codex"))
+        for sub in SUBSCRIPTIONS:
+            self._load_cached_subscription(sub, payload.get(_cache_key(sub)))
         for entry in payload.get("models", []):
             try:
                 info = parse_model_entry(entry)
@@ -395,8 +487,8 @@ class ModelRegistry:
             self._models[info.id] = info
         self._merge_static()
 
-    def _load_cached_codex(self, payload: Any) -> None:
-        """Restore the account's fetched Codex list from the cache file.
+    def _load_cached_subscription(self, sub: _Subscription, payload: Any) -> None:
+        """Restore one account's fetched list from the cache file.
 
         Kept out of the ``models`` list because these are cached per account
         and carry no pricing: they are what one login was entitled to, not a
@@ -409,29 +501,14 @@ class ModelRegistry:
         if not isinstance(entries, list):
             return
         try:
-            restored = tuple(
-                ModelInfo(
-                    id=str(entry["id"]),
-                    name=str(entry.get("name") or entry["id"]),
-                    context_window=int(entry["context_window"]),
-                    max_output_tokens=int(entry["max_output_tokens"]),
-                    pricing=ModelPricing(),
-                    cache_mode=CacheMode.IMPLICIT,
-                    supports_tools=True,
-                    supports_reasoning=bool(entry.get("supports_reasoning", True)),
-                    provider_id="openai-codex",
-                    is_subscription=True,
-                    reasoning_levels=tuple(str(level) for level in entry.get("levels", ())),
-                    default_reasoning_level=entry.get("default_level") or None,
-                )
-                for entry in entries
-            )
+            restored = tuple(_subscription_model(sub.provider_id, entry) for entry in entries)
         except (KeyError, TypeError, ValueError):
             return
         if restored:
-            self._codex = restored
             account = payload.get("account_id")
-            self._codex_account = str(account) if account else None
+            self._entitled[sub.provider_id] = _Entitlement(
+                models=restored, account=str(account) if account else None
+            )
 
     def save_cache(self) -> None:
         path = models_cache_file()
@@ -458,25 +535,61 @@ class ModelRegistry:
                 if not m.is_subscription
             ],
         }
-        if self._codex is not None:
-            payload["codex"] = {
-                "account_id": self._codex_account,
-                "models": [
-                    {
-                        "id": m.id,
-                        "name": m.name,
-                        "context_window": m.context_window,
-                        "max_output_tokens": m.max_output_tokens,
-                        "supports_reasoning": m.supports_reasoning,
-                        "levels": list(m.reasoning_levels),
-                        "default_level": m.default_reasoning_level,
-                    }
-                    for m in self._codex
-                ],
-            }
+        for sub in SUBSCRIPTIONS:
+            entitled = self._entitled[sub.provider_id]
+            if entitled.models is not None:
+                payload[_cache_key(sub)] = {
+                    "account_id": entitled.account,
+                    "models": [_subscription_entry(m) for m in entitled.models],
+                }
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
         tmp.replace(path)
+
+
+def _cache_key(sub: _Subscription) -> str:
+    """``codex`` predates the other routes and keeps its key, so an existing
+    cache still restores after an upgrade."""
+    return "codex" if sub.provider_id == "openai-codex" else sub.provider_id
+
+
+def _subscription_entry(model: ModelInfo) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "id": model.id,
+        "name": model.name,
+        "context_window": model.context_window,
+        "max_output_tokens": model.max_output_tokens,
+        "supports_tools": model.supports_tools,
+        "supports_reasoning": model.supports_reasoning,
+        "levels": list(model.reasoning_levels),
+        "default_level": model.default_reasoning_level,
+    }
+    if model.effort_routes:
+        entry["effort_routes"] = [list(route) for route in model.effort_routes]
+    if model.model_router:
+        entry["model_router"] = True
+    return entry
+
+
+def _subscription_model(provider_id: str, entry: dict[str, Any]) -> ModelInfo:
+    """Inverse of :func:`_subscription_entry`. Raises on a malformed entry."""
+    routes = tuple((str(effort), str(uid)) for effort, uid in entry.get("effort_routes", ()))
+    return ModelInfo(
+        id=str(entry["id"]),
+        name=str(entry.get("name") or entry["id"]),
+        context_window=int(entry["context_window"]),
+        max_output_tokens=int(entry["max_output_tokens"]),
+        pricing=ModelPricing(),
+        cache_mode=CacheMode.IMPLICIT,
+        supports_tools=bool(entry.get("supports_tools", True)),
+        supports_reasoning=bool(entry.get("supports_reasoning", True)),
+        provider_id=provider_id,
+        is_subscription=True,
+        reasoning_levels=tuple(str(level) for level in entry.get("levels", ())),
+        default_reasoning_level=entry.get("default_level") or None,
+        effort_routes=routes,
+        model_router=bool(entry.get("model_router", False)),
+    )
 
 
 def match_models(models: list[ModelInfo], query: str) -> list[ModelInfo]:
@@ -548,8 +661,8 @@ def infer_cache_mode(model_id: str) -> CacheMode:
     provider.
     """
     vendor = model_id.split("/", 1)[0].lower()
-    if vendor == "openai-codex":
-        # Responses caches implicitly off the prefix plus prompt_cache_key.
+    if vendor in ("openai-codex", "devin"):
+        # Both cache server-side off a stable prefix; neither takes breakpoints.
         return CacheMode.IMPLICIT
     if vendor in ModelRegistry.EXPLICIT_CACHE_VENDORS:
         return CacheMode.EXPLICIT
