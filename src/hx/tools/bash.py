@@ -353,8 +353,20 @@ class BackgroundJobs:
             raise ToolError(f"unknown background job {job_id!r}") from None
 
     async def close_all(self) -> None:
-        for job_id in list(self._jobs):
-            self.kill(job_id)
+        """Signal every job, then wait for it to actually go.
+
+        Waiting is what closes the subprocess transport. Killing alone leaves
+        it to be collected later, and if the event loop has closed by then
+        ``BaseSubprocessTransport.__del__`` raises ``Event loop is closed``
+        into nobody's hands - which surfaced as an intermittent unraisable
+        warning in CI, on a run that otherwise passed.
+        """
+        jobs = list(self._jobs.values())
+        for job in jobs:
+            self.kill(job.job_id)
+        for job in jobs:
+            with contextlib.suppress(TimeoutError, ProcessLookupError):
+                await asyncio.wait_for(job.process.wait(), timeout=5)
 
 
 class BashTool(Tool):

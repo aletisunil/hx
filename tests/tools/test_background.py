@@ -191,3 +191,17 @@ def _open_files() -> set[str]:
         except OSError:
             continue
     return found
+
+
+async def test_closing_reaps_the_jobs_it_killed(ctx: ToolContext, tmp_path: Path) -> None:
+    """Killing without waiting leaves the subprocess transport to be collected
+    later, and if the loop has closed by then ``__del__`` raises ``Event loop
+    is closed`` into nobody's hands - an intermittent unraisable warning on a
+    CI run that otherwise passed."""
+    jobs = BackgroundJobs(tmp_path / "logs")
+    job_id = await jobs.start("sleep 30", tmp_path)
+
+    await jobs.close_all()
+
+    assert jobs.state(job_id)["running"] is False
+    assert jobs._jobs[job_id].process.returncode is not None

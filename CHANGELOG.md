@@ -26,6 +26,13 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Background jobs are waited for, not only signalled, when a session closes.
+  An unwaited subprocess transport was collected after the event loop had
+  gone, which raised `Event loop is closed` as an unraisable warning on CI
+  runs that otherwise passed.
+
 ---
 
 ## [0.2.4] - 2026-09-19
