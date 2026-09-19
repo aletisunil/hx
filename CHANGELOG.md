@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.4] - 2026-09-19
+
 ### Added
 
 - `/trace [path]`: write the whole session to one self-contained HTML page and
@@ -561,7 +565,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/aletisunil/hx/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/aletisunil/hx/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/aletisunil/hx/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/aletisunil/hx/compare/v0.2.0...v0.2.1
