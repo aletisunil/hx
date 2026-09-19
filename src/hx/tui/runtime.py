@@ -157,7 +157,7 @@ class HXSession:
         self.commands = build_default_commands()
         self.prompt.commands = self.commands
         self._command_context = CommandContext(
-            app=self, settings=self.settings, session=self.loop.session, registry=self.commands
+            app=self, settings=self.settings, registry=self.commands
         )
 
         self.view.dock.hints.set_hints(HINTS)

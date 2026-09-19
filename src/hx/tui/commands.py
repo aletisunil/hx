@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from hx.core.usage import format_cost, format_tokens
@@ -23,8 +24,19 @@ Handler = Callable[["CommandContext", str], Awaitable[None]]
 class CommandContext:
     app: Any
     settings: Any
-    session: Any
     registry: Any
+
+    @property
+    def session(self) -> Any:
+        """The session in force *now*, not the one HX started on.
+
+        Read through the loop rather than held, because ``/resume`` rebinds
+        ``loop.session`` to the session it loaded. A context that captured the
+        object at startup keeps answering with the empty session HX opened
+        with: ``/cost`` reports nobody's usage and ``/trace`` writes a page of
+        zeros into the wrong directory.
+        """
+        return self.app.loop.session
 
 
 @dataclass(slots=True)
@@ -965,6 +977,88 @@ async def cmd_copy(ctx: CommandContext, args: str) -> None:
     await ctx.app.copy(text)
 
 
+async def cmd_trace(ctx: CommandContext, args: str) -> None:
+    """``/trace [path]`` - write the whole session to a self-contained HTML page.
+
+    Traced from the live session object rather than the file on disk, so a
+    session still in progress traces as it stands right now: the turn that just
+    landed is in the page, and so is the usage it recorded.
+
+    The work runs in a worker thread. Serialising a long session and writing a
+    few megabytes of HTML is not instant, and on the event loop the whole
+    interface would stop until it finished.
+
+    ``--no-open`` writes the file and stops there. Opening is otherwise
+    attempted, but only where a real browser can be reached: with no display,
+    ``webbrowser`` falls through to a *terminal* browser, which launches into
+    the same terminal HX is drawing on and takes the session's display with it.
+    """
+    target, open_after = _trace_args(args)
+    try:
+        written, size = await asyncio.to_thread(_write_trace, ctx, target)
+    except OSError as exc:
+        ctx.app.notice(f"Could not write the trace: {exc}", "error")
+        return
+
+    from hx.trace import open_in_browser
+
+    opened = open_after and await asyncio.to_thread(open_in_browser, written)
+    trailer = ""
+    if open_after and not opened:
+        trailer = " No browser could be launched here; open it yourself."
+    ctx.app.notice(
+        f"Trace written to {written} ({_format_bytes(size)}).{trailer}",
+        "success",
+    )
+
+
+def _trace_args(args: str) -> tuple[str, bool]:
+    """Split ``/trace`` arguments into a destination and whether to open it."""
+    words = args.split()
+    open_after = "--no-open" not in words
+    target = " ".join(word for word in words if word != "--no-open")
+    return target, open_after
+
+
+def _write_trace(ctx: CommandContext, target: str) -> tuple[Path, int]:
+    """Flush, build and write the trace. Blocking - called in a worker thread."""
+    from hx.trace import TRACE_FILENAME, build_trace, default_trace_path, write_trace
+
+    session = ctx.session
+    session.flush()
+
+    loop = ctx.app.loop
+    trace = build_trace(
+        session,
+        system_prompt=loop.context.system_prompt,
+        tools=loop.tools.schemas(),
+        project_context=loop.project_context,
+        skills_index=loop.skills_index,
+        live=True,
+    )
+
+    if target:
+        path = Path(target).expanduser()
+        if not path.is_absolute():
+            path = Path(ctx.settings.cwd) / path
+        if path.is_dir():
+            path = path / TRACE_FILENAME
+    else:
+        path = default_trace_path(session)
+
+    written = write_trace(trace, path)
+    return written, written.stat().st_size
+
+
+def _format_bytes(count: int) -> str:
+    """Compact file size for a notice (e.g. ``184 KB``)."""
+    if count < 1024:
+        return f"{count} B"
+    if count < 1024 * 1024:
+        return f"{count / 1024:.0f} KB"
+    return f"{count / (1024 * 1024):.1f} MB"
+
+
 async def cmd_queue(ctx: CommandContext, args: str) -> None:
     """``/queue [steer <n>|clear]`` - see and act on what is waiting."""
     from hx.keys import KEYMAP
@@ -1065,6 +1159,13 @@ def build_default_commands() -> CommandRegistry:
             takes_args=True,
         ),
         Command("copy", "Copy the last reply to the clipboard", cmd_copy),
+        Command(
+            "trace",
+            "Write the whole session to an HTML page",
+            cmd_trace,
+            "[path]",
+            takes_args=True,
+        ),
         Command("help", "List commands and keys", cmd_help),
         Command("quit", "Exit HX", cmd_quit, aliases=("exit", "q")),
     ):

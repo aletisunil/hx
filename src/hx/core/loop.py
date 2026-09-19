@@ -44,6 +44,7 @@ from hx.core.messages import (
     tool_result_message,
     user_message,
 )
+from hx.core.session import Environment
 from hx.core.usage import TurnUsage, compute_cost
 from hx.hooks.spec import HookOutcome
 from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, StreamEnd
@@ -457,6 +458,23 @@ class AgentLoop:
             cache_mode=cache_mode,
         )
         self.last_context = assembled
+        # What the model was told, recorded alongside what it said. Guarded
+        # rather than left to `record_environment`'s own idempotence: the
+        # argument renders every schema in the registry, and building one to
+        # throw away is the sort of work a long session does hundreds of times.
+        #
+        # The full registry, not `assembled.tools` - that is this turn's
+        # allowed subset, and would understate the session in plan mode or
+        # under a skill.
+        if self.session.environment is None:
+            self.session.record_environment(
+                Environment(
+                    system_prompt=self.context.system_prompt,
+                    tools=self.tools.schemas(),
+                    project_context=self.project_context,
+                    skills_index=self.skills_index,
+                )
+            )
         self.session.usage.context_tokens = assembled.total_tokens
         self.session.usage.context_window = self.model_info.context_window if self.model_info else 0
         return ProviderRequest(

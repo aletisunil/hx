@@ -4,6 +4,7 @@
 ``hx -p "..."``        print mode: run one prompt headless, stream to stdout
 ``hx resume [id]``     resume a session
 ``hx prompt``          print the resolved system prompt
+``hx trace [id]``      write a session to a self-contained HTML page
 ``hx mcp ...``         manage MCP servers
 ``hx docs [section]``  print the shipped manual
 ``hx changelog [ver]`` print what shipped in each version
@@ -35,6 +36,8 @@ Usage:
   hx -p, --print PROMPT     Run one prompt headlessly and print the result
   hx resume [SESSION_ID]    Resume a previous session
   hx prompt                 Print the system prompt this directory would use
+  hx trace [SESSION_ID] [PATH]
+                            Write a session to a self-contained HTML trace
   hx mcp list|add|remove    Manage MCP servers
   hx auth [set|clear]       Show or change the OpenRouter API key
   hx docs [SECTION|--all]   Print the manual, or one section of it
@@ -97,6 +100,8 @@ def _dispatch(args: list[str]) -> int:
         return run_auth_command(list(parsed.rest))
     if parsed.command == "prompt":
         return run_prompt_command(parsed)
+    if parsed.command == "trace":
+        return run_trace_command(parsed)
     if parsed.command == "docs":
         return run_docs_command(list(parsed.rest))
     if parsed.command == "changelog":
@@ -162,7 +167,7 @@ def parse_args(args: list[str]) -> ParsedArgs:
 
     if positional:
         head, *tail = positional
-        if head in {"resume", "prompt", "mcp", "upgrade", "auth"}:
+        if head in {"resume", "prompt", "trace", "mcp", "upgrade", "auth"}:
             parsed.command = head
             parsed.rest = tuple(tail)
             if head == "resume" and tail:
@@ -701,6 +706,81 @@ def run_prompt_command(parsed: ParsedArgs) -> int:
     print(f"[source] {resolved.source}", file=sys.stderr)
     for append in resolved.appends:
         print(f"[append] {append}", file=sys.stderr)
+    return 0
+
+
+def _looks_like_a_path(arg: str) -> bool:
+    """Whether a lone ``hx trace`` argument is a destination, not a session id.
+
+    Session ids are ``20260918-215601-7608a6b0``: no separator, no extension,
+    no leading ``~`` or ``.``. Anything wearing one of those is somewhere the
+    user wants the file, and reading it as an id produces ``no session
+    '/Users/you/bug.html'`` - an error about the wrong thing entirely.
+    """
+    return (
+        "/" in arg or os.sep in arg or arg.startswith(("~", ".")) or arg.lower().endswith(".html")
+    )
+
+
+def run_trace_command(parsed: ParsedArgs) -> int:
+    """``hx trace [SESSION_ID] [PATH]`` - write a session out as one HTML page.
+
+    Reads the transcript rather than running anything, so it works on a session
+    that ended months ago and on one another terminal has open right now. A
+    live session traced this way is current as of its last flush, which is
+    every message; ``/trace`` inside that session is the one that also catches
+    the usage of a turn still in flight.
+
+    Either argument may be given alone. A lone one that looks like a path is
+    one, so ``hx trace ~/bug.html`` means what ``/trace ~/bug.html`` means
+    inside a session rather than hunting for a session by that name.
+    """
+    from hx.core.session import SessionNotFound, latest_session, load_session
+    from hx.trace import TRACE_FILENAME, build_trace, default_trace_path, write_trace
+
+    rest = list(parsed.rest)
+    cwd = (parsed.cwd or Path.cwd()).resolve()
+
+    target: str | None = None
+    session_id: str | None = None
+    if len(rest) > 1:
+        session_id, target = rest[0], rest[1]
+    elif rest:
+        if _looks_like_a_path(rest[0]):
+            target = rest[0]
+        else:
+            session_id = rest[0]
+
+    if session_id is None:
+        latest = latest_session(cwd)
+        if latest is None:
+            print(f"error: no sessions recorded for {cwd}", file=sys.stderr)
+            return 1
+        session_id = latest.session_id
+
+    try:
+        session = load_session(session_id)
+    except SessionNotFound:
+        print(f"error: no session {session_id!r}", file=sys.stderr)
+        return 1
+
+    destination = default_trace_path(session)
+    if target is not None:
+        # Relative paths stay relative to the shell, not to ``--cwd``: that flag
+        # picks the project to trace, and a shell user typing ``out.html`` means
+        # the directory they are standing in.
+        destination = Path(target).expanduser()
+        if destination.is_dir():
+            destination = destination / TRACE_FILENAME
+
+    try:
+        written = write_trace(build_trace(session), destination)
+    except OSError as exc:
+        print(f"error: could not write the trace: {exc}", file=sys.stderr)
+        return 1
+
+    # The path on stdout alone, so `open "$(hx trace)"` works.
+    print(written)
     return 0
 
 

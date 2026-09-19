@@ -531,3 +531,105 @@ async def test_subagents_inherit_the_parent_hooks(hx_home: Path, tmp_path: Path)
     )
     child = runner._build_loop(runner.definitions["probe"], "sub-1")
     assert child.hooks is hooks
+
+
+async def test_the_first_call_records_the_environment(
+    hx_home: Path, tmp_path: Path, registry: ToolRegistry
+) -> None:
+    """What the model was told is recorded next to what it said.
+
+    Without it a trace of a finished session can show every turn and still not
+    say which prompt or which tools produced them.
+    """
+    from hx.core.session import load_session
+
+    async with build_loop([text_turn("done")], tmp_path, registry) as h:
+        await h.loop.run("hello")
+
+    recorded = load_session(h.loop.session.meta.session_id).environment
+    assert recorded is not None
+    assert recorded.system_prompt == "sys"
+    assert [tool["name"] for tool in recorded.tools] == ["Echo"]
+
+
+async def test_the_environment_is_written_once_per_session(
+    hx_home: Path, tmp_path: Path, registry: ToolRegistry
+) -> None:
+    """Every turn assembles a request; only the first writes a copy of every
+    tool schema into the transcript."""
+    from hx.paths import session_transcript_file
+
+    script = [tool_turn("Echo", {"text": "x"}), text_turn("ok")]
+    async with build_loop(script, tmp_path, registry) as h:
+        await h.loop.run("ping")
+        session_id = h.loop.session.meta.session_id
+
+    lines = session_transcript_file(session_id).read_text().splitlines()
+    assert sum(1 for line in lines if '"kind": "environment"' in line) == 1
+
+
+async def test_the_recorded_tools_are_not_this_turn_s_allowed_subset(
+    hx_home: Path, tmp_path: Path, registry: ToolRegistry
+) -> None:
+    """An active skill narrows what the model sees for a turn.
+
+    The session ran with the whole registry, so that is what a trace has to
+    name - a list recorded from one restricted turn would understate it.
+    """
+
+    class OnlySkill:
+        def tool_allowlist(self) -> set[str]:
+            return {"Skill"}
+
+        def prompt_sections(self) -> list[Any]:
+            return []
+
+    async with build_loop([text_turn("done")], tmp_path, registry) as h:
+        h.loop.active_skills = OnlySkill()  # type: ignore[assignment]
+        await h.loop.run("hello")
+        recorded = h.loop.session.environment
+        assembled = h.loop.last_context
+
+    assert assembled is not None
+    assert "Echo" not in {tool["name"] for tool in assembled.tools}, "the skill did not narrow"
+    assert recorded is not None
+    assert [tool["name"] for tool in recorded.tools] == ["Echo"]
+
+
+async def test_only_the_first_call_renders_the_whole_registry(
+    hx_home: Path, tmp_path: Path, registry: ToolRegistry
+) -> None:
+    """The environment is recorded once, so it is built once.
+
+    ``record_environment`` returns early on every later call, but the argument
+    renders every schema in the registry to get there. A long session would do
+    that hundreds of times to throw the result away.
+
+    A skill narrows the per-turn call to a subset, which is what tells the two
+    call sites apart: only the environment asks for the registry entire.
+    """
+
+    class OnlySkill:
+        def tool_allowlist(self) -> set[str]:
+            return {"Skill"}
+
+        def prompt_sections(self) -> list[Any]:
+            return []
+
+    script = [tool_turn("Echo", {"text": "x"}), tool_turn("Echo", {"text": "y"}), text_turn("ok")]
+    async with build_loop(script, tmp_path, registry) as h:
+        h.loop.active_skills = OnlySkill()  # type: ignore[assignment]
+        whole = 0
+        original = h.loop.tools.schemas
+
+        def counting(allowed: set[str] | None = None) -> list[dict[str, Any]]:
+            nonlocal whole
+            if allowed is None:
+                whole += 1
+            return original(allowed)
+
+        h.loop.tools.schemas = counting  # type: ignore[method-assign]
+        await h.loop.run("ping")
+
+    assert len(h.loop.session.usage.turns) == 3, "the turn did not make three calls"
+    assert whole == 1, f"the whole registry was rendered {whole} times across three calls"

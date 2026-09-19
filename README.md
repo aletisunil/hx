@@ -260,6 +260,9 @@ hx -p "explain this repo"   # headless: streams to stdout, tool activity to stde
 hx resume                   # resume the last session here
 hx resume <session-id>      # resume a specific one
 hx prompt                   # print the system prompt this directory would use
+hx trace                    # write the last session here to an HTML page
+hx trace out.html           # the same, to a path you choose
+hx trace <id> out.html      # a specific session, to a path you choose
 hx --model openai/gpt-5     # override the model for one run
 hx --mode plan              # start read-only
 hx --cwd ../other-project   # run against a different directory
@@ -407,6 +410,7 @@ than being silently resolved.
 | `/theme [name]` | `dark`, `light`, `ansi`, or any theme in `~/.hx/themes` |
 | `/queue [steer <n>\|clear]` | messages waiting for the turn to end, and what to do with them |
 | `/copy` | copy the last reply to the clipboard |
+| `/trace [path]` | write the whole session to a self-contained HTML page |
 | `/fullscreen [on\|off]` | take the whole window, with the prompt pinned to the bottom |
 | `/mouse [on\|off]` | mouse reporting, and with it your terminal's own text selection |
 | `/init` | generate an `AGENTS.md` for the project |
@@ -652,6 +656,7 @@ files load here unchanged. `src/hx/tui/themes/dark.json` is the reference.
 | `~/.hx/system-prompt.md` | your system prompt, replacing the built-in one |
 | `~/.hx/system-prompt-append.md` | text appended to whichever prompt is in force |
 | `~/.hx/sessions/` | transcripts, spilled tool output, subagent sessions |
+| `~/.hx/sessions/<id>/trace.html` | where `/trace` writes, unless you name a path |
 | `~/.hx/skills/`, `~/.hx/agents/` | your skills and agents |
 | `~/.hx/projects/<project>/settings.local.json` | this machine's settings for one project - where "always allow" lands |
 | `./.hx/settings.json` | project settings, checked in if you like — read by HX, never written |
@@ -732,6 +737,79 @@ resume replays exactly what happened.
 
 **Output capping** keeps the head and tail of a large tool result, spills the
 rest to the session directory, and hands the model that path to grep.
+
+---
+
+## Tracing a session
+
+`/trace` writes everything that happened to one self-contained HTML file and
+opens it in a browser:
+
+```
+/trace                      # ~/.hx/sessions/<id>/trace.html
+/trace ~/Desktop/bug.html   # somewhere you choose
+```
+
+Everything means everything. The system prompt, the project context, the skills
+index, every tool schema as the provider received it, every prompt, every
+reply, every thinking block, every tool call next to the result it produced,
+the per-call token ledger, and the files HX changed. Late-injected reminders
+and compacted turns are in there too, behind a toggle that says how many there
+are — a trace that hides the reminders and the superseded turns is not a trace
+of the session that ran.
+
+Nothing is summarised and nothing is prettified. Assistant text is shown as it
+arrived, backticks and all, because a trace exists to answer "what actually
+went through" and a rendered version of that is a different document. Long tool
+results are folded rather than truncated, with the character count on the fold.
+
+**Thinking, where the provider allows it.** How much of a model's reasoning HX
+ever sees is the provider's decision, not HX's. Anthropic's models return the
+thinking itself. The Responses API - the OpenAI and Codex routes - returns a
+one-line summary in plaintext and the reasoning encrypted, to be replayed on
+the next call and read by nobody, HX included. A trace labels which of the two
+it is holding, because a one-line thinking block is otherwise indistinguishable
+from a trace that dropped the rest.
+
+A running session traces as it stands right now, including the turn that just
+landed. The page says so, because a trace of a live session is a snapshot.
+
+**Reading it.** Long tool results are folded and the reference panels - the
+prompt, the schemas, the ledger - start shut, so the transcript is what you
+land on. "Expand all" opens the whole page, panels included, and turns into
+"Collapse all". A session with no turns yet opens its panels on its own, since
+there is nothing else to read.
+
+**Dark or light.** The page follows your system by default and a button in the
+corner overrides it, remembered per browser. No stylesheet is fetched to do it.
+
+**Nothing is uploaded and nothing is fetched.** The payload, the stylesheet and
+the script all live in the file, so it opens offline, renders the same a year
+later, and a trace of a private repository stays as private as the directory
+you wrote it into. The embedded payload is also the machine-readable trace: it
+is JSON, in a `<script id="trace-data">` element, and `/trace` is the only way
+HX will ever put your transcript anywhere but `~/.hx`.
+
+From outside a session, on any transcript on the machine:
+
+```sh
+hx trace                        # the last session in this directory
+hx trace 20260918-214743-b5b8f9 # one by id
+hx trace ~/somewhere.html       # the last session, to a path you choose
+hx trace <id> ~/somewhere.html  # both, to a path or a directory
+open "$(hx trace)"              # the path is all that goes to stdout
+```
+
+`hx trace` reads the transcript and runs nothing, so it works on a session that
+ended months ago and on one another terminal has open right now.
+
+**What a trace can be missing.** The prompt and the tool schemas are written to
+the transcript on the session's first provider call — the first moment the tool
+registry has settled, because MCP servers connect after the loop is built. A
+session traced before that call, or one recorded by a version of HX older than
+this feature, has the transcript but not the prompt, and the page leaves those
+panels out rather than guessing. `/trace` inside a live session fills them in
+from the loop either way.
 
 ---
 

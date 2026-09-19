@@ -60,6 +60,23 @@ class SessionMeta:
     """Set for subagent sessions, which nest under their parent's directory."""
 
 
+@dataclass(slots=True)
+class Environment:
+    """What the session was assembled from, as the provider received it.
+
+    The transcript records what was said; this records what the model was told
+    before anybody said anything. Without it a trace of a finished session can
+    show every turn and still not answer why the assistant behaved the way it
+    did - the prompt and the tool schemas are half the input and were nowhere
+    on disk.
+    """
+
+    system_prompt: str = ""
+    tools: list[dict[str, Any]] = field(default_factory=list)
+    project_context: str | None = None
+    skills_index: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class RewindPoint:
     """A prompt the session can be taken back to."""
@@ -83,6 +100,9 @@ class Session:
     usage: UsageLedger = field(default_factory=UsageLedger)
     checkpoints: list[Checkpoint] = field(default_factory=list)
     """Pre-images of the files HX changed, in the order they were changed."""
+    environment: Environment | None = None
+    """The prompt and tools this session ran with. ``None`` until the first
+    provider call, and for sessions recorded before it was written down."""
     _pending: list[dict[str, Any]] = field(default_factory=list, repr=False)
     _prompt_keys: set[tuple[float, str]] = field(default_factory=set, repr=False)
     """Identities of the prompts seen so far, maintained as they arrive.
@@ -126,6 +146,25 @@ class Session:
         self.append(summary)
         for message in kept:
             self.append(replace(message, compacted=False))
+
+    def record_environment(self, environment: Environment) -> None:
+        """Record the prompt and tool schemas in force. Once per session.
+
+        Written on the first provider call rather than at startup, because that
+        is the first moment the tool registry has settled: MCP servers connect
+        after the loop is built, and a list recorded before them would name
+        fewer tools than the model was ever offered.
+
+        Once, because the prompt is frozen at startup by design and the
+        registry only grows; re-recording it per turn would append a copy of
+        every schema to the transcript for as long as the session ran, to say
+        the same thing each time.
+        """
+        if self.environment is not None:
+            return
+        self.environment = environment
+        self._pending.append({"kind": "environment", "data": asdict(environment)})
+        self.flush()
 
     def set_title(self, title: str) -> None:
         """Name the session for ``/resume``.
@@ -260,6 +299,16 @@ def _is_prompt(message: Message) -> bool:
     )
 
 
+def _environment_from_json(raw: dict[str, Any]) -> Environment:
+    """Build an :class:`Environment` from a transcript record.
+
+    Unknown keys are dropped for the same reason :func:`_meta_from_json` drops
+    them: a session written by a newer HX has to stay readable by an older one.
+    """
+    fields = {f.name for f in dataclass_fields(Environment)}
+    return Environment(**{k: v for k, v in raw.items() if k in fields})
+
+
 def _meta_from_json(raw: dict[str, Any]) -> SessionMeta:
     """Build a :class:`SessionMeta` from a ``meta.json`` payload.
 
@@ -338,6 +387,8 @@ def load_session(session_id: str) -> Session:
                 session.usage.record(TurnUsage(**record["data"]))
             elif kind == "checkpoint":
                 session.checkpoints.append(Checkpoint.from_dict(record["data"]))
+            elif kind == "environment":
+                session.environment = _environment_from_json(record["data"])
             elif kind == "compaction":
                 # Compaction always supersedes a prefix of the live messages,
                 # so replaying in order reproduces the same partition.

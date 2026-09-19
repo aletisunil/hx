@@ -26,6 +26,37 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `/trace [path]`: write the whole session to one self-contained HTML page and
+  open it. The system prompt, the project context, the skills index, every tool
+  schema, every prompt and reply, every thinking block, every tool call beside
+  the result it produced, the per-call token ledger and the files HX changed.
+  Late-injected reminders and compacted turns are included behind a toggle.
+  A session still running traces as it stands, including the turn that just
+  landed. The page follows your system's dark or light setting and a button
+  overrides it; nothing is fetched and nothing is uploaded.
+- `hx trace [SESSION_ID] [PATH]`: the same page for any transcript on the
+  machine, without starting a session. Defaults to the last session in this
+  directory and prints only the path, so `open "$(hx trace)"` works. Either
+  argument may be given alone - a lone one that looks like a path is one.
+- The system prompt and the tool schemas are now written to the transcript on a
+  session's first provider call, so a trace of a finished session can say what
+  the model was told and not only what it said.
+
+### Fixed
+
+- Slash commands read the session that is in force rather than the one HX
+  opened with. After `/resume`, `/trace` wrote a page of zeros into the empty
+  startup session's directory and `/cost` reported nobody's usage: the command
+  context had captured the session object at startup, and `/resume` rebinds it.
+- A session whose title was the trace template's own data placeholder had the
+  whole payload spliced into the page's `<title>`.
+- A trace labelled an encrypted reasoning block "thinking (signed)", which read
+  as though the page had dropped the rest of it. It now says the text is the
+  provider's summary and the reasoning came back encrypted, and a block that
+  arrived with no summary at all says that rather than rendering an empty box.
+
 ---
 
 ## [0.2.3] - 2026-09-18
