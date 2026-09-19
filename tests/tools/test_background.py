@@ -127,3 +127,67 @@ async def test_the_configured_timeout_is_honoured(tmp_path: Path) -> None:
         assert BashTool._timeout({"timeout": 600}, ctx) == 2
     finally:
         await shell.close()
+
+
+async def test_a_background_job_starts_where_the_shell_is_standing(
+    ctx: ToolContext, tmp_path: Path
+) -> None:
+    """``cd build && ...`` then a background ``./run`` has to mean in a session
+    what it means in a terminal.
+
+    The job was launched from the session's directory rather than the shell's,
+    so every background command after a ``cd`` ran somewhere else.
+    """
+    shell = PersistentShell(tmp_path)
+    jobs = BackgroundJobs(tmp_path / "logs")
+    await shell.start()
+    try:
+        (tmp_path / "sub").mkdir()
+        await shell.run("cd sub")
+
+        tool = BashTool(shell, jobs)
+        result = await tool.run({"command": "pwd", "run_in_background": True}, ctx)
+        job_id = result.metadata["job_id"]
+
+        for _ in range(50):
+            if jobs.state(job_id)["running"] is False:
+                break
+            await asyncio.sleep(0.05)
+
+        assert jobs.read(job_id)[0].strip() == str((tmp_path / "sub").resolve())
+    finally:
+        await jobs.close_all()
+        await shell.close()
+
+
+async def test_starting_a_job_does_not_hold_its_log_open(ctx: ToolContext, tmp_path: Path) -> None:
+    """The descriptor is duplicated into the child, so the parent's copy buys
+    nothing and leaks one file handle per job for the life of the session."""
+    shell = PersistentShell(tmp_path)
+    jobs = BackgroundJobs(tmp_path / "logs")
+    try:
+        job_id = await jobs.start("echo done", tmp_path)
+        job = jobs._jobs[job_id]
+        await job.process.wait()
+
+        open_paths = _open_files()
+        assert str(job.log_path) not in open_paths
+        # The log is still readable by path, which is how it is read back.
+        assert "done" in job.log_path.read_text()
+    finally:
+        await jobs.close_all()
+        await shell.close()
+
+
+def _open_files() -> set[str]:
+    """Paths this process currently holds open, via /dev/fd."""
+    found: set[str] = set()
+    fd_dir = Path("/dev/fd")
+    if not fd_dir.is_dir():  # pragma: no cover - platform without /dev/fd
+        pytest.skip("no /dev/fd on this platform")
+    for entry in fd_dir.iterdir():
+        try:
+            found.add(str(entry.resolve()))
+        except OSError:
+            continue
+    return found

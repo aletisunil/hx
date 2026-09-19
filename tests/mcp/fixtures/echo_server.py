@@ -11,6 +11,7 @@ Behaviour is driven by argv:
   --crash       exits immediately after start
   --hang        accepts the connection and never replies
   --noise       prints non-JSON to stdout before responding
+  --big         also offers a `big` tool returning a payload of a given size
 """
 
 from __future__ import annotations
@@ -43,6 +44,17 @@ TOOLS = [
 ]
 
 
+BIG_TOOL = {
+    "name": "big",
+    "description": "Return a payload of the requested size in bytes",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"size": {"type": "number"}},
+        "required": ["size"],
+    },
+}
+
+
 def send(payload: dict) -> None:
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
@@ -65,8 +77,9 @@ def handle(message: dict) -> dict | None:
         }
 
     if method == "tools/list":
+        offered = [*TOOLS, BIG_TOOL] if MODE == "--big" else TOOLS
         # Deliberately unsorted: the manager must impose a stable order itself.
-        return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": list(reversed(TOOLS))}}
+        return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": list(reversed(offered))}}
 
     if method == "tools/call":
         params = message.get("params") or {}
@@ -79,6 +92,14 @@ def handle(message: dict) -> dict | None:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {"content": [{"type": "text", "text": text}]},
+            }
+        if name == "big":
+            # One response, one line, well past asyncio's 64 KiB stream default.
+            filler = "x" * int(arguments.get("size", 0))
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"content": [{"type": "text", "text": filler}]},
             }
         if name == "add":
             total = float(arguments.get("a", 0)) + float(arguments.get("b", 0))

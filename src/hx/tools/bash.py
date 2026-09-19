@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hx.tools.base import StreamingTool, Tool, ToolContext, ToolError, ToolResult
+from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 from hx.tools.output import cap_output, summarize_for_ui
 
 DESCRIPTION = """Run a shell command in a persistent session.
@@ -120,7 +120,12 @@ class PersistentShell:
             self._exit_code = 0
 
             # stderr is merged into stdout so the model sees what a user would.
-            payload = f"{command}\nprintf '\\n%s %s\\n' {self._sentinel} \"$?\"\n"
+            #
+            # The trailer carries the working directory as well as the status,
+            # because a `cd` is the main thing that persists between calls and
+            # nothing outside the shell could otherwise see it. `$PWD` is last
+            # so a directory with spaces in it needs no quoting to parse.
+            payload = f'{command}\nprintf \'\\n%s %s %s\\n\' {self._sentinel} "$?" "$PWD"\n'
             self._process.stdin.write(payload.encode())
             await self._process.stdin.drain()
 
@@ -168,7 +173,7 @@ class PersistentShell:
             buffer += data.decode(errors="replace")
             if self._sentinel in buffer:
                 head, _, tail = buffer.partition(self._sentinel)
-                self._exit_code = _parse_exit_code(tail)
+                self._exit_code, self._cwd = _parse_trailer(tail, self._cwd)
                 if head:
                     yield head
                 return
@@ -238,7 +243,13 @@ class PersistentShell:
 
     @property
     def cwd(self) -> Path:
-        """Shell cwd as HX last knew it. Refreshed by :meth:`sync_cwd`."""
+        """Where the shell is standing now.
+
+        Updated from the trailer every command prints, so a ``cd`` in one call
+        is visible to whatever runs next - including a background job, which
+        starts as its own process and would otherwise always launch from the
+        directory the session opened in.
+        """
         return self._cwd
 
 
@@ -275,14 +286,18 @@ class BackgroundJobs:
         if sandbox is not None:
             argv = sandbox.wrap(argv)
 
-        handle = log_path.open("wb")
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=handle,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=cwd,
-            start_new_session=True,
-        )
+        # Closed as soon as the child has it: the descriptor is duplicated into
+        # the subprocess, so holding the parent's copy keeps one open per job
+        # for the life of the session and buys nothing - the log is read back
+        # by path.
+        with log_path.open("wb") as handle:
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=handle,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=cwd,
+                start_new_session=True,
+            )
         self._jobs[job_id] = BackgroundJob(job_id, command, process, log_path)
         return job_id
 
@@ -342,7 +357,7 @@ class BackgroundJobs:
             self.kill(job_id)
 
 
-class BashTool(StreamingTool):
+class BashTool(Tool):
     name = "Bash"
     description = DESCRIPTION
     mutating = True
@@ -384,7 +399,10 @@ class BashTool(StreamingTool):
         timeout = self._timeout(params, ctx)
 
         if params.get("run_in_background"):
-            job_id = await self.jobs.start(command, ctx.cwd, self.shell.sandbox)
+            # The shell's directory, not the session's: `cd build && make` in
+            # one call then a background `./run` in the next has to mean the
+            # same thing it would in a terminal.
+            job_id = await self.jobs.start(command, self.shell.cwd, self.shell.sandbox)
             return ToolResult(
                 content=(
                     f"Started background job {job_id}.\n"
@@ -421,9 +439,6 @@ class BashTool(StreamingTool):
             summary=summarize_for_ui(raw) if raw.strip() else f"exit {exit_code}",
             metadata={"exit_code": exit_code, "truncated": capped.truncated},
         )
-
-    def stream(self, params: dict[str, Any], ctx: ToolContext) -> AsyncIterator[str]:
-        return self.shell.stream(str(params["command"]), self._timeout(params, ctx))
 
     @staticmethod
     def _timeout(params: dict[str, Any], ctx: ToolContext) -> float:
@@ -535,6 +550,28 @@ class KillShellTool(Tool):
         job_id = str(params["job_id"])
         self.jobs.kill(job_id)
         return ToolResult(content=f"Killed {job_id}.", summary=f"killed {job_id}")
+
+
+def _parse_trailer(tail: str, previous: Path) -> tuple[int, Path]:
+    """Read the ``<status> <pwd>`` the sentinel is followed by.
+
+    The directory is taken only when the shell actually reported one that
+    exists; a trailer cut short by a crash must leave the last known cwd alone
+    rather than replacing it with a fragment.
+    """
+    text = tail.strip()
+    if not text:
+        return 0, previous
+
+    status, _, rest = text.partition(" ")
+    code = _parse_exit_code(status)
+
+    directory = rest.splitlines()[0].strip() if rest else ""
+    if directory.startswith("/"):
+        candidate = Path(directory)
+        if candidate.is_dir():
+            return code, candidate
+    return code, previous
 
 
 def _parse_exit_code(tail: str) -> int:

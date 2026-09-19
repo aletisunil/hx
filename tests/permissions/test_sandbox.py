@@ -124,3 +124,66 @@ def test_denied_paths_cannot_be_read(project: Path) -> None:
 def test_network_is_blocked_by_default(project: Path) -> None:
     sandbox = Sandbox(default_policy(project, allow_network=False))
     assert _run(sandbox, "curl -sS -m 5 https://example.com").returncode != 0
+
+
+def test_the_profile_does_not_hand_back_the_whole_temp_tree(project: Path) -> None:
+    """``default_policy`` resolves ``$TMPDIR`` precisely so the grant is this
+    user's temp and not everybody's. The profile used to append a blanket
+    ``/private/var/folders`` write anyway, undoing that in the line after.
+    """
+    profile = build_seatbelt_profile(default_policy(project))
+    assert '(allow file-write* (subpath "/private/var/folders"))' not in profile
+
+
+def test_the_darwin_container_is_writable_but_only_this_users(
+    monkeypatch: pytest.MonkeyPatch, project: Path
+) -> None:
+    """Tooling writes to the cache half of the container, not just ``T``."""
+    container = "/private/var/folders/ab/cdef1234"
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: f"{container}/T")
+    writable = {str(p) for p in default_policy(project).writable_paths}
+    assert container in writable
+    assert "/private/var/folders" not in writable
+
+
+def test_a_linux_tmpdir_does_not_widen_to_the_filesystem_root(
+    monkeypatch: pytest.MonkeyPatch, project: Path
+) -> None:
+    """The container rule is darwin's. On Linux ``$TMPDIR`` is ``/tmp``, whose
+    parent is ``/`` - granting that would make the sandbox a formality."""
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: "/tmp")
+    writable = {str(p) for p in default_policy(project).writable_paths}
+    assert "/" not in writable
+
+
+def test_a_credential_file_is_shadowed_with_a_file_not_a_tmpfs(tmp_path: Path) -> None:
+    """``--tmpfs`` mounts a directory. Aimed at a regular file it aborts bwrap,
+    so the sandbox never starts and the command dies with it - and six of the
+    credential paths are files, ``~/.hx/auth.json`` among them.
+    """
+    from hx.permissions.sandbox import build_bwrap_argv
+
+    secret_file = tmp_path / "auth.json"
+    secret_file.write_text("{}")
+    secret_dir = tmp_path / "dot-ssh"
+    secret_dir.mkdir()
+
+    argv = build_bwrap_argv(SandboxPolicy(deny_paths=(secret_file, secret_dir)), ["/bin/sh"])
+
+    assert argv[argv.index(str(secret_file)) - 2 : argv.index(str(secret_file))] == [
+        "--ro-bind",
+        "/dev/null",
+    ]
+    assert argv[argv.index(str(secret_dir)) - 1] == "--tmpfs"
+
+
+def test_bwrap_starts_in_the_policys_directory_not_the_parent_shells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``$PWD`` is whatever the calling shell last exported, and is absent
+    entirely under ``env -i``."""
+    from hx.permissions.sandbox import build_bwrap_argv
+
+    monkeypatch.setenv("PWD", "/somewhere/else")
+    argv = build_bwrap_argv(SandboxPolicy(cwd=tmp_path), ["/bin/sh"])
+    assert argv[argv.index("--chdir") + 1] == str(tmp_path.resolve())

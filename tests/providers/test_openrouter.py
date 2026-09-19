@@ -171,3 +171,68 @@ def test_text_alongside_tool_results_still_reaches_the_model(project: Path) -> N
     roles = [m["role"] for m in payload["messages"]]
     assert roles == ["system", "user", "assistant", "tool", "user"]
     assert "stop and read b.py instead" in json.dumps(payload["messages"][-1])
+
+
+# --- stream framing --------------------------------------------------------
+
+
+def _tool_call_chunks() -> list[dict]:
+    """A complete tool call, split across chunks the way the wire sends it."""
+    return [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "function": {"name": "Read", "arguments": '{"file_path"'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {"delta": {"tool_calls": [{"index": 0, "function": {"arguments": ':"/tmp/x"}'}}]}}
+            ]
+        },
+    ]
+
+
+def test_a_stream_that_never_sends_finish_reason_still_yields_its_tool_calls() -> None:
+    """Tool arguments are buffered until the call is known to be complete, and
+    that was keyed on ``finish_reason`` alone.
+
+    A stream cut short, or a route that simply omits the field, left a fully
+    assembled call in the buffer and reported ``end_turn``: the model appeared
+    to stop for no reason, and the user had already paid for the tokens.
+    """
+    from hx.core.messages import StopReason
+    from hx.providers.openrouter import _StreamState
+
+    state = _StreamState()
+    emitted = [item for chunk in _tool_call_chunks() for item in state.consume(chunk)]
+    assert emitted == []
+
+    flushed = state.flush()
+    assert [(item.tool_name, item.tool_input_json) for item in flushed] == [
+        ("Read", '{"file_path":"/tmp/x"}')
+    ]
+    assert state.stop_reason is StopReason.TOOL_USE
+
+
+def test_flushing_twice_does_not_duplicate_a_tool_call() -> None:
+    """The ordinary path flushes on ``finish_reason`` and again at the end of
+    the stream; the model must not be handed the same call twice."""
+    from hx.providers.openrouter import _StreamState
+
+    state = _StreamState()
+    for chunk in _tool_call_chunks():
+        state.consume(chunk)
+    on_finish = state.consume({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
+
+    assert len(on_finish) == 1
+    assert state.flush() == []

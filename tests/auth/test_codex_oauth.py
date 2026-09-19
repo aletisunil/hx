@@ -203,3 +203,24 @@ async def test_cancelling_a_login_releases_the_callback_port() -> None:
         probe.bind((callback_host(), codex.CALLBACK_PORT))
     finally:
         probe.close()
+
+
+def test_the_callback_page_escapes_what_the_provider_sent() -> None:
+    """The ``error`` parameter arrives from the network and is rendered into
+    the page this machine serves on loopback.
+
+    Interpolated raw, ``?error=<img src=x onerror=...>`` executed on an origin
+    that is otherwise the user's own.
+    """
+    from hx.auth.oauth.callback import _page
+
+    rendered = _page(
+        "Login failed",
+        "The provider returned: <img src=x onerror=alert(1)>",
+        ok=False,
+    ).decode()
+
+    assert "<img src=x" not in rendered
+    assert "&lt;img src=x onerror=alert(1)&gt;" in rendered
+    # The page's own markup is still markup.
+    assert rendered.startswith("<!doctype html>")

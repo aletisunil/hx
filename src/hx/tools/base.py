@@ -9,7 +9,7 @@ permission engine uses ``permission_specifier`` to match rules like
 from __future__ import annotations
 
 import abc
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -71,6 +71,17 @@ class Tool(abc.ABC):
         name alone is matched."""
         return None
 
+    def permission_specifiers(self, params: dict[str, Any]) -> tuple[str, ...]:
+        """Every specifier one call covers, for a tool that acts on a list.
+
+        The default is the single :meth:`permission_specifier`, which is right
+        for everything that touches one thing. A tool that fetches a list of
+        URLs or writes a list of paths overrides this, so a deny rule sees all
+        of them rather than whichever happened to be first.
+        """
+        specifier = self.permission_specifier(params)
+        return (specifier,) if specifier else ()
+
     def validate(self, params: dict[str, Any]) -> dict[str, Any]:
         """Check input against :meth:`schema` and drop unknown keys.
 
@@ -84,13 +95,6 @@ class Tool(abc.ABC):
         if missing:
             raise ToolError(f"{self.name}: missing required argument(s): {', '.join(missing)}")
         return {k: v for k, v in params.items() if k in properties} if properties else dict(params)
-
-
-class StreamingTool(Tool):
-    """Tool that produces incremental output (Bash, long-running scripts)."""
-
-    @abc.abstractmethod
-    def stream(self, params: dict[str, Any], ctx: ToolContext) -> AsyncIterator[str]: ...
 
 
 class ToolError(Exception):

@@ -7,6 +7,7 @@ deny can never be overridden by a broader allow, including in bypass mode.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -51,6 +52,19 @@ class PermissionRequest:
     params: dict[str, Any]
     mutating: bool
     description: str
+    specifiers: tuple[str, ...] = ()
+    """Every specifier this one call covers, when it covers more than one.
+
+    A tool that acts on a list acts on all of it, so a rule has to see all of
+    it. ``WebFetch`` matched on ``urls[0]`` alone, which made
+    ``deny: WebFetch(https://evil.example/**)`` a rule you got past by putting
+    the denied URL second.
+
+    Empty means :attr:`specifier` is the whole story. Matching follows the
+    shape Bash segments already use: deny and ask trigger on any element,
+    allow requires every one of them to be covered.
+    """
+
     detail: str = ""
     """Rendered diff or command text shown in the approval prompt."""
     detail_kind: str = "text"
@@ -64,6 +78,12 @@ class PermissionRequest:
     """
     origin: str | None = None
     """Which subagent asked, when it was not the main conversation."""
+
+    def all_specifiers(self) -> tuple[str, ...]:
+        """Everything a rule has to be matched against for this one call."""
+        if self.specifiers:
+            return self.specifiers
+        return (self.specifier,) if self.specifier else ()
 
 
 @dataclass(slots=True)
@@ -185,6 +205,11 @@ class PermissionEngine:
             return None
 
         if request.tool_name != "Bash" or not request.specifier:
+            # Every specifier needs its own cover, for the reason above: a call
+            # that fetches three URLs is allowed only if all three are.
+            covers = request.all_specifiers()
+            if len(covers) > 1:
+                return self._match_allow_each(request, candidates, covers)
             for rule in candidates:
                 if rule.specifier is None or self._specifier_matches(request, rule.specifier):
                     return rule
@@ -216,16 +241,61 @@ class PermissionEngine:
             first = first or covering
         return first
 
-    def _specifier_matches(self, request: PermissionRequest, pattern: str) -> bool:
-        if not request.specifier:
-            return False
+    def _match_allow_each(
+        self,
+        request: PermissionRequest,
+        candidates: list[Rule],
+        covers: tuple[str, ...],
+    ) -> Rule | None:
+        """Every specifier in ``covers`` must find an allow rule of its own."""
+        first: Rule | None = None
+        for specifier in covers:
+            covering = next(
+                (
+                    rule
+                    for rule in candidates
+                    if rule.specifier is None
+                    or self._one_specifier_matches(request, specifier, rule.specifier)
+                ),
+                None,
+            )
+            if covering is None:
+                return None
+            first = first or covering
+        return first
 
+    def _specifier_matches(self, request: PermissionRequest, pattern: str) -> bool:
+        """Deny and ask: one specifier matching is enough to trigger."""
         if request.tool_name == "Bash":
-            # Deny and ask: one dangerous segment is enough to trigger.
+            if not request.specifier:
+                return False
             parsed = parse(request.specifier)
             return any(match_specifier(segment, pattern) for segment in parsed.segments)
 
-        return match_path(request.specifier, pattern, self.cwd)
+        return any(
+            self._one_specifier_matches(request, specifier, pattern)
+            for specifier in request.all_specifiers()
+        )
+
+    def _one_specifier_matches(
+        self, request: PermissionRequest, specifier: str, pattern: str
+    ) -> bool:
+        """Match a single specifier, under the reading its shape calls for.
+
+        Most specifiers are paths, but not all: ``WebFetch`` hands over a URL.
+        Resolving one against the working directory turns ``https://host/x``
+        into ``<cwd>/https:/host/x``, which is not what any rule author wrote a
+        pattern for, so a URL on either side is compared as literal globbed
+        text instead.
+
+        Deliberately one reading or the other, never both. Falling back from
+        text to paths sounds safer and is not: ``Edit(src/**)`` read as text
+        matches ``src/../../etc/passwd``, which is the traversal that
+        :func:`match_path` resolves the path precisely to stop.
+        """
+        if _is_url(specifier) or _is_url(pattern):
+            return bool(_glob_regex(pattern).match(specifier))
+        return match_path(specifier, pattern, self.cwd)
 
     # --- prompting --------------------------------------------------------
 
@@ -366,22 +436,69 @@ def parse_rule(text: str, source: str, decision: Decision) -> Rule:
 
 
 def match_path(candidate: str, pattern: str, cwd: Path) -> bool:
-    """Glob-match a path specifier, with ``**`` spanning directory separators."""
-    path = Path(candidate).expanduser()
-    absolute = path if path.is_absolute() else (cwd / path)
+    """Glob-match a path specifier, with ``**`` spanning directory separators.
+
+    Both sides are resolved before they are compared, because a rule names a
+    *file* and a path is only one of the many strings that reach it.
+    ``deny: Read(~/.ssh/**)`` has to stop ``../../.ssh/id_rsa`` and a symlink
+    planted in the project just as surely as it stops the spelling the user
+    happened to write; matching the raw text let both straight through.
+
+    The pattern is resolved only as far as its literal head - the part before
+    the first glob character - so ``Edit(/tmp/**)`` still covers a file under
+    ``/private/tmp`` on macOS without the glob itself being mangled.
+    """
+    root = _real_path(cwd)
+    absolute = _real_path(Path(candidate).expanduser(), base=root)
     expanded = Path(pattern).expanduser()
     target = expanded if expanded.is_absolute() else (cwd / expanded)
 
-    regex = _glob_regex(str(target))
-    if regex.match(str(absolute)):
+    if _glob_regex(_resolved_pattern(target)).match(str(absolute)):
         return True
 
     # Also match against the cwd-relative form, so `Edit(src/**)` works.
     try:
-        relative = absolute.relative_to(cwd)
+        relative = absolute.relative_to(root)
     except ValueError:
         return False
     return bool(_glob_regex(pattern).match(str(relative)))
+
+
+_URL_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+
+def _is_url(text: str) -> bool:
+    """Whether a specifier or pattern names a URL rather than a path."""
+    return bool(_URL_SCHEME.match(text))
+
+
+def _real_path(path: Path, base: Path | None = None) -> Path:
+    """Absolute, with ``..`` and symlinks taken out.
+
+    Falls back to a lexical normalisation when the filesystem cannot answer -
+    a resolve that raises must not turn into a rule that fails to match.
+    """
+    candidate = path if path.is_absolute() else ((base or Path.cwd()) / path)
+    try:
+        return candidate.resolve()
+    except OSError:  # pragma: no cover - loops and permission errors on the walk
+        return Path(os.path.normpath(str(candidate)))
+
+
+_GLOB_CHARS = "*?["
+
+
+def _resolved_pattern(target: Path) -> str:
+    """Resolve the literal head of a glob, leaving the glob part untouched."""
+    text = str(target)
+    cut = min((text.find(char) for char in _GLOB_CHARS if char in text), default=-1)
+    if cut < 0:
+        return str(_real_path(target))
+
+    head, _, tail = text[:cut].rpartition(os.sep)
+    if not head:
+        return text
+    return f"{_real_path(Path(head))}{os.sep}{tail}{text[cut:]}"
 
 
 def _glob_regex(pattern: str) -> re.Pattern[str]:

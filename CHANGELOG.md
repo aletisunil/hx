@@ -44,6 +44,28 @@ the project follows [semantic versioning](https://semver.org/).
   session's first provider call, so a trace of a finished session can say what
   the model was told and not only what it said.
 
+### Security
+
+- Permission rules are matched against the path a specifier resolves to, not
+  the text it was written as. `deny: Read(~/.ssh/**)` was got past by asking
+  for `../../.ssh/id_rsa`, or through a symlink planted in the project. The
+  same resolution stops an allow rule leaking: `allow: Edit(src/**)` used to
+  cover `src/../../etc/passwd`.
+- `WebFetch` is matched against every URL it was given rather than the first,
+  so `deny: WebFetch(https://host/**)` is no longer a question of list order.
+  The approval prompt spells the URLs out too; it said `urls=[2 items]`, which
+  answered the only question that mattered with a number.
+- The generated Seatbelt profile no longer grants write access to all of
+  `/private/var/folders` - every user's and every process's temp and cache.
+  `$TMPDIR` was resolved precisely to avoid that, and the profile handed it
+  back on the next line. This user's own container stays writable.
+- `~/.hx/auth.json` is created with mode 0600 rather than narrowed to it after
+  the tokens are written, closing a window at a predictable path where the
+  credential was readable by any local account.
+- The OAuth callback page escapes what the provider sent. An `error` parameter
+  carrying markup ran as HTML on a loopback origin that is otherwise the
+  user's own.
+
 ### Fixed
 
 - Slash commands read the session that is in force rather than the one HX
@@ -56,6 +78,33 @@ the project follows [semantic versioning](https://semver.org/).
   as though the page had dropped the rest of it. It now says the text is the
   provider's summary and the reasoning came back encrypted, and a block that
   arrived with no summary at all says that rather than rendering an empty box.
+- MCP servers survive a large response. One JSON-RPC message is one line and
+  asyncio's stream limit is 64 KiB, so a tool returning a file did not truncate
+  - it raised out of the read loop and killed the connection for the rest of
+  the session. The limit is now 16 MiB, and overshooting it says so.
+- A tool call is no longer dropped when a stream ends without a `finish_reason`.
+  The arguments were buffered until that field arrived, so a complete call was
+  discarded and the turn reported `end_turn`: the model appeared to stop for no
+  reason, and the tokens were already paid for.
+- The Linux sandbox starts again for anyone with credential *files*. Denied
+  paths were all shadowed with `--tmpfs`, which mounts a directory and aborts
+  bwrap when aimed at a file - and six of them are files, `~/.hx/auth.json`
+  among them. Files are shadowed with `/dev/null` instead. bwrap also starts in
+  the policy's directory rather than whatever `$PWD` happened to hold.
+- `PersistentShell.cwd` follows the shell. It claimed to track it and was in
+  fact the launch directory forever, which meant a background job always
+  started where the session opened rather than where `cd` had left it.
+- A background job no longer leaks its log file descriptor for the life of the
+  session.
+- A record appended while the transcript was being written is no longer
+  dropped. The queue is taken in one step, and a failed write puts its records
+  back rather than losing them.
+- An automatic compaction with nothing to summarise is no longer announced and
+  rerun every turn for the rest of the session. `/compact` still answers either
+  way.
+- `/trace` takes `--no-open`, and never launches a *terminal* browser: with no
+  display, `webbrowser` falls through to lynx or w3m, which opens in the
+  terminal HX is drawing on and takes the session display with it.
 
 ---
 

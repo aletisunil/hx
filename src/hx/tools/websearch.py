@@ -278,6 +278,14 @@ class WebFetchTool(_TavilyTool):
         urls = _string_list(params.get("urls"))
         return urls[0] if urls else None
 
+    def permission_specifiers(self, params: dict[str, Any]) -> tuple[str, ...]:
+        """Every URL, because the call fetches every URL.
+
+        Matching on the first one alone made ``deny: WebFetch(https://x/**)``
+        a rule you got past by listing the denied URL second.
+        """
+        return tuple(_string_list(params.get("urls")))
+
     async def run(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         urls = _string_list(params.get("urls"))
         if not urls:

@@ -457,3 +457,114 @@ def test_a_writing_command_wearing_a_read_only_name_still_prompts(
     another. The read-only relaxation must not cover the writing half."""
     engine = PermissionEngine(PermissionMode.DEFAULT, [], project)
     assert engine.evaluate(_request(command)).decision is Decision.ASK
+
+
+# --- specifiers are resolved before they are matched -----------------------
+
+
+def _path_request(tool: str, path: str, *, mutating: bool = False) -> PermissionRequest:
+    return PermissionRequest(
+        tool_name=tool, specifier=path, params={}, mutating=mutating, description=""
+    )
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "~/.ssh/id_rsa",
+        "../../.ssh/id_rsa",
+        "./nested/../../../.ssh/id_rsa",
+    ],
+)
+def test_a_deny_rule_holds_however_the_path_is_spelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spelling: str
+) -> None:
+    """A rule names a file, and a path is one of many strings that reach it.
+
+    ``deny: Read(~/.ssh/**)`` used to be matched against the raw text, so
+    ``../../.ssh/id_rsa`` walked straight past the rule that existed to stop
+    exactly that file being read.
+    """
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_rsa").write_text("key")
+    project = home / "work" / "repo"
+    project.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    engine = PermissionEngine(
+        PermissionMode.DEFAULT, [parse_rule("Read(~/.ssh/**)", "test", Decision.DENY)], project
+    )
+    assert engine.evaluate(_path_request("Read", spelling)).decision is Decision.DENY
+
+
+def test_a_deny_rule_follows_a_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A link planted in the project is still the file the rule names."""
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_rsa").write_text("key")
+    project = home / "repo"
+    project.mkdir()
+    (project / "innocent").symlink_to(home / ".ssh")
+    monkeypatch.setenv("HOME", str(home))
+
+    engine = PermissionEngine(
+        PermissionMode.DEFAULT, [parse_rule("Read(~/.ssh/**)", "test", Decision.DENY)], project
+    )
+    assert engine.evaluate(_path_request("Read", "innocent/id_rsa")).decision is Decision.DENY
+
+
+def test_an_allow_rule_does_not_leak_through_a_parent_reference(project: Path) -> None:
+    """``Edit(src/**)`` covers what is under ``src``, and nothing above it.
+
+    The glob is anchored at ``src/``, so an unresolved ``src/../../etc/passwd``
+    matched the prefix and was allowed without a prompt.
+    """
+    engine = PermissionEngine(
+        PermissionMode.DEFAULT, [parse_rule("Edit(src/**)", "test", Decision.ALLOW)], project
+    )
+    inside = _path_request("Edit", "src/hx/cli.py", mutating=True)
+    outside = _path_request("Edit", "src/../../etc/passwd", mutating=True)
+    assert engine.evaluate(inside).decision is Decision.ALLOW
+    assert engine.evaluate(outside).decision is Decision.ASK
+
+
+# --- a tool that acts on a list is matched against all of it ---------------
+
+
+def _urls_request(urls: list[str], *, mutating: bool = False) -> PermissionRequest:
+    return PermissionRequest(
+        tool_name="WebFetch",
+        specifier=urls[0],
+        specifiers=tuple(urls),
+        params={"urls": urls},
+        mutating=mutating,
+        description="",
+    )
+
+
+def test_a_deny_rule_sees_every_url_not_just_the_first(project: Path) -> None:
+    """Matching on ``urls[0]`` made the rule a matter of list order."""
+    engine = PermissionEngine(
+        PermissionMode.DEFAULT,
+        [parse_rule("WebFetch(https://evil.example/**)", "test", Decision.DENY)],
+        project,
+    )
+    request = _urls_request(["https://good.example/a", "https://evil.example/exfil?x=1"])
+    assert engine.evaluate(request).decision is Decision.DENY
+
+
+def test_an_allow_rule_must_cover_every_url(project: Path) -> None:
+    """Half a list covered is not a list covered - the same reasoning that
+    keeps ``allow: Bash(git status:*)`` off ``git status && rm -rf /``."""
+    engine = PermissionEngine(
+        PermissionMode.DEFAULT,
+        [parse_rule("WebFetch(https://good.example/**)", "test", Decision.ALLOW)],
+        project,
+    )
+    partial = _urls_request(
+        ["https://good.example/a", "https://elsewhere.example/b"], mutating=True
+    )
+    complete = _urls_request(["https://good.example/a", "https://good.example/b"], mutating=True)
+    assert engine.evaluate(partial).decision is Decision.ASK
+    assert engine.evaluate(complete).decision is Decision.ALLOW

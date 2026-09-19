@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
+
+import pytest
 
 from hx.auth.store import (
     ApiKeyCredential,
@@ -158,3 +161,58 @@ def test_masking_never_shows_the_middle() -> None:
     assert mask("sk-or-v1-0123456789abcdef") == "sk-or-…cdef"
     assert "0123456789" not in mask("sk-or-v1-0123456789abcdef")
     assert mask("short") == "…"
+
+
+def test_the_temporary_file_is_never_world_readable(
+    hx_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store is written to a temporary file and renamed over the target.
+
+    That file used to be created at whatever the umask allowed and narrowed to
+    0600 only once the tokens were already in it - a window, at a path anyone
+    can predict, where the credential was readable by every local account.
+    Creating it 0600 means there is no instant at which the descriptor exists
+    and the permissions are wrong.
+    """
+    monkeypatch.setattr(os, "umask", lambda _mask: 0)
+    seen: list[int] = []
+    store = AuthStore()
+
+    real_replace = Path.replace
+
+    def spy(self: Path, target: str | Path) -> Path:
+        seen.append(self.stat().st_mode & 0o777)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", spy)
+    store.save("openrouter", ApiKeyCredential(key="sk-or-secret"))
+
+    assert seen == [0o600]
+    assert store.path.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_failed_write_leaves_no_temporary_file_behind(
+    hx_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A half-written credential file at a predictable path is not something to
+    leave lying around after a full disk."""
+    store = AuthStore()
+    store.save("openrouter", ApiKeyCredential(key="sk-or-first"))
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise OSError("no space left on device")
+
+    # Restored by hand rather than with `monkeypatch.undo`, which would also
+    # undo the $HX_HOME the `hx_home` fixture set - pointing the assertion
+    # below at the developer's own credential file.
+    real_dumps = json.dumps
+    monkeypatch.setattr(json, "dumps", explode)
+    try:
+        with pytest.raises(OSError):
+            store.save("openrouter", ApiKeyCredential(key="sk-or-second"))
+    finally:
+        monkeypatch.setattr(json, "dumps", real_dumps)
+
+    assert not store.path.with_suffix(".json.tmp").exists()
+    # And the previous credential is untouched.
+    assert store.read("openrouter") == ApiKeyCredential(key="sk-or-first")

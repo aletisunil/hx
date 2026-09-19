@@ -136,6 +136,14 @@ class OpenRouterProvider:
         except httpx.HTTPError as exc:
             raise ProviderError(str(exc), retryable=True) from exc
 
+        # A stream that ends without a `finish_reason` still owes us whatever
+        # tool calls it had buffered. Flushing only on that field meant a
+        # complete, fully-argumented call was dropped on the floor and the turn
+        # reported `end_turn` - the model appeared to stop for no reason, and
+        # the user had already paid for the tokens.
+        for item in state.flush():
+            yield item
+
         usage = state.usage
         usage.latency_ms = (time.monotonic() - started) * 1000
         yield StreamEnd(stop_reason=state.stop_reason, usage=usage)
@@ -261,11 +269,17 @@ class _StreamState:
 
         if finish := choice.get("finish_reason"):
             self.stop_reason = _STOP_REASONS.get(finish, StopReason.END_TURN)
-            items.extend(self._flush_tools())
+            items.extend(self.flush())
 
         return items
 
-    def _flush_tools(self) -> list[StreamItem]:
+    def flush(self) -> list[StreamItem]:
+        """Emit the buffered tool calls, once.
+
+        Called from the ``finish_reason`` branch and again when the stream
+        ends, so a stream that never sends one does not swallow its own tool
+        calls. Idempotent, so the ordinary path still emits them exactly once.
+        """
         if self._finished_tools:
             return []
         self._finished_tools = True

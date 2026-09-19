@@ -10,6 +10,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from hx.core.session import list_sessions, load_session, new_session
 from hx.paths import session_dir
 
@@ -192,3 +194,71 @@ def test_only_the_sessions_actually_listed_are_replayed(hx_home: Path, tmp_path:
         for s in sessions
     ]
     assert written == [False, False, False, True, True]
+
+
+def test_a_record_appended_during_a_flush_is_not_dropped(
+    hx_home: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """``/trace`` flushes from a worker thread while the turn keeps running.
+
+    The queue used to be written from and then cleared, so a record appended
+    between those two steps was discarded without ever reaching the file - the
+    transcript silently lost a message.
+    """
+    from hx.core.messages import user_message
+
+    session = new_session(tmp_path, "m")
+    session.append(user_message("first"))
+    session._pending.append({"kind": "usage", "data": {}})
+
+    real_dumps = json.dumps
+    interleaved: list[dict] = [{"kind": "usage", "data": {"arrived": "mid-write"}}]
+
+    def dumps_and_interleave(obj, **kwargs):
+        # Stands in for the other thread: a record queued while the file is
+        # being written, after this flush took the records it is writing.
+        if interleaved:
+            session._pending.append(interleaved.pop())
+        return real_dumps(obj, **kwargs)
+
+    monkeypatch.setattr(json, "dumps", dumps_and_interleave)
+    try:
+        session.flush()
+    finally:
+        monkeypatch.setattr(json, "dumps", real_dumps)
+
+    assert session._pending == [{"kind": "usage", "data": {"arrived": "mid-write"}}]
+    session.flush()
+
+    lines = (session_dir(session.meta.session_id) / "transcript.jsonl").read_text().splitlines()
+    assert [json.loads(line)["kind"] for line in lines] == ["message", "usage", "usage"]
+
+
+def test_a_failed_flush_keeps_its_records_for_the_next_one(
+    hx_home: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A full disk costs the next flush a retry, not the records."""
+    from hx.core.messages import user_message
+
+    session = new_session(tmp_path, "m")
+    session.append(user_message("first"))
+    session._pending.append({"kind": "usage", "data": {}})
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise OSError("no space left on device")
+
+    # Restored by hand: `monkeypatch.undo` would also revert the $HX_HOME the
+    # `hx_home` fixture set, pointing the rest of the test at the real one.
+    real_open = Path.open
+    monkeypatch.setattr(Path, "open", explode)
+    try:
+        with pytest.raises(OSError):
+            session.flush()
+    finally:
+        monkeypatch.setattr(Path, "open", real_open)
+
+    assert len(session._pending) == 1
+    session.flush()
+
+    lines = (session_dir(session.meta.session_id) / "transcript.jsonl").read_text().splitlines()
+    assert [json.loads(line)["kind"] for line in lines] == ["message", "usage"]

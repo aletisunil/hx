@@ -12,5 +12,8 @@ build/
 htmlcov/
 .DS_Store
 .hx/sessions/
-.hx/settings.json
+# Not .hx/settings.json: that file is the project's *shared* configuration and
+# is meant to be checked in. What HX writes on your behalf - permission grants
+# and the rest - lives under $HX_HOME/projects/<slug>, outside the checkout
+# entirely, so there is nothing here left to hide.
 snapshot_report.html

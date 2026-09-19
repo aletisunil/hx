@@ -51,6 +51,8 @@ class SandboxPolicy:
     ``~/.ssh``, ``~/.aws``, and HX's own ``auth.json``."""
     allow_network: bool = False
     allow_subprocess: bool = True
+    cwd: Path | None = None
+    """Directory the wrapped command starts in. ``None`` leaves it to bwrap."""
 
 
 class Sandbox:
@@ -113,7 +115,7 @@ def default_policy(cwd: Path, allow_network: bool = False) -> SandboxPolicy:
     # gettempdir() resolves through /private on macOS; bind the resolved form,
     # not the whole /var/folders tree, which would hand over every process's temp.
     temp = Path(tempfile.gettempdir()).resolve()
-    writable = [cwd.resolve(), temp]
+    writable = [cwd.resolve(), *_temp_container(temp)]
 
     # Tool caches that live outside the project but must stay writable, or
     # ordinary commands fail in confusing ways.
@@ -127,7 +129,33 @@ def default_policy(cwd: Path, allow_network: bool = False) -> SandboxPolicy:
         readable_paths=(Path("/"),),
         deny_paths=tuple(_real(Path(p).expanduser()) for p in CREDENTIAL_PATHS),
         allow_network=allow_network,
+        cwd=cwd.resolve(),
     )
+
+
+_DARWIN_TEMP_ROOT = Path("/private/var/folders")
+
+
+def _temp_container(temp: Path) -> list[Path]:
+    """The temp directory, plus this user's darwin container when there is one.
+
+    macOS gives each user a confined directory under ``/private/var/folders``
+    holding both ``T`` (``$TMPDIR``) and ``C`` (per-user caches). Ordinary
+    tooling writes to the cache side, so binding ``T`` alone makes commands
+    fail in ways that look nothing like a sandbox denial.
+
+    The container, though - never ``/private/var/folders`` itself, which is
+    every user's and every process's. That distinction is the whole point:
+    granting the tree wholesale was how the profile quietly handed back what
+    resolving ``$TMPDIR`` had just been careful to narrow.
+    """
+    paths = [temp]
+    if temp.is_relative_to(_DARWIN_TEMP_ROOT):
+        container = temp.parent
+        # /private/var/folders/<xx>/<hash> - two levels down, and no higher.
+        if container.is_relative_to(_DARWIN_TEMP_ROOT) and container != _DARWIN_TEMP_ROOT:
+            paths.append(container)
+    return paths
 
 
 def build_seatbelt_profile(policy: SandboxPolicy) -> str:
@@ -162,7 +190,6 @@ def build_seatbelt_profile(policy: SandboxPolicy) -> str:
         lines.append(f"(allow file-write* (subpath {_sbpl_string(_real(path))}))")
     for device in ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/urandom"):
         lines.append(f"(allow file-write-data file-read-data (literal {_sbpl_string(device)}))")
-    lines.append('(allow file-write* (subpath "/private/var/folders"))')
 
     lines += ["", ";; Network"]
     lines.append("(allow network*)" if policy.allow_network else "(deny network*)")
@@ -217,11 +244,24 @@ def build_bwrap_argv(policy: SandboxPolicy, argv: list[str]) -> list[str]:
     for path in policy.writable_paths:
         command += ["--bind", str(_real(path)), str(_real(path))]
     for path in policy.deny_paths:
-        if path.exists():
-            # There is no "deny read" in bwrap; shadow the path with an empty dir.
+        if not path.exists():
+            continue
+        # There is no "deny read" in bwrap, so the path is shadowed instead -
+        # and what it is shadowed *with* has to match what is there. `--tmpfs`
+        # mounts a directory, and aiming it at a regular file aborts bwrap
+        # outright: the sandbox never starts, and the command it was wrapping
+        # dies with it. Six of the credential paths are files, `~/.hx/auth.json`
+        # among them - the one HX writes itself - so this was every Linux user
+        # who had ever logged in.
+        if path.is_dir():
             command += ["--tmpfs", str(path)]
+        else:
+            command += ["--ro-bind", os.devnull, str(path)]
     if not policy.allow_network:
         command.append("--unshare-net")
-    if cwd := os.environ.get("PWD"):
-        command += ["--chdir", cwd]
+    # The policy's own directory, not `$PWD`: the environment variable is
+    # whatever the parent shell last exported, which after a `cd` inside a
+    # script is somewhere else entirely - and is simply absent under `env -i`.
+    if policy.cwd is not None:
+        command += ["--chdir", str(_real(policy.cwd))]
     return [*command, "--", *argv]

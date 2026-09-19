@@ -263,14 +263,27 @@ class Session:
         return [m for m in self.messages if not m.compacted and not m.ephemeral]
 
     def flush(self) -> None:
+        """Append the pending records and clear them.
+
+        The queue is taken in one step before any I/O, rather than written from
+        and cleared afterwards. ``/trace`` flushes from a worker thread, and a
+        record appended while the file was being written used to be dropped by
+        the ``clear`` that followed - the transcript silently lost a message.
+        Anything that fails to write goes back on the front of the queue, so a
+        full disk costs the next flush a retry rather than the records.
+        """
         if not self._pending:
             return
+        records, self._pending = self._pending, []
         path = session_transcript_file(self.meta.session_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            for record in self._pending:
-                handle.write(json.dumps(record) + "\n")
-        self._pending.clear()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                for record in records:
+                    handle.write(json.dumps(record) + "\n")
+        except OSError:
+            self._pending[:0] = records
+            raise
         self._write_meta()
 
     def _write_meta(self) -> None:

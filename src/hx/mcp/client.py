@@ -56,6 +56,18 @@ class Transport(abc.ABC):
     async def close(self) -> None: ...
 
 
+STDIO_LINE_LIMIT = 16 * 1024 * 1024
+"""Longest JSON-RPC line a server may send.
+
+One message is one line, and a tool that returns a file or a search result puts
+the whole thing on it. ``asyncio``'s stream default is 64 KiB, which a real MCP
+server passes routinely - and overshooting it does not truncate the message, it
+raises out of the read loop and takes the connection down for the rest of the
+session. The ceiling is here so that a server which streams something genuinely
+unbounded still fails instead of growing the buffer forever.
+"""
+
+
 class StdioTransport(Transport):
     """Newline-delimited JSON-RPC over a subprocess's stdio.
 
@@ -88,6 +100,7 @@ class StdioTransport(Transport):
             stderr=asyncio.subprocess.PIPE,
             env={**os.environ, **(self.env or {})},
             cwd=str(self.cwd) if self.cwd else None,
+            limit=STDIO_LINE_LIMIT,
         )
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
@@ -107,7 +120,21 @@ class StdioTransport(Transport):
     async def receive(self) -> AsyncIterator[dict[str, Any]]:
         if self._process is None or self._process.stdout is None:
             raise MCPError("transport is not connected")
-        async for raw in self._process.stdout:
+        stdout = self._process.stdout
+        while True:
+            try:
+                raw = await stdout.readline()
+            except (ValueError, asyncio.LimitOverrunError) as exc:
+                # Over the line limit. The reader is parked mid-message with no
+                # way to find the next boundary, so the connection is finished -
+                # but it says which server and why, rather than surfacing as a
+                # bare "Separator is not found" from inside asyncio.
+                raise MCPError(
+                    f"{self.command}: a message exceeded the "
+                    f"{STDIO_LINE_LIMIT // (1024 * 1024)} MiB line limit"
+                ) from exc
+            if not raw:
+                return
             line = raw.decode(errors="replace").strip()
             if not line:
                 continue

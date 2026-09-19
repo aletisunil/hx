@@ -184,3 +184,37 @@ def test_url_entries_default_to_the_http_transport(project: Path) -> None:
         json.dumps({"mcpServers": {"remote": {"url": "https://example.com/mcp"}}})
     )
     assert load_configs(project)[0].transport == "http"
+
+
+@pytest.mark.parametrize("size", [100_000, 1_000_000])
+async def test_a_large_tool_result_survives_the_transport(
+    hx_home: Path, ctx: ToolContext, size: int
+) -> None:
+    """One JSON-RPC message is one line, and a tool returning a file puts the
+    whole file on it.
+
+    ``asyncio``'s stream default is 64 KiB, and overshooting it does not
+    truncate the message - it raises out of the read loop and takes the
+    connection down for the rest of the session. Every later call to that
+    server then failed with ``transport failed``, for a response that was
+    perfectly well-formed.
+    """
+    manager = MCPManager([config("bulk", mode="--big")])
+    registry = ToolRegistry()
+    try:
+        await manager.connect_all()
+        await manager.register_tools(registry)
+
+        result = await registry.call("mcp__bulk__big", {"size": size}, ctx)
+        assert not result.is_error
+        # Capped for the model and spilled to disk, which is the normal path
+        # for a large result - the spill is where the full payload proves it
+        # crossed the transport rather than dying inside it.
+        assert result.spilled_path is not None
+        assert len(Path(result.spilled_path).read_text()) >= size
+
+        # And the connection is still usable afterwards.
+        after = await registry.call("mcp__bulk__echo", {"message": "still here"}, ctx)
+        assert after.content == "still here"
+    finally:
+        await manager.close_all()

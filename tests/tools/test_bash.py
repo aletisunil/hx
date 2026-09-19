@@ -160,3 +160,51 @@ async def test_a_command_that_kills_the_shell_still_reports_its_status(
 async def test_the_shell_comes_back_after_it_exits(shell: PersistentShell) -> None:
     await shell.run("exit 3", timeout_seconds=10)
     assert (await shell.run("echo alive")).stdout.strip() == "alive"
+
+
+async def test_the_shell_reports_where_it_is_standing(
+    shell: PersistentShell, tmp_path: Path
+) -> None:
+    """``PersistentShell.cwd`` claimed to track the shell and never moved.
+
+    It was the launch directory forever, and the ``sync_cwd`` its docstring
+    pointed at was never written - so nothing outside the shell could tell that
+    a ``cd`` had happened.
+    """
+    (tmp_path / "sub").mkdir()
+    assert shell.cwd == tmp_path
+
+    await shell.run("cd sub")
+    assert shell.cwd == (tmp_path / "sub").resolve()
+
+    await shell.run("cd ..")
+    assert shell.cwd == tmp_path.resolve()
+
+
+async def test_a_directory_with_spaces_is_tracked_whole(
+    shell: PersistentShell, tmp_path: Path
+) -> None:
+    """The trailer puts ``$PWD`` last precisely so it needs no quoting."""
+    awkward = tmp_path / "a dir with spaces"
+    awkward.mkdir()
+
+    await shell.run("cd 'a dir with spaces'")
+    assert shell.cwd == awkward.resolve()
+
+
+async def test_tracking_the_directory_does_not_disturb_the_exit_code(
+    shell: PersistentShell,
+) -> None:
+    """The status is still the command's, not the ``printf``'s."""
+    assert (await shell.run("true")).exit_code == 0
+    assert (await shell.run("exit 3")).exit_code == 3
+    assert (await shell.run("echo after")).stdout.strip() == "after"
+
+
+async def test_a_command_printing_a_path_is_not_mistaken_for_the_trailer(
+    shell: PersistentShell, tmp_path: Path
+) -> None:
+    """Only what follows the sentinel is the trailer."""
+    result = await shell.run("echo /etc/passwd")
+    assert result.stdout.strip() == "/etc/passwd"
+    assert shell.cwd == tmp_path

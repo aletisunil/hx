@@ -12,6 +12,7 @@ where the browser reaches the host by another address.
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 import threading
 from dataclasses import dataclass
@@ -49,7 +50,18 @@ p{{margin:0;color:#9aa4b2}}
 
 
 def _page(title: str, body: str, *, ok: bool) -> bytes:
-    return _PAGE.format(title=title, body=body, colour="#7ee787" if ok else "#ff7b72").encode()
+    """Render the one page this server serves.
+
+    Both fields are escaped: ``body`` carries the provider's ``error``
+    parameter, which arrives from the network and is under nobody's control
+    here. Interpolated raw, ``?error=<img src=x onerror=...>`` executed on an
+    origin that is otherwise this machine's own.
+    """
+    return _PAGE.format(
+        title=html.escape(title),
+        body=html.escape(body),
+        colour="#7ee787" if ok else "#ff7b72",
+    ).encode()
 
 
 class _Handler(BaseHTTPRequestHandler):

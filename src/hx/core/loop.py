@@ -688,6 +688,7 @@ class AgentLoop:
         request = PermissionRequest(
             tool_name=call.name,
             specifier=tool.permission_specifier(call.input),
+            specifiers=tool.permission_specifiers(call.input),
             params=call.input,
             mutating=tool.mutating,
             description=f"{call.name}({_brief(call.input)})",
@@ -756,11 +757,27 @@ class AgentLoop:
         self.bus.publish(ToolCallProgress(tool_use_id=tool_use_id, chunk=chunk))
 
     async def _maybe_compact(self) -> None:
-        """Compact if the context fraction crossed the configured threshold."""
+        """Compact if the context fraction crossed the configured threshold.
+
+        Checked against what there is to summarise before anything is
+        announced. A threshold that has been crossed stays crossed, so if the
+        split has nothing behind it - the boundary never reaches a turn edge,
+        or there are too few messages past it - the automatic path used to
+        announce a compaction, run it, and report that nothing happened, once
+        per turn for the rest of the session. The check is pure, so skipping
+        costs neither a provider call nor a line of UI.
+
+        ``/compact`` is deliberately not routed through this: somebody who asks
+        for a compaction is owed the answer, including "there was nothing to
+        do".
+        """
         if self.compactor is None:
             return
         fraction = self.session.usage.context_fraction
         if not self.compactor.should_compact(fraction, self.settings.context.compact_at):
+            return
+        dropped, _ = self.compactor.split(self.session.active_messages())
+        if len(dropped) < self.compactor.MIN_MESSAGES_TO_COMPACT:
             return
         await self.compact(reason=f"context at {fraction:.0%} of the window")
 
@@ -858,7 +875,42 @@ def _permission_detail(call: ToolUseBlock) -> tuple[str, str]:
             # Previewing is best effort; never block the prompt on it.
             return str(raw_path), "text"
 
-    return _brief(call.input, limit=400), "text"
+    return _detailed(call.input), "text"
+
+
+def _detailed(params: dict[str, Any], limit: int = 400) -> str:
+    """What the approval prompt shows for a tool with no preview of its own.
+
+    Lists are spelled out, one element per line, rather than collapsed the way
+    :func:`_brief` collapses them for a one-line header. ``WebFetch`` asked the
+    user to approve ``urls=[2 items]``: the whole question is *which* URLs are
+    about to leave the machine, and that rendering answered it with a number.
+    """
+    parts: list[str] = []
+    for key, value in params.items():
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            listed = "\n".join(f"  {item}" for item in value[:_MAX_LISTED])
+            if len(value) > _MAX_LISTED:
+                listed += f"\n  … and {len(value) - _MAX_LISTED} more"
+            parts.append(f"{key}:\n{listed}" if value else f"{key}: (empty)")
+        else:
+            parts.append(f"{key}={_one_value(value, limit)}")
+    return "\n".join(parts)
+
+
+_MAX_LISTED = 20
+"""Elements shown in full before the rest are counted. A prompt the user has to
+scroll is a prompt they stop reading."""
+
+
+def _one_value(value: Any, limit: int) -> str:
+    if isinstance(value, list):
+        return f"[{len(value)} items]"
+    if isinstance(value, dict):
+        return "{…}"
+    if isinstance(value, str) and len(value) > limit:
+        return repr(value[: limit - 1] + "…")
+    return repr(value)
 
 
 def _brief(params: dict[str, Any], limit: int = 80) -> str:
@@ -868,17 +920,5 @@ def _brief(params: dict[str, Any], limit: int = 80) -> str:
     mid-literal - a header ending in ``{'active_for…`` tells the reader nothing
     and looks broken.
     """
-    parts: list[str] = []
-    for key, value in params.items():
-        if isinstance(value, list):
-            rendered = f"[{len(value)} items]"
-        elif isinstance(value, dict):
-            rendered = "{…}"
-        elif isinstance(value, str) and len(value) > limit:
-            rendered = repr(value[: limit - 1] + "…")
-        else:
-            rendered = repr(value)
-        parts.append(f"{key}={rendered}")
-
-    joined = ", ".join(parts)
+    joined = ", ".join(f"{key}={_one_value(value, limit)}" for key, value in params.items())
     return joined if len(joined) <= limit else joined[: limit - 1] + "…"

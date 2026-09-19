@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
@@ -172,9 +173,22 @@ class AuthStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {pid: cred.to_json() for pid, cred in sorted(data.items())}
 
+        # Created 0600, not chmod'd to it afterwards. The file is opened at
+        # whatever the umask allows and only narrowed once the tokens are
+        # already in it, which leaves a window - at a path anyone can predict -
+        # where the credential is world-readable. Passing the mode to `open`
+        # closes it: there is no instant at which the descriptor exists and the
+        # permissions are wrong.
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2))
-        # Restrict before the rename so the token is never briefly world-readable.
+        descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, indent=2))
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        # O_CREAT leaves an existing file's mode alone, so a store written by
+        # an older HX is narrowed here rather than keeping its old permissions.
         tmp.chmod(0o600)
         tmp.replace(path)
 
