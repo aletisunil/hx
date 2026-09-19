@@ -60,7 +60,9 @@ dev = [
 hx = "hx.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/aletisunil/hx"
+Homepage = "https://hx.sunilaleti.dev"
+Documentation = "https://hx.sunilaleti.dev"
+Source = "https://github.com/aletisunil/hx"
 Issues = "https://github.com/aletisunil/hx/issues"
 
 # The version lives in the package, not here - three hand-maintained copies
