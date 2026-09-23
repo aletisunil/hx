@@ -257,6 +257,7 @@ available through OpenRouter.
 ```sh
 hx                          # interactive TUI in the current directory
 hx -p "explain this repo"   # headless: streams to stdout, tool activity to stderr
+hx -p "why?" --image s.png  # attach an image to a headless prompt; repeatable
 hx resume                   # resume the last session here
 hx resume <session-id>      # resume a specific one
 hx prompt                   # print the system prompt this directory would use
@@ -336,6 +337,7 @@ be rebound (see [Keybindings](#keybindings)).
 | `pgdn` | scroll the transcript down (fullscreen; otherwise your terminal scrolls) |
 | `ctrl+home` | jump to the start: the viewport in fullscreen, the first message otherwise |
 | `ctrl+end` | jump back to the newest output |
+| `ctrl+v` | attach the image on the clipboard (see [Images](#images)) |
 | `@path` | complete a file path |
 | `!command` | run a shell command directly, no model turn |
 
@@ -366,6 +368,44 @@ text](#selecting-and-copying-text) for the terminal's own selection.
 
 HX does not emit OSC 133 prompt markers yet, so shell-integration features that
 jump between prompts will not see HX's messages.
+
+#### Images
+
+Give the model a picture three ways, and each lands in the prompt as a token
+such as `[Image #1]`:
+
+- **`ctrl+v`** attaches whatever image is on the clipboard: a screenshot copied
+  with `cmd+ctrl+shift+4`, an image copied in a browser, or an image file
+  copied in Finder or a file manager. Terminals whose own paste sends nothing
+  when the clipboard holds a picture are caught too - an empty paste is read as
+  a request for the image.
+- **Drag an image file** into the terminal. The terminal pastes its path, and a
+  paste that is nothing but paths to image files attaches them instead of
+  inserting the text. Quoted, backslash-escaped and `file://` paths all work.
+- **Mention it.** `look at @docs/mockup.png` sends the path as text, and the
+  model opens it with `Read`, which returns images as images.
+
+The token is the attachment: move it and the text refers to the picture in a
+different place, delete it (one `backspace` takes the whole token) and the
+image is not sent. Sent messages list their images underneath, with size and
+weight. Numbers run for the whole session, so a message recalled from history
+or restored by a rewind still carries its pictures.
+
+PNG, JPEG, GIF, WebP, BMP and TIFF are accepted. An image within every route's
+limits goes byte for byte; a larger one is scaled to 2000 px on its long side
+and re-encoded to stay under 5 MB, which is what a retina screenshot usually
+needs. Images an MCP tool returns - a browser screenshot, say - are handled the
+same way rather than dropped.
+
+Whether a model can see images comes from the catalogue: OpenRouter's input
+modalities, the Codex catalogue, and Devin's model config. The `/model` picker
+marks the ones that can with `images`. A model that cannot
+is warned about when you attach, and is sent a line saying an image was left
+out, rather than a request that fails. The transcript keeps the image either
+way, so `/model` to one that can see it and ask again.
+
+Over SSH the clipboard you copied into is on your own machine, so `ctrl+v`
+says so; copy the file over and drag or paste its path instead.
 
 #### Keybindings
 
@@ -837,6 +877,10 @@ rather than applied at stale coordinates. Exact-match `old_string` still works
 and is unchanged; anchors are a second shape, not a replacement. Turn the whole
 thing off with `"tools": {"hashline": false}` and reads go back to plain
 `cat -n`.
+
+**Images.** `Read` on a PNG, JPEG, GIF, WebP, BMP or TIFF - or on a file with
+no extension whose bytes are one - returns the image itself for the model to
+look at, normalised the way a pasted one is (see [Images](#images)).
 
 **Symbols** answers structural questions with a parse tree rather than a
 regex — three modes, `outline` for one file's shape, `definition` for where a

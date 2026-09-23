@@ -930,6 +930,7 @@ async def cmd_help(ctx: CommandContext, args: str) -> None:
     lines += [f"  {key:<16} {description}" for key, description in help_keys()]
     lines.append("")
     lines.append("  @path            completes a file")
+    lines.append("  drag in an image attaches it")
     lines.append("  !command         runs a shell command directly")
     ctx.app.notice("\n".join(lines))
 
@@ -939,6 +940,7 @@ HELP_ACTIONS = (
     "tui.input.submit",
     "tui.input.newLine",
     "tui.input.complete",
+    "tui.input.pasteImage",
     "app.interrupt",
     "app.clear",
     "app.exit",

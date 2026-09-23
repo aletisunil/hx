@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from hx.core.context import ContextBuilder
 from hx.core.messages import (
+    ImageBlock,
+    Message,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -236,3 +239,70 @@ def test_flushing_twice_does_not_duplicate_a_tool_call() -> None:
 
     assert len(on_finish) == 1
     assert state.flush() == []
+
+
+# -- images -------------------------------------------------------------------
+
+PICTURE = ImageBlock("image/png", "iVBORw0KGgo=", width=4, height=3, label="Image #1")
+
+
+def _payload_for(cwd: Path, messages: list[Message], *, cache_mode: str) -> dict:
+    context = ContextBuilder("sys", cwd).build(messages, [], cache_mode=cache_mode)
+    request = ProviderRequest(context=context, model="openai/gpt-5", max_tokens=64)
+    return OpenRouterProvider(api_key="k").build_payload(request)
+
+
+@pytest.mark.parametrize("cache_mode", ["explicit", "implicit"])
+def test_a_user_image_is_an_image_url_part_after_the_text(project: Path, cache_mode: str) -> None:
+    payload = _payload_for(
+        project, [user_message("what is [Image #1]?", [PICTURE])], cache_mode=cache_mode
+    )
+    content = payload["messages"][1]["content"]
+    assert content[0] == {"type": "text", "text": "what is [Image #1]?"}
+    assert content[1] == {"type": "text", "text": "[Image #1]"}
+    assert content[2] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+    }
+    if cache_mode == "explicit":
+        # The breakpoint may land on an image part; Anthropic accepts that.
+        assert "cache_control" not in content[0]
+
+
+def test_an_image_alone_is_a_whole_message(project: Path) -> None:
+    payload = _payload_for(project, [user_message("", [PICTURE])], cache_mode="implicit")
+    content = payload["messages"][1]["content"]
+    assert [part["type"] for part in content] == ["text", "image_url"]
+    assert content[0]["text"] == "[Image #1]"
+
+
+def test_a_tool_image_rides_a_user_turn_after_the_results(project: Path) -> None:
+    """A ``tool`` message is text-only in chat-completions."""
+    messages = [
+        user_message("look"),
+        assistant_message([ToolUseBlock("c1", "Read", {"file_path": "a.png"})]),
+        tool_result_message([ToolResultBlock("c1", "Image a.png, attached.", images=[PICTURE])]),
+    ]
+    payload = _payload_for(project, messages, cache_mode="implicit")
+    roles = [m["role"] for m in payload["messages"]]
+    assert roles == ["system", "user", "assistant", "tool", "user"]
+    assert payload["messages"][3]["content"] == "Image a.png, attached."
+    trailing = payload["messages"][4]["content"]
+    assert trailing[0] == {"type": "text", "text": "Images returned by tool call c1:"}
+    assert trailing[-1]["type"] == "image_url"
+
+
+def test_a_text_only_payload_is_unchanged_by_image_support(project: Path) -> None:
+    """Byte-stable prefixes are what the cache keys on."""
+    payload = OpenRouterProvider(api_key="k").build_payload(_request(project, cache_mode="none"))
+    assert payload["messages"][1] == {"role": "user", "content": "hi"}
+    assert payload["messages"][3] == {"role": "tool", "tool_call_id": "c1", "content": "contents"}
+
+
+def test_an_image_is_named_with_the_file_it_came_from(project: Path) -> None:
+    dragged = replace(PICTURE, source="mockup.png")
+    payload = _payload_for(project, [user_message("", [dragged])], cache_mode="implicit")
+    assert payload["messages"][1]["content"][0] == {
+        "type": "text",
+        "text": "[Image #1: mockup.png]",
+    }

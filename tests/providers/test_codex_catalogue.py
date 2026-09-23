@@ -196,3 +196,10 @@ def test_an_effort_off_the_known_scale_is_left_to_the_backend() -> None:
     assert resolve_effort("telepathic", _model(("low", "high"))) == "telepathic"
     # A model that publishes no levels is not a model HX can clamp against.
     assert resolve_effort("max", _model(())) == "max"
+
+
+def test_image_input_follows_the_entrys_modalities() -> None:
+    assert parse_entry(entry("a", input_modalities=["text", "image"])).supports_images
+    assert not parse_entry(entry("b", input_modalities=["text"])).supports_images
+    # Older catalogues had no field, and every model then took images.
+    assert parse_entry(entry("c")).supports_images

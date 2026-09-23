@@ -54,6 +54,7 @@ WIDGET_ACTIONS = {
     "tui.input.steer",
     "tui.input.newLine",
     "tui.input.complete",
+    "tui.input.pasteImage",
     "tui.editor.cursorLeft",
     "tui.editor.cursorRight",
     "tui.editor.cursorWordLeft",

@@ -17,10 +17,12 @@ from typing import TYPE_CHECKING, Any
 from hx.core import events as ev
 from hx.core.messages import (
     ContentBlock,
+    ImageBlock,
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
+    UserTurn,
 )
 from hx.core.usage import format_tokens
 from hx.git import BranchWatcher
@@ -40,6 +42,8 @@ from hx.tui.views.prompt import Prompt
 from hx.tui.views.transcript import Session
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from hx.config import Settings
     from hx.core.events import EventBus
     from hx.core.loop import AgentLoop
@@ -102,6 +106,7 @@ class HXSession:
             rows_available=self._terminal_rows,
             on_submit=self._submit,
             on_steer=self._steer,
+            on_image_request=self._request_images,
         )
         self.view = Session(__version__, quiet=settings.quiet_startup, prompt=self.prompt)
         # Injectable so a test can drive a whole session without a tty, and
@@ -125,7 +130,7 @@ class HXSession:
         that reached nothing while whoever asked waited on it forever."""
         self._overlay_finished: asyncio.Event | None = None
         """Set when whatever is on the overlay reports that it is done."""
-        self._queued: list[str] = []
+        self._queued: list[UserTurn] = []
         self._background: set[asyncio.Task[Any]] = set()
         """Detached work - session renaming - held so it is not garbage
         collected mid-flight."""
@@ -263,7 +268,7 @@ class HXSession:
 
     @property
     def queued(self) -> list[str]:
-        return self._queued
+        return [turn.text for turn in self._queued]
 
     @property
     def last_message_text(self) -> str:
@@ -514,13 +519,18 @@ class HXSession:
         always the first half of "say that differently".
         """
         session = self.loop.session
-        prompt = session.messages[index].text() if index < len(session.messages) else ""
+        cut = session.messages[index] if index < len(session.messages) else None
+        prompt = cut.text() if cut is not None else ""
         report = None
         if self.checkpoints is not None:
             report = self.checkpoints.restore_to(index, self.tracker)
         session.rewind_to(index)
         self._replay_transcript()
         if prompt:
+            # The images come back with their tokens, so the draft still
+            # means what it meant when it was sent.
+            if cut is not None:
+                self.prompt.remember_images(cut.images())
             self.prompt.text = prompt
             self.prompt.buffer.cursor = len(prompt)
         self.runner.request_immediate_render()
@@ -559,8 +569,11 @@ class HXSession:
                 # Tool results ride on a user-role message that carries no text
                 # of its own; each is drawn with the call that produced it.
                 # Replaying one as a user message drew an empty tinted bar.
-                if text := message.text():
-                    transcript.append(UserMessage(text))
+                # Remembered so the numbering carries on past them, and a
+                # prompt recalled from history still has its pictures.
+                self.prompt.remember_images(message.images())
+                if (text := message.text()) or message.images():
+                    transcript.append(UserMessage(text, message.images()))
                 continue
             for block in message.content:
                 self._replay_block(block, results)
@@ -633,7 +646,8 @@ class HXSession:
         """Promote one queued message into the running turn."""
         if not 0 <= index < len(self._queued):
             return
-        self.loop.steer(self._queued.pop(index))
+        turn = self._queued.pop(index)
+        self.loop.steer(turn.text, turn.images)
         self.status.update(queued=len(self._queued))
 
     def _drain_queue(self) -> None:
@@ -647,9 +661,9 @@ class HXSession:
         """
         if not self._queued:
             return
-        text = self._queued.pop(0)
+        turn = self._queued.pop(0)
         self.status.update(queued=len(self._queued))
-        self._turn = asyncio.create_task(self._run_turn(text))
+        self._turn = asyncio.create_task(self._run_turn(turn.text, turn.images))
         self.runner.request_immediate_render()
 
     def _clear_or_exit(self) -> None:
@@ -923,26 +937,27 @@ class HXSession:
             return
         self.view.handle_input(name, key.data)
 
-    def _submit(self, text: str) -> None:
+    def _submit(self, text: str, images: Sequence[ImageBlock] = ()) -> None:
         if text.startswith("!"):
             self._side = asyncio.create_task(self.run_shell_passthrough(text[1:].strip()))
             return
-        self.view.transcript.append(UserMessage(text))
         if text.startswith("/"):
+            self.view.transcript.append(UserMessage(text))
             self._side = asyncio.create_task(self._run_command(text))
             return
+        self.view.transcript.append(UserMessage(text, images))
         if self.is_busy:
             if self._enter_steers:
                 # The setting the placeholder has been promising: enter puts
                 # the message into the running turn instead of behind it.
-                self.loop.steer(text)
+                self.loop.steer(text, images)
                 return
             # Held rather than refused: the user typed it while a turn was
             # running, and dropping it loses the message.
-            self._queued.append(text)
+            self._queued.append(UserTurn(text, tuple(images)))
             self.status.update(queued=len(self._queued))
             return
-        self._turn = asyncio.create_task(self._run_turn(text))
+        self._turn = asyncio.create_task(self._run_turn(text, images))
 
     async def run_shell_passthrough(self, command: str) -> None:
         """``!command`` - run a shell command directly, without a model turn.
@@ -1055,7 +1070,7 @@ class HXSession:
         finally:
             self.runner.request_immediate_render()
 
-    def _steer(self, text: str) -> None:
+    def _steer(self, text: str, images: Sequence[ImageBlock] = ()) -> None:
         """Alt+Enter: put this into the running turn now.
 
         With nothing in flight there is no tail to drain a queue, so a steer
@@ -1069,17 +1084,80 @@ class HXSession:
         """
         if not self.is_busy:
             if text:
-                self._submit(text)
+                self._submit(text, images)
             return
         if not text:
             self.steer_queued()
             return
-        self.view.transcript.append(UserMessage(text))
-        self.loop.steer(text)
+        self.view.transcript.append(UserMessage(text, images))
+        self.loop.steer(text, images)
 
-    async def _run_turn(self, text: str) -> None:
+    def _request_images(self, paths: list[Path] | None) -> None:
+        """Load images for the prompt: the named files, or the clipboard's."""
+
+        async def attach() -> None:
+            # Detached, so anything unforeseen - a scratch file that cannot be
+            # written, a decoder fault - would otherwise vanish with the task
+            # and leave the keypress doing nothing at all.
+            try:
+                await self._attach_images(paths)
+            except Exception as error:
+                self._notice(f"Could not attach the image: {error}", "error")
+                self.runner.request_immediate_render()
+
+        task = asyncio.create_task(attach())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _attach_images(self, paths: list[Path] | None) -> None:
+        """Read, normalise and attach, off the event loop.
+
+        A failure is a notice and the draft is left as it was. A model that
+        takes no images is warned about here, when the picture is attached,
+        rather than discovered from its reply.
+        """
+        from hx.core.images import ImageError, load_image, load_image_file
+        from hx.tui.clipboard import ClipboardError, read_image
+
+        images: list[ImageBlock] = []
+        if paths is None:
+            try:
+                copied = await read_image()
+            except ClipboardError as error:
+                self._notice(f"Could not paste an image: {error}", "warning")
+                return
+            if copied is None:
+                self._notice("No image on the clipboard.", "warning")
+                return
+            try:
+                images.append(
+                    await asyncio.to_thread(load_image, copied.data, label=copied.name or "")
+                )
+            except ImageError as error:
+                self._notice(f"Could not paste the image: {error}", "error")
+                return
+        else:
+            for path in paths:
+                try:
+                    images.append(await asyncio.to_thread(load_image_file, path))
+                except ImageError as error:
+                    self._notice(f"Could not attach {path.name}: {error}", "error")
+
+        for image in images:
+            self.prompt.attach_image(image)
+        info = self.loop.model_info
+        if images and (info is None or not info.supports_images):
+            name = info.name if info is not None else self.loop.model
+            self._notice(
+                f"{name} does not accept images - it will be told one was attached, "
+                "not shown it. /model to pick one that does.",
+                "warning",
+            )
+        self.runner.request_immediate_render()
+
+    async def _run_turn(self, text: str, images: Sequence[ImageBlock] = ()) -> None:
         try:
-            await self.loop.run(text)
+            await self.loop.run(text, images)
         except asyncio.CancelledError:
             # An interrupt stops the agent without draining the queue into a
             # new turn - the user said stop, and starting another turn is the

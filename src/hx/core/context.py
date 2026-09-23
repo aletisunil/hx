@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from hx.core.messages import Message
+from hx.core.messages import ImageBlock, Message, ToolResultBlock
 
 if TYPE_CHECKING:
     from hx.config import PromptSettings
@@ -139,7 +139,7 @@ class ContextBuilder:
             PromptSection(
                 "history",
                 "",
-                sum(self.estimate_tokens(_message_text(m)) for m in active),
+                sum(self.estimate_message_tokens(m) for m in active),
             ),
         ]
 
@@ -177,8 +177,7 @@ class ContextBuilder:
             self._breakpoint_b = candidate
         else:
             below = sum(
-                self.estimate_tokens(_message_text(m))
-                for m in messages[self._breakpoint_b : candidate]
+                self.estimate_message_tokens(m) for m in messages[self._breakpoint_b : candidate]
             )
             if below >= self.BREAKPOINT_HYSTERESIS_TOKENS:
                 self._breakpoint_b = candidate
@@ -196,6 +195,15 @@ class ContextBuilder:
         """
         return int(len(text) / self.CHARS_PER_TOKEN) + 1 if text else 0
 
+    def estimate_message_tokens(self, message: Message) -> int:
+        """:meth:`estimate_tokens` for a whole message, images included.
+
+        An image is charged by its pixel count, not its base64 length: a
+        screenshot is a megabyte of text to the character estimate and about
+        1,500 tokens to the model.
+        """
+        return self.estimate_tokens(_message_text(message)) + message_image_tokens(message)
+
 
 def sort_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Canonical tool ordering: builtins first, then ``mcp__*``, each by name.
@@ -206,6 +214,19 @@ def sort_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         tools, key=lambda t: (str(t.get("name", "")).startswith("mcp__"), t.get("name", ""))
     )
+
+
+def message_image_tokens(message: Message) -> int:
+    """Estimated tokens for every image in a message, tool results' included."""
+    from hx.core.images import estimate_tokens
+
+    total = 0
+    for block in message.content:
+        if isinstance(block, ImageBlock):
+            total += estimate_tokens(block)
+        elif isinstance(block, ToolResultBlock):
+            total += sum(estimate_tokens(image) for image in block.images)
+    return total
 
 
 def _message_text(message: Message) -> str:

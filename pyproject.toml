@@ -33,6 +33,7 @@ dependencies = [
   "pygments>=2.17",
   # CommonMark parsing. The renderer is ours; the parser is not worth writing.
   "markdown-it-py>=3.0",
+  "pillow>=10.4",
 ]
 
 [project.optional-dependencies]

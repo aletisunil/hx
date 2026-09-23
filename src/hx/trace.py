@@ -341,6 +341,12 @@ pre.code {
   border-radius: 6px; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere;
 }
 pre.code.error { border-color: var(--error); color: var(--error); }
+figure.image { margin: 10px 0 0; }
+figure.image img {
+  display: block; max-width: 100%; max-height: 32em; height: auto;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+}
+figure.image figcaption { margin-top: 4px; }
 .clamped { max-height: 17em; overflow: hidden; position: relative; }
 .clamped::after {
   content: ""; position: absolute; inset: auto 0 0 0; height: 3.4em; pointer-events: none;
@@ -718,12 +724,36 @@ function thinkingLabel(block) {
   return "thinking - summary only, reasoning encrypted";
 }
 
+/* An image is drawn from the bytes the session holds, so the trace shows what
+   the model was shown. Only the formats HX sends, and only base64, are put into
+   a data URL: the payload came from a session file, which is not HX's to trust. */
+var IMAGE_TYPES = { "image/png": 1, "image/jpeg": 1, "image/gif": 1, "image/webp": 1 };
+function renderImage(image) {
+  var figure = el("figure", "image");
+  var size = image.width && image.height ? image.width + "\\u00d7" + image.height : "";
+  var source = image.source && image.source !== image.label ? image.source : "";
+  var caption = [image.label || "image", source, size].filter(Boolean).join(" \\u00b7 ");
+  if (IMAGE_TYPES[image.media_type] && /^[A-Za-z0-9+\\/=]*$/.test(image.data || "")) {
+    var img = el("img");
+    img.src = "data:" + image.media_type + ";base64," + image.data;
+    img.alt = caption;
+    img.loading = "lazy";
+    figure.appendChild(img);
+  } else {
+    figure.appendChild(el("div", "meta", "(image not shown: unrecognised format)"));
+  }
+  figure.appendChild(el("figcaption", "meta", caption));
+  return figure;
+}
+
 function renderResult(result) {
   var box = el("div");
   var label = el("div", "label", result.is_error ? "result - error" : "result");
   box.appendChild(label);
   var pre = el("pre", result.is_error ? "code error" : "code", result.content || "");
   box.appendChild(clampable(pre, result.content || ""));
+  var images = result.images || [];
+  for (var i = 0; i < images.length; i++) { box.appendChild(renderImage(images[i])); }
   if (result.spilled_path) {
     box.appendChild(el("div", "meta", "Output was capped; the whole of it is at " + result.spilled_path));
   }
@@ -737,6 +767,7 @@ function renderBlock(block) {
     text.appendChild(clampable(body, block.text || ""));
     return text;
   }
+  if (block.type === "image") { return renderImage(block); }
   if (block.type === "thinking") {
     var think = el("div", "block thinking");
     think.appendChild(el("div", "label", thinkingLabel(block)));
@@ -811,6 +842,7 @@ function searchText(message) {
     if (block.name) { parts.push(block.name); }
     if (block.input) { parts.push(pretty(block.input)); }
     if (block.content) { parts.push(block.content); }
+    if (block.label) { parts.push(block.label); }
     var result = block.type === "tool_use" ? resultOf[block.id] : null;
     if (result) { parts.push(result.content || ""); }
   }

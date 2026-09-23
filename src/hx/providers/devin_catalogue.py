@@ -170,6 +170,7 @@ def _standalone_info(config: ModelConfig) -> ModelInfo:
         # Routers ship no features; Cascade only serves tool-calling models.
         supports_tools=config.supports_tools if config.has_features else True,
         supports_reasoning=_supports_thinking(config),
+        supports_images=config.supports_images,
         provider_id="devin",
         is_subscription=True,
         model_router=_is_assign_router(config),
@@ -267,6 +268,9 @@ def _family_info(lane: _Lane, by_uid: dict[str, ModelConfig]) -> ModelInfo | Non
         id=f"{NAMESPACE}{lane.id}",
         name=lane.name,
         supports_reasoning=True,
+        # Any effort may be picked, so the family takes images only if every
+        # tier it routes to does.
+        supports_images=all(by_uid[uid].supports_images for uid in routed),
         model_router=False,
         reasoning_levels=levels,
         default_reasoning_level=default_level,

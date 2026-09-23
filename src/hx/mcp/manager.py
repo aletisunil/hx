@@ -12,12 +12,16 @@ a server whose tool order varies between runs would invalidate the cache prefix.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hx.core.images import ImageError, load_image
+from hx.core.messages import ImageBlock
 from hx.mcp.client import MCPClient, MCPError, MCPToolDef, StdioTransport
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 from hx.tools.output import cap_output, summarize_for_ui
@@ -72,10 +76,16 @@ class MCPTool(Tool):
 
     async def run(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         try:
-            output = await self.client.call_tool(self.definition.name, params)
+            result = await self.client.call_tool(self.definition.name, params)
         except MCPError as exc:
             raise ToolError(str(exc)) from exc
 
+        output = result.text
+        # Off the event loop: a full-page screenshot takes seconds to decode
+        # and shrink, and the session would freeze for all of them.
+        images, problems = await asyncio.to_thread(_images, result.images, self.definition.name)
+        if problems:
+            output = "\n".join([output, *problems])
         capped = cap_output(
             output,
             session_id=ctx.session_id,
@@ -87,7 +97,27 @@ class MCPTool(Tool):
             content=capped.text,
             spilled_path=capped.spilled_path,
             summary=summarize_for_ui(output),
+            images=images,
         )
+
+
+def _images(raw: list[tuple[str, str]], tool: str) -> tuple[list[ImageBlock], list[str]]:
+    """Normalise a server's images, and say which could not be.
+
+    A server's image is whatever size it chose - a full-page browser screenshot
+    is easily past what a route accepts - so each goes through the same
+    normalisation as a pasted one. One that fails becomes a line of text, so the
+    model knows an image was returned rather than seeing nothing.
+    """
+    images: list[ImageBlock] = []
+    problems: list[str] = []
+    for index, (data, _mime) in enumerate(raw, start=1):
+        label = f"{tool} image {index}" if len(raw) > 1 else f"{tool} image"
+        try:
+            images.append(load_image(base64.b64decode(data, validate=False), label=label))
+        except (ImageError, binascii.Error) as exc:
+            problems.append(f"[{label} could not be shown: {exc}]")
+    return images, problems
 
 
 class MCPManager:

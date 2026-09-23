@@ -12,7 +12,10 @@ import abc
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from hx.core.messages import ImageBlock
 
 
 @dataclass(slots=True)
@@ -36,6 +39,8 @@ class ToolResult:
     summary: str = ""
     """One-line description for the collapsed TUI block, e.g. ``Read 340 lines``."""
     metadata: dict[str, Any] = field(default_factory=dict)
+    images: list[ImageBlock] = field(default_factory=list)
+    """Images for the model to see alongside :attr:`content`."""
 
 
 class Tool(abc.ABC):

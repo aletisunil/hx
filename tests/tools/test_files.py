@@ -249,3 +249,36 @@ def test_file_tracker_notices_content_changes(tmp_path: Path, tracker: FileTrack
     path.write_text("v2")
     assert tracker.changed_since_read(path)
     assert tracker.stale_files() == [path.resolve()]
+
+
+async def test_an_image_file_is_returned_as_an_image(tmp_path: Path, ctx: ToolContext) -> None:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 16), "blue").save(buffer, format="PNG")
+    (ctx.cwd / "shot.png").write_bytes(buffer.getvalue())
+    # And one saved with no extension, which is still a picture.
+    (ctx.cwd / "screenshot").write_bytes(buffer.getvalue())
+
+    for name in ("shot.png", "screenshot"):
+        result = await ReadTool(FileTracker()).run({"file_path": name}, ctx)
+        [image] = result.images
+        assert (image.media_type, image.width, image.height) == ("image/png", 32, 16)
+        assert result.content.startswith(f"Image {ctx.cwd / name} (")
+        assert result.summary == "read image 32x16"
+
+
+async def test_a_broken_image_is_an_error_not_binary_noise(ctx: ToolContext) -> None:
+    (ctx.cwd / "broken.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+    with pytest.raises(ToolError, match="not a readable image"):
+        await ReadTool(FileTracker()).run({"file_path": "broken.png"}, ctx)
+
+
+async def test_text_that_opens_like_an_image_is_still_text(ctx: ToolContext) -> None:
+    """Only a binary file is sniffed for an image signature."""
+    (ctx.cwd / "notes").write_text("GIF89a is the header this file talks about\n")
+    result = await ReadTool(FileTracker()).run({"file_path": "notes"}, ctx)
+    assert result.images == []
+    assert "GIF89a is the header" in result.content

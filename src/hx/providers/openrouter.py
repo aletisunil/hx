@@ -26,6 +26,7 @@ import httpx
 from hx.auth.resolve import MissingCredential
 from hx.auth.store import OPENROUTER, ApiKeyCredential, AuthStore, mask
 from hx.core.messages import (
+    ImageBlock,
     Message,
     StopReason,
     TextBlock,
@@ -334,6 +335,11 @@ def _encode_message(message: Message, *, structured: bool) -> list[dict[str, Any
     message can expand into several wire messages. Text in the same message
     follows them as a user turn rather than being discarded: a late-injected
     reminder rides the newest user message, and that is often this one.
+
+    Images a tool returned ride that same trailing user turn. A ``tool`` message
+    is text-only in chat-completions - not every upstream accepts an image part
+    there - whereas an image in a user turn is understood by every vision model
+    OpenRouter routes to.
     """
     if results := [b for b in message.content if isinstance(b, ToolResultBlock)]:
         entries: list[dict[str, Any]] = [
@@ -344,7 +350,19 @@ def _encode_message(message: Message, *, structured: bool) -> list[dict[str, Any
             }
             for block in results
         ]
-        if trailing := "".join(b.text for b in message.content if isinstance(b, TextBlock)):
+        trailing = "".join(b.text for b in message.content if isinstance(b, TextBlock))
+        pictures: list[dict[str, Any]] = []
+        for block in results:
+            if block.images:
+                pictures.append(
+                    {"type": "text", "text": f"Images returned by tool call {block.tool_use_id}:"}
+                )
+                pictures.extend(_image_parts(block.images))
+        pictures.extend(_image_parts(message.images()))
+        if pictures:
+            text_part = [{"type": "text", "text": trailing}] if trailing else []
+            entries.append({"role": "user", "content": [*text_part, *pictures]})
+        elif trailing:
             entries.append(_text_message("user", trailing, structured=structured))
         return entries
 
@@ -369,9 +387,25 @@ def _encode_message(message: Message, *, structured: bool) -> list[dict[str, Any
         return [entry]
 
     body = text or "".join(text_parts)
+    if images := message.images():
+        # An image needs the list form whichever shape the route otherwise
+        # takes, and a pasted screenshot alone needs no empty text part.
+        text_part = [{"type": "text", "text": body}] if body else []
+        return [{"role": message.role, "content": [*text_part, *_image_parts(images)]}]
     if structured:
         return [{"role": message.role, "content": [{"type": "text", "text": body}]}]
     return [{"role": message.role, "content": body}]
+
+
+def _image_parts(images: list[ImageBlock]) -> list[dict[str, Any]]:
+    """Each image as an ``image_url`` part, named first so text that refers to
+    ``[Image #2]`` can be matched to the picture it means."""
+    parts: list[dict[str, Any]] = []
+    for image in images:
+        if caption := image.caption():
+            parts.append({"type": "text", "text": f"[{caption}]"})
+        parts.append({"type": "image_url", "image_url": {"url": image.data_url()}})
+    return parts
 
 
 def _encode_tool(tool: dict[str, Any]) -> dict[str, Any]:

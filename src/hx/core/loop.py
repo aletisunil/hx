@@ -34,12 +34,14 @@ from hx.core.events import (
 )
 from hx.core.messages import (
     ContentBlock,
+    ImageBlock,
     Message,
     StopReason,
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
+    UserTurn,
     assistant_message,
     tool_result_message,
     user_message,
@@ -51,7 +53,7 @@ from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, Strea
 from hx.tools.base import ToolContext
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     from hx.config import Settings
     from hx.core.compaction import Compactor
@@ -119,7 +121,7 @@ class AgentLoop:
         self.hooks = hooks
         self._cancelled = False
         self._turn_index = 0
-        self._steer: list[str] = []
+        self._steer: list[UserTurn] = []
         """Messages the user pushed into a running turn, not yet delivered."""
         self._steered = False
         """Set while a steer is the reason the current stream is being cancelled."""
@@ -152,15 +154,21 @@ class AgentLoop:
         self.session.meta.model = model_id
         self.model_info = model_info
 
-    async def run(self, user_input: str) -> TurnResult:
+    async def run(self, user_input: str, images: Sequence[ImageBlock] = ()) -> TurnResult:
         """Run turns until the model stops calling tools.
 
         Cancellation (Esc / Ctrl+C) raises ``asyncio.CancelledError`` into this
         coroutine; the partial assistant message is still appended to the
         transcript so the next turn has an honest history.
+
+        Args:
+            user_input: What the user typed. Empty continues the conversation
+                without a new user turn - unless there are images, which are a
+                turn on their own.
+            images: Attached to the user turn, after its text.
         """
         self._cancelled = False
-        if user_input:
+        if user_input or images:
             gate = await self._fire_hooks(lambda h: h.user_prompt_submit(user_input))
             if gate.blocked:
                 reason = gate.reason or "blocked by hook"
@@ -168,7 +176,7 @@ class AgentLoop:
                 return TurnResult(StopReason.ERROR, [], error=reason)
             if gate.context_text:
                 user_input = f"{user_input}\n\n{gate.context_text}"
-            self.session.append(user_message(user_input))
+            self.session.append(user_message(user_input, images))
 
         produced: list[Message] = []
         stop_reason = StopReason.END_TURN
@@ -235,7 +243,7 @@ class AgentLoop:
 
     # --- steering ---------------------------------------------------------
 
-    def steer(self, text: str) -> bool:
+    def steer(self, text: str, images: Sequence[ImageBlock] = ()) -> bool:
         """Put ``text`` into the turn that is running now.
 
         Returns whether it will land mid-turn. ``False`` means there was no turn
@@ -250,10 +258,10 @@ class AgentLoop:
         working tree ends up in a state nobody asked for.
         """
         text = text.strip()
-        if not text or self.origin is not None:
+        if (not text and not images) or self.origin is not None:
             return False
 
-        self._steer.append(text)
+        self._steer.append(UserTurn(text, tuple(images)))
         stream = self._stream_task
         if stream is None or stream.done():
             return False
@@ -261,7 +269,7 @@ class AgentLoop:
         stream.cancel()
         return True
 
-    def take_pending_steer(self) -> list[str]:
+    def take_pending_steer(self) -> list[UserTurn]:
         """Hand undelivered steers back to the caller, clearing them.
 
         A cancelled turn drops what it was doing but not what the user typed:
@@ -280,8 +288,8 @@ class AgentLoop:
         provider flattens mixed content.
         """
         delivered: list[Message] = []
-        for text in self.take_pending_steer():
-            message = user_message(text)
+        for turn in self.take_pending_steer():
+            message = user_message(turn.text, turn.images)
             self.session.append(message)
             delivered.append(message)
         return delivered
@@ -449,6 +457,11 @@ class AgentLoop:
 
     async def _build_request(self) -> ProviderRequest:
         messages = await self.injections.apply(self.session.active_messages())
+        if self.model_info is None or not self.model_info.supports_images:
+            from hx.core.images import without_images
+
+            name = self.model_info.name if self.model_info is not None else self.model
+            messages = without_images(messages, name)
         cache_mode = self.model_info.cache_mode.value if self.model_info else "none"
         assembled = self.context.build(
             messages=messages,
@@ -674,6 +687,7 @@ class AgentLoop:
             content=content,
             is_error=result.is_error or post.blocked,
             spilled_path=result.spilled_path,
+            images=list(result.images),
         )
 
     async def _check_permission(self, call: ToolUseBlock) -> ToolResultBlock | None:

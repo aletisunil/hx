@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from hx.config import PermissionMode
-from hx.core.messages import StopReason
+from hx.core.messages import ImageBlock, StopReason, UserTurn
 from hx.core.usage import TurnUsage
 from hx.providers.base import StreamDelta, StreamEnd
 from hx.providers.fake import Pause
@@ -618,7 +619,7 @@ async def test_typing_during_a_turn_queues(hx_home: Path, tmp_path: Path) -> Non
 async def test_clearing_the_queue_drops_everything_waiting(hx_home: Path, tmp_path: Path) -> None:
     session = build_session(tmp_path)
     async with Driver(session) as driver:
-        session._queued.extend(["one", "two"])
+        session._queued.extend([UserTurn("one"), UserTurn("two")])
         session.clear_queue()
         await driver.settle()
         assert session.queued == []
@@ -636,10 +637,10 @@ async def test_a_queued_message_is_sent_when_the_turn_ends(hx_home: Path, tmp_pa
     release = asyncio.Event()
     run_turn = session.loop.run
 
-    async def held(text: str) -> None:
+    async def held(text: str, images: Sequence[ImageBlock] = ()) -> None:
         if text == "one":
             await release.wait()
-        await run_turn(text)
+        await run_turn(text, images)
 
     session.loop.run = held  # type: ignore[method-assign]
 
@@ -662,7 +663,7 @@ async def test_an_interrupt_keeps_the_queue_rather_than_draining_it(
     """The user said stop. Starting the next turn is the opposite of that."""
     session = build_session(tmp_path)
 
-    async def never(text: str) -> None:
+    async def never(text: str, images: Sequence[ImageBlock] = ()) -> None:
         await asyncio.Event().wait()
 
     session.loop.run = never  # type: ignore[method-assign]
@@ -696,9 +697,14 @@ async def test_enter_while_busy_steers_when_the_setting_says_so(
     )
 
     steered: list[str] = []
-    session.loop.steer = steered.append  # type: ignore[method-assign]
 
-    async def never(text: str) -> None:
+    def steer(text: str, images: Sequence[ImageBlock] = ()) -> bool:
+        steered.append(text)
+        return True
+
+    session.loop.steer = steer  # type: ignore[method-assign]
+
+    async def never(text: str, images: Sequence[ImageBlock] = ()) -> None:
         await asyncio.Event().wait()
 
     session.loop.run = never  # type: ignore[method-assign]
@@ -719,9 +725,14 @@ async def test_steering_an_empty_prompt_promotes_the_queue(hx_home: Path, tmp_pa
     session = build_session(tmp_path)
 
     steered: list[str] = []
-    session.loop.steer = steered.append  # type: ignore[method-assign]
 
-    async def never(text: str) -> None:
+    def steer(text: str, images: Sequence[ImageBlock] = ()) -> bool:
+        steered.append(text)
+        return True
+
+    session.loop.steer = steer  # type: ignore[method-assign]
+
+    async def never(text: str, images: Sequence[ImageBlock] = ()) -> None:
         await asyncio.Event().wait()
 
     session.loop.run = never  # type: ignore[method-assign]
@@ -746,7 +757,7 @@ async def test_the_queue_commands_match_what_slash_queue_calls(
     """``/queue clear`` reports the count, and ``/queue steer n`` takes one."""
     session = build_session(tmp_path)
     async with Driver(session) as driver:
-        session._queued.extend(["one", "two"])
+        session._queued.extend([UserTurn("one"), UserTurn("two")])
         session.steer_queued(1)
         await driver.settle()
         assert session.queued == ["one"]
@@ -760,7 +771,7 @@ async def test_a_slash_command_does_not_displace_the_running_turn(
     """They used to share one handle, so escape cancelled the wrong one."""
     session = build_session(tmp_path)
 
-    async def never(text: str) -> None:
+    async def never(text: str, images: Sequence[ImageBlock] = ()) -> None:
         await asyncio.Event().wait()
 
     session.loop.run = never  # type: ignore[method-assign]

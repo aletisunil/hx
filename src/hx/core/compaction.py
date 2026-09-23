@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 from hx.core.messages import (
+    ImageBlock,
     Message,
     TextBlock,
     ThinkingBlock,
@@ -173,8 +174,10 @@ class Compactor:
 
     def _estimate(self, messages: list[Message]) -> int:
         if self.context is not None:
-            return sum(self.context.estimate_tokens(_message_text(m)) for m in messages)
-        return sum(len(_message_text(m)) // 4 for m in messages)
+            return sum(self.context.estimate_message_tokens(m) for m in messages)
+        from hx.core.context import message_image_tokens
+
+        return sum(len(_message_text(m)) // 4 + message_image_tokens(m) for m in messages)
 
 
 def _is_turn_edge(messages: list[Message], index: int) -> bool:
@@ -205,9 +208,21 @@ def render_transcript(messages: list[Message]) -> str:
             elif isinstance(block, ToolResultBlock):
                 marker = "error" if block.is_error else "result"
                 lines.append(f"[tool {marker}] {_clip(block.content)}")
+                lines.extend(f"[tool {marker}] {_image_line(image)}" for image in block.images)
+            elif isinstance(block, ImageBlock):
+                lines.append(f"[{message.role}] {_image_line(block)}")
             elif isinstance(block, ThinkingBlock):
                 continue
     return "\n".join(lines)
+
+
+def _image_line(image: ImageBlock) -> str:
+    """An image in the summary prompt. The summariser cannot see it, but it can
+    record that there was one - "the layout in Image #2" means nothing after
+    compaction unless the summary says what Image #2 was of."""
+    from hx.core.images import describe
+
+    return f"(attached an image: {describe(image)})"
 
 
 def _mechanical_summary(messages: list[Message]) -> str:

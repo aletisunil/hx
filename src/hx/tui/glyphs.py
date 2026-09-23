@@ -56,6 +56,9 @@ METER_EMPTY = "▱"
 and it is the only field down there with a quantity worth seeing at a glance
 rather than reading."""
 
+IMAGE = "▣ "
+"""An image attached to a message, listed under the text that refers to it."""
+
 RULE = "─"
 QUOTE_RAIL = "│ "
 ELLIPSIS = "…"

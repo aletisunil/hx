@@ -26,6 +26,22 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Images as input. `ctrl+v` attaches the image on the clipboard, dragging an
+  image file into the terminal attaches it, and `hx -p "..." --image PATH`
+  attaches one to a headless prompt. Each shows in the prompt as
+  `[Image #N]`.
+- `Read` returns image files as images, so the model can look at a screenshot
+  or mockup it is pointed at with `@path`.
+- Images returned by MCP tools reach the model instead of being dropped.
+- Every route carries images: OpenRouter, the Codex subscription and the Devin
+  subscription. Large images are scaled and re-encoded to fit each route's
+  limits.
+- A model that does not accept images is warned about when one is attached,
+  and is told the image was left out rather than sent a request that fails.
+  The `/model` picker marks the models that can see images.
+
 ### Fixed
 
 - Background jobs are waited for, not only signalled, when a session closes.

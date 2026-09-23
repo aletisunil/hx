@@ -14,6 +14,7 @@ import pytest
 from hx.auth.resolve import ResolvedAuth
 from hx.core.context import AssembledContext, PromptSection
 from hx.core.messages import (
+    ImageBlock,
     Message,
     StopReason,
     TextBlock,
@@ -451,3 +452,38 @@ async def test_an_enterprise_tenants_models_come_from_its_own_api_server(
 
     assert [m.id for m in models] == ["devin/swe-1-6"]
     assert server.hosts[-1] == (ENTERPRISE_HOST, wire.MODEL_CONFIGS_PATH)
+
+
+def test_images_ride_the_user_and_tool_channels() -> None:
+    picture = ImageBlock("image/png", "iVBORw0KGgo=", label="Image #1")
+    shot = ImageBlock("image/jpeg", "/9j/4AAQ", label="shot.jpg")
+    messages = [
+        Message(role="user", content=[picture]),
+        Message(
+            role="assistant",
+            model="devin/swe-2",
+            content=[ToolUseBlock(id="c1", name="Read", input={"file_path": "shot.jpg"})],
+        ),
+        Message(role="user", content=[ToolResultBlock("c1", "Image shot.jpg", images=[shot])]),
+    ]
+    user, _, tool = encode_history(messages, "cascade", "devin/swe-2")
+
+    # An image with no words is still the user's turn.
+    assert (user.source, user.prompt) == (wire.SOURCE_USER, "")
+    assert user.images == (wire.ImageData("iVBORw0KGgo=", "image/png", "Image #1"),)
+    assert tool.images == (wire.ImageData("/9j/4AAQ", "image/jpeg", "shot.jpg"),)
+
+
+def test_an_image_is_field_ten_of_the_prompt() -> None:
+    prompt = wire.ChatPrompt(
+        message_id="m",
+        source=wire.SOURCE_USER,
+        prompt="what is this",
+        images=(wire.ImageData("iVBORw0KGgo=", "image/png", "Image #1"),),
+    )
+    [image] = parse(prompt.encode().finish()).messages(10)
+    assert (image.text(1), image.text(2), image.text(3)) == (
+        "iVBORw0KGgo=",
+        "image/png",
+        "Image #1",
+    )

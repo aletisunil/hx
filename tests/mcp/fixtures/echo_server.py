@@ -12,6 +12,7 @@ Behaviour is driven by argv:
   --hang        accepts the connection and never replies
   --noise       prints non-JSON to stdout before responding
   --big         also offers a `big` tool returning a payload of a given size
+  --images      also offers a `screenshot` tool returning images
 """
 
 from __future__ import annotations
@@ -55,6 +56,16 @@ BIG_TOOL = {
 }
 
 
+SCREENSHOT_TOOL = {
+    "name": "screenshot",
+    "description": "Return a picture, and one that is not",
+    "inputSchema": {"type": "object", "properties": {}},
+}
+
+PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+"""A 1x1 PNG."""
+
+
 def send(payload: dict) -> None:
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
@@ -77,7 +88,8 @@ def handle(message: dict) -> dict | None:
         }
 
     if method == "tools/list":
-        offered = [*TOOLS, BIG_TOOL] if MODE == "--big" else TOOLS
+        extra = {"--big": [BIG_TOOL], "--images": [SCREENSHOT_TOOL]}.get(MODE, [])
+        offered = [*TOOLS, *extra]
         # Deliberately unsorted: the manager must impose a stable order itself.
         return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": list(reversed(offered))}}
 
@@ -100,6 +112,19 @@ def handle(message: dict) -> dict | None:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {"content": [{"type": "text", "text": filler}]},
+            }
+        if name == "screenshot":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "content": [
+                        {"type": "text", "text": "the page"},
+                        {"type": "image", "data": PIXEL, "mimeType": "image/png"},
+                        {"type": "image", "data": "bm90IGFuIGltYWdl", "mimeType": "image/png"},
+                        {"type": "audio", "data": "AAAA", "mimeType": "audio/wav"},
+                    ]
+                },
             }
         if name == "add":
             total = float(arguments.get("a", 0)) + float(arguments.get("b", 0))

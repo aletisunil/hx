@@ -55,6 +55,10 @@ class ModelInfo:
     cache_mode: CacheMode = CacheMode.NONE
     supports_tools: bool = True
     supports_reasoning: bool = False
+    supports_images: bool = False
+    """Accepts image input. Off unless the catalogue says so: an image sent to a
+    text-only model is a failed turn, one withheld is a line of text saying so
+    (see :func:`hx.core.images.without_images`)."""
     provider_id: str = "openrouter"
     """Which route serves this model. Derived from the id's namespace."""
     is_subscription: bool = False
@@ -106,6 +110,7 @@ CODEX_MODELS: tuple[ModelInfo, ...] = tuple(
         cache_mode=CacheMode.IMPLICIT,
         supports_tools=True,
         supports_reasoning=True,
+        supports_images=True,
         provider_id="openai-codex",
         is_subscription=True,
         reasoning_levels=levels,
@@ -451,6 +456,8 @@ class ModelRegistry:
                     cache_mode=CacheMode.IMPLICIT,
                     supports_tools=True,
                     supports_reasoning=True,
+                    # Every model the Codex catalogue has listed takes images.
+                    supports_images=True,
                     provider_id="openai-codex",
                     is_subscription=True,
                 )
@@ -477,6 +484,11 @@ class ModelRegistry:
             except (OSError, json.JSONDecodeError):
                 payload = {}
         self._fetched_at = payload.get("fetched_at", 0.0)
+        if _predates_images(payload):
+            # Written before image support was recorded, so every model in it
+            # reads as text-only. Treated as stale, so the refresh at startup
+            # replaces it rather than withholding images for up to a day.
+            self._fetched_at = 0.0
         for sub in SUBSCRIPTIONS:
             self._load_cached_subscription(sub, payload.get(_cache_key(sub)))
         for entry in payload.get("models", []):
@@ -530,6 +542,9 @@ class ModelRegistry:
                     },
                     "supported_parameters": (["tools"] if m.supports_tools else [])
                     + (["reasoning"] if m.supports_reasoning else []),
+                    "architecture": {
+                        "input_modalities": ["text", "image"] if m.supports_images else ["text"]
+                    },
                 }
                 for m in self.all()
                 if not m.is_subscription
@@ -547,6 +562,23 @@ class ModelRegistry:
         tmp.replace(path)
 
 
+def _predates_images(payload: dict[str, Any]) -> bool:
+    """Whether a cache file was written by a version that did not record image input."""
+    models = payload.get("models")
+    if isinstance(models, list) and any(
+        isinstance(entry, dict) and "architecture" not in entry for entry in models
+    ):
+        return True
+    for sub in SUBSCRIPTIONS:
+        block = payload.get(_cache_key(sub))
+        entries = block.get("models") if isinstance(block, dict) else None
+        if isinstance(entries, list) and any(
+            isinstance(entry, dict) and "supports_images" not in entry for entry in entries
+        ):
+            return True
+    return False
+
+
 def _cache_key(sub: _Subscription) -> str:
     """``codex`` predates the other routes and keeps its key, so an existing
     cache still restores after an upgrade."""
@@ -561,6 +593,7 @@ def _subscription_entry(model: ModelInfo) -> dict[str, Any]:
         "max_output_tokens": model.max_output_tokens,
         "supports_tools": model.supports_tools,
         "supports_reasoning": model.supports_reasoning,
+        "supports_images": model.supports_images,
         "levels": list(model.reasoning_levels),
         "default_level": model.default_reasoning_level,
     }
@@ -583,6 +616,7 @@ def _subscription_model(provider_id: str, entry: dict[str, Any]) -> ModelInfo:
         cache_mode=CacheMode.IMPLICIT,
         supports_tools=bool(entry.get("supports_tools", True)),
         supports_reasoning=bool(entry.get("supports_reasoning", True)),
+        supports_images=bool(entry.get("supports_images", False)),
         provider_id=provider_id,
         is_subscription=True,
         reasoning_levels=tuple(str(level) for level in entry.get("levels", ())),
@@ -622,6 +656,7 @@ def parse_model_entry(entry: dict[str, Any]) -> ModelInfo:
     top = entry.get("top_provider") or {}
     context_window = int(entry.get("context_length") or top.get("context_length") or 0)
     params = entry.get("supported_parameters") or []
+    modalities = (entry.get("architecture") or {}).get("input_modalities") or []
     return ModelInfo(
         id=model_id,
         name=str(entry.get("name") or model_id),
@@ -637,6 +672,7 @@ def parse_model_entry(entry: dict[str, Any]) -> ModelInfo:
         cache_mode=infer_cache_mode(model_id),
         supports_tools="tools" in params,
         supports_reasoning="reasoning" in params,
+        supports_images="image" in modalities,
     )
 
 

@@ -213,3 +213,52 @@ async def test_a_rename_that_raises_never_reaches_the_user() -> None:
             raise RuntimeError("no provider")
 
     await _rename_closed_session(Broken())
+
+
+def test_images_go_with_a_headless_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    parsed = parse_args(["-p", "why?", "--image", "a.png", "--image", "~/b.png"])
+    assert parsed.images == (tmp_path / "a.png", Path("~/b.png").expanduser())
+
+
+def test_images_without_a_headless_prompt_are_refused() -> None:
+    with pytest.raises(UsageError, match="--image goes with -p"):
+        parse_args(["--image", "a.png"])
+    with pytest.raises(UsageError, match="requires a path"):
+        parse_args(["-p", "x", "--image"])
+
+
+def test_an_unreadable_image_fails_before_any_model_call(
+    hx_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "fake.png").write_text("not an image")
+    assert main(["-p", "why?", "--image", str(tmp_path / "fake.png")]) == 2
+    assert "not a readable image" in capsys.readouterr().err
+
+
+async def test_a_refreshed_catalogue_reaches_the_running_loop() -> None:
+    """The loop resolved its model from the cache the refresh replaced; left
+    alone it decides image support and the context gauge from stale figures."""
+    from types import SimpleNamespace
+
+    from hx.cli import Runtime
+    from hx.providers.models import ModelInfo, ModelPricing
+
+    fresh = ModelInfo("m", "M", 1000, 100, ModelPricing(), supports_images=True)
+
+    class Models:
+        is_stale = True
+
+        async def refresh(self, _auth: object) -> None:
+            self.is_stale = False
+
+        def get_or_default(self, model_id: str) -> ModelInfo:
+            return fresh
+
+        def subscription_errors(self) -> list[tuple[str, str]]:
+            return []
+
+    loop = SimpleNamespace(model="m", model_info=None)
+    runtime = SimpleNamespace(models=Models(), auth=None, notices=[], loop=loop)
+    await Runtime.refresh_models_if_stale(runtime)  # type: ignore[arg-type]
+    assert loop.model_info is fresh

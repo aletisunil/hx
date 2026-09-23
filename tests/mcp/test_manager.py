@@ -218,3 +218,23 @@ async def test_a_large_tool_result_survives_the_transport(
         assert after.content == "still here"
     finally:
         await manager.close_all()
+
+
+async def test_a_tools_images_reach_the_model(hx_home: Path, ctx: ToolContext) -> None:
+    """Dropped before, so a browser screenshot tool returned nothing to look at."""
+    manager = MCPManager([config("shots", mode="--images")])
+    registry = ToolRegistry()
+    try:
+        await manager.connect_all()
+        await manager.register_tools(registry)
+        result = await registry.call("mcp__shots__screenshot", {}, ctx)
+    finally:
+        await manager.close_all()
+
+    assert not result.is_error
+    [image] = result.images
+    assert (image.media_type, image.width, image.height) == ("image/png", 1, 1)
+    assert image.label == "screenshot image 1"
+    # The one that would not decode is named, not silently lost.
+    assert result.content.startswith("the page")
+    assert "[screenshot image 2 could not be shown: not a readable image]" in result.content

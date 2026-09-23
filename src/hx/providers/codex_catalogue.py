@@ -144,11 +144,23 @@ def parse_entry(entry: dict[str, Any]) -> ModelInfo:
         cache_mode=CacheMode.IMPLICIT,
         supports_tools=True,
         supports_reasoning=bool(entry.get("supported_reasoning_levels")),
+        supports_images=_takes_images(entry.get("input_modalities")),
         provider_id="openai-codex",
         is_subscription=True,
         reasoning_levels=levels,
         default_reasoning_level=str(default_level) if default_level else None,
     )
+
+
+def _takes_images(raw: Any) -> bool:
+    """``input_modalities`` lists ``image`` for a vision model.
+
+    An entry without the field predates it, and every Codex model then took
+    images; one with the field but no ``image`` in it does not.
+    """
+    if raw is None:
+        return True
+    return isinstance(raw, list) and "image" in raw
 
 
 def parse_levels(raw: Any) -> tuple[str, ...]:

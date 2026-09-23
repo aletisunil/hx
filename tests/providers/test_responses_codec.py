@@ -7,6 +7,7 @@ from typing import Any
 
 from hx.core.context import AssembledContext, PromptSection
 from hx.core.messages import (
+    ImageBlock,
     Message,
     StopReason,
     TextBlock,
@@ -294,3 +295,36 @@ def test_stream_end_carries_the_latency() -> None:
     end = stream_end(state, 1234.0)
     assert isinstance(end, StreamEnd)
     assert end.usage.latency_ms == 1234.0
+
+
+PICTURE = ImageBlock("image/png", "iVBORw0KGgo=", label="Image #1")
+
+
+def test_a_user_image_is_input_image_content_after_the_text() -> None:
+    [item] = encode_input([Message(role="user", content=[TextBlock("see [Image #1]"), PICTURE])])
+    assert item["type"] == "message"
+    assert item["content"] == [
+        {"type": "input_text", "text": "see [Image #1]"},
+        {"type": "input_text", "text": "[Image #1]"},
+        {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+    ]
+
+
+def test_an_image_alone_is_still_a_message() -> None:
+    [item] = encode_input([Message(role="user", content=[PICTURE])])
+    assert [part["type"] for part in item["content"]] == ["input_text", "input_image"]
+
+
+def test_a_tool_image_goes_in_the_function_output_itself() -> None:
+    """What Codex itself sends for its image-viewing tool."""
+    [item] = encode_input(
+        [Message(role="user", content=[ToolResultBlock("c1", "Image a.png", images=[PICTURE])])]
+    )
+    assert item["type"] == "function_call_output"
+    assert item["output"][0] == {"type": "input_text", "text": "Image a.png"}
+    assert item["output"][-1]["type"] == "input_image"
+
+
+def test_a_text_only_tool_output_stays_a_string() -> None:
+    [item] = encode_input([Message(role="user", content=[ToolResultBlock("c1", "plain")])])
+    assert item["output"] == "plain"

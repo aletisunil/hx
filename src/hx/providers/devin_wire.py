@@ -222,6 +222,7 @@ class ModelConfig:
     disabled: bool = False
     max_tokens: int = 0
     max_output_tokens: int = 0
+    supports_images: bool = False
     has_features: bool = False
     supports_tools: bool = False
     supports_thinking: bool = False
@@ -253,6 +254,7 @@ def _model_config(fields: Fields) -> ModelConfig:
         label=fields.text(1).strip(),
         disabled=fields.flag(4),
         max_tokens=fields.int32(18),
+        supports_images=fields.flag(5),
         max_output_tokens=info.int32(13) if info is not None else 0,
         has_features=features is not None,
         supports_tools=features.flag(12) if features is not None else False,
@@ -284,6 +286,22 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageData:
+    """One ``ImageData``: an image riding a user or tool prompt."""
+
+    base64_data: str
+    mime_type: str
+    caption: str = ""
+
+    def encode(self) -> Writer:
+        image = Writer()
+        image.put_str(1, self.base64_data)
+        image.put_str(2, self.mime_type)
+        image.put_str(3, self.caption)
+        return image
+
+
+@dataclass(frozen=True, slots=True)
 class ChatPrompt:
     """One ``ChatMessagePrompt``: a turn of history on one of three channels."""
 
@@ -293,6 +311,7 @@ class ChatPrompt:
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str = ""
     tool_result_is_error: bool = False
+    images: tuple[ImageData, ...] = ()
     thinking: str = ""
     signature: str = ""
 
@@ -305,6 +324,8 @@ class ChatPrompt:
             prompt.put_message(6, call.encode())
         prompt.put_str(7, self.tool_call_id)
         prompt.put_bool(9, self.tool_result_is_error)
+        for image in self.images:
+            prompt.put_message(10, image.encode())
         prompt.put_str(11, self.thinking)
         prompt.put_str(12, self.signature)
         return prompt

@@ -292,3 +292,58 @@ async def test_another_accounts_entitlements_do_not_outlive_the_login(
     listed = {m.id for m in registry.all() if m.provider_id == "openai-codex"}
     assert "openai-codex/gpt-6-nova" not in listed
     assert listed == {m.id for m in CODEX_MODELS}
+
+
+# -- image input --------------------------------------------------------------
+
+
+def test_image_input_comes_from_the_openrouter_modalities() -> None:
+    from hx.providers.models import parse_model_entry
+
+    seeing = parse_model_entry(
+        {"id": "a/vision", "architecture": {"input_modalities": ["text", "image"]}}
+    )
+    blind = parse_model_entry({"id": "a/text", "architecture": {"input_modalities": ["text"]}})
+    unknown = parse_model_entry({"id": "a/old"})
+    assert (seeing.supports_images, blind.supports_images, unknown.supports_images) == (
+        True,
+        False,
+        False,
+    )
+
+
+def test_image_input_survives_the_cache(hx_home: Path) -> None:
+    from hx.providers.models import parse_model_entry
+
+    registry = ModelRegistry()
+    registry.load_cache()
+    registry._models["a/vision"] = parse_model_entry(
+        {"id": "a/vision", "architecture": {"input_modalities": ["text", "image"]}}
+    )
+    registry._fetched_at = 10.0
+    registry.save_cache()
+
+    restored = ModelRegistry()
+    restored.load_cache()
+    assert restored.get("a/vision").supports_images
+    assert restored._fetched_at == 10.0
+    # The shipped Codex list can see images; the shipped Devin one cannot.
+    assert all(restored.get(m.id).supports_images for m in CODEX_MODELS)
+    assert not any(restored.get(m.id).supports_images for m in DEVIN_MODELS)
+
+
+def test_a_cache_written_before_images_is_refreshed_at_once(hx_home: Path) -> None:
+    """It would read every model as text-only until tomorrow's refresh."""
+    import time
+
+    (hx_home / "models.json").write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "models": [{"id": "a/model", "name": "a", "context_length": 1000}],
+            }
+        )
+    )
+    registry = ModelRegistry()
+    registry.load_cache()
+    assert registry.is_stale

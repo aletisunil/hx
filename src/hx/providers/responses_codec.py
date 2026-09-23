@@ -22,6 +22,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from hx.core.messages import (
+    ImageBlock,
     Message,
     StopReason,
     TextBlock,
@@ -109,10 +110,13 @@ def encode_input(messages: Iterable[Message]) -> list[dict[str, Any]]:
 def _encode_message(message: Message) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     text_parts: list[str] = []
+    images: list[ImageBlock] = []
 
     for block in message.content:
         if isinstance(block, TextBlock):
             text_parts.append(block.text)
+        elif isinstance(block, ImageBlock):
+            images.append(block)
         elif isinstance(block, ThinkingBlock):
             items.extend(decode_reasoning(block.signature))
         elif isinstance(block, ToolUseBlock):
@@ -129,22 +133,41 @@ def _encode_message(message: Message) -> list[dict[str, Any]]:
                 {
                     "type": "function_call_output",
                     "call_id": block.tool_use_id,
-                    "output": block.content,
+                    # A list only when there is an image to carry: the plain
+                    # string is what every text-only result has always been.
+                    "output": (
+                        [
+                            {"type": "input_text", "text": block.content},
+                            *encode_images(block.images),
+                        ]
+                        if block.images
+                        else block.content
+                    ),
                 }
             )
 
     text = "".join(text_parts)
-    if text:
+    if text or images:
         role = "assistant" if message.role == "assistant" else "user"
         content_type = "output_text" if role == "assistant" else "input_text"
+        content: list[dict[str, Any]] = [{"type": content_type, "text": text}] if text else []
+        content.extend(encode_images(images))
         # Reasoning must precede the text it produced, so insert ahead of any
         # tool items but after the reasoning ones.
         insert_at = sum(1 for item in items if item.get("type") == "reasoning")
-        items.insert(
-            insert_at,
-            {"type": "message", "role": role, "content": [{"type": content_type, "text": text}]},
-        )
+        items.insert(insert_at, {"type": "message", "role": role, "content": content})
     return items
+
+
+def encode_images(images: list[ImageBlock]) -> list[dict[str, Any]]:
+    """Each image as ``input_image`` content, named first so text that refers
+    to ``[Image #2]`` can be matched to the picture it means."""
+    parts: list[dict[str, Any]] = []
+    for image in images:
+        if caption := image.caption():
+            parts.append({"type": "input_text", "text": f"[{caption}]"})
+        parts.append({"type": "input_image", "image_url": image.data_url()})
+    return parts
 
 
 def decode_reasoning(signature: str | None) -> list[dict[str, Any]]:

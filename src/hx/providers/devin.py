@@ -30,6 +30,7 @@ import httpx
 from hx.auth.oauth.devin import claims_of
 from hx.auth.resolve import ResolvedAuth
 from hx.core.messages import (
+    ImageBlock,
     Message,
     StopReason,
     TextBlock,
@@ -429,18 +430,30 @@ def encode_history(
                         prompt=block.content,
                         tool_call_id=block.tool_use_id,
                         tool_result_is_error=block.is_error,
+                        images=_images(block.images),
                     )
                 )
         text = message.text()
-        if text:
+        images = _images(message.images())
+        # An image with no words is a whole message: "what is this?" is often
+        # asked by pasting the screenshot and nothing else.
+        if text or images:
             prompts.append(
                 wire.ChatPrompt(
                     message_id=_entry_id(cascade_id, index, "user"),
                     source=wire.SOURCE_USER,
                     prompt=text,
+                    images=images,
                 )
             )
     return prompts
+
+
+def _images(blocks: list[ImageBlock]) -> tuple[wire.ImageData, ...]:
+    return tuple(
+        wire.ImageData(base64_data=block.data, mime_type=block.media_type, caption=block.caption())
+        for block in blocks
+    )
 
 
 def _assistant_prompt(

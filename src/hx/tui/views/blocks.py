@@ -12,17 +12,21 @@ column on every line for information the colour already carries.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hx.term.component import Widget
 from hx.term.markdown import render_markdown
 from hx.term.primitives import Box, HangingText, Lines
 from hx.term.sanitize import plain_text
-from hx.tui.glyphs import NOTICE, SPINNER, TOOL_DONE, TOOL_FAILED
+from hx.tui.glyphs import IMAGE, NOTICE, SPINNER, TOOL_DONE, TOOL_FAILED
 from hx.tui.limits import PREVIEW_LINES
 from hx.tui.paint import ThemePainter, fg, tint
 from hx.tui.renderers import ToolCall, renderer_for, sanitized_call, sanitized_fields
+
+if TYPE_CHECKING:
+    from hx.core.messages import ImageBlock
 
 _PAINTER = ThemePainter()
 
@@ -35,22 +39,24 @@ class UserMessage(Widget):
     whatever was on the clipboard, escape sequences and all.
     """
 
-    __slots__ = ("_text",)
+    __slots__ = ("_images", "_text")
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, images: Sequence[ImageBlock] = ()) -> None:
         super().__init__()
         self._text = plain_text(text)
+        self._images = tuple(images)
 
     @property
     def text(self) -> str:
         return self._text
 
     def draw(self, width: int) -> list[str]:
-        body = Lines(
-            [fg("user_text", line) for line in render_markdown(self._text, max(1, width - 2))],
-            padding_x=0,
-        )
-        return Box(1, 1, tint("user_bg"), body).render(width)
+        inner = max(1, width - 2)
+        lines = [fg("user_text", line) for line in render_markdown(self._text, inner)]
+        # Named under the text rather than drawn: a terminal cannot show the
+        # picture, but it can show which one went and how big it was.
+        lines += [fg("muted", _clip(IMAGE + _described(image), inner)) for image in self._images]
+        return Box(1, 1, tint("user_bg"), Lines(lines, padding_x=0)).render(width)
 
 
 class AssistantMessage(Widget):
@@ -282,3 +288,15 @@ __all__ = [
     "UserMessage",
     "tool_call",
 ]
+
+
+def _described(image: ImageBlock) -> str:
+    from hx.core.images import describe
+
+    return plain_text(describe(image))
+
+
+def _clip(text: str, width: int) -> str:
+    from hx.term.width import truncate_to_width
+
+    return truncate_to_width(text, width)

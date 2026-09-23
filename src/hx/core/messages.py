@@ -8,6 +8,7 @@ the transcript on disk stays stable across model switches.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
@@ -49,16 +50,53 @@ class ToolUseBlock:
 
 
 @dataclass(slots=True)
+class ImageBlock:
+    """An image the model is shown: pasted by the user or returned by a tool.
+
+    The bytes live in the block, base64-encoded, rather than behind a path. A
+    transcript that points at files breaks the day one of them moves, and a
+    resumed, forked or traced session has to be able to send every image it
+    holds. They are normalised on the way in (see :mod:`hx.core.images`), so
+    each is small enough for every route to accept as it stands.
+    """
+
+    media_type: str
+    """One of :data:`hx.core.images.MEDIA_TYPES`."""
+    data: str
+    """Base64 of the encoded image, without a ``data:`` prefix."""
+    width: int = 0
+    height: int = 0
+    label: str = ""
+    """What the user and the model call it: ``Image #2``, ``screenshot.png``."""
+    source: str = ""
+    """The file it came from, when that is not already its label - a dragged-in
+    ``mockup.png`` that the prompt calls ``Image #2``."""
+    type: Literal["image"] = "image"
+
+    def data_url(self) -> str:
+        return f"data:{self.media_type};base64,{self.data}"
+
+    def caption(self) -> str:
+        """``Image #2: mockup.png`` - the name, and where it came from."""
+        if self.source and self.source != self.label:
+            return f"{self.label}: {self.source}" if self.label else self.source
+        return self.label
+
+
+@dataclass(slots=True)
 class ToolResultBlock:
     tool_use_id: str
     content: str
     is_error: bool = False
     spilled_path: str | None = None
     """Set when the full output was capped and written to disk."""
+    images: list[ImageBlock] = field(default_factory=list)
+    """Images the tool returned alongside its text - a Read of a PNG, an MCP
+    screenshot. Every route can carry them next to the result they belong to."""
     type: Literal["tool_result"] = "tool_result"
 
 
-ContentBlock = TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock
+ContentBlock = TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock | ImageBlock
 
 
 @dataclass(slots=True)
@@ -91,12 +129,17 @@ class Message:
     def tool_results(self) -> list[ToolResultBlock]:
         return [b for b in self.content if isinstance(b, ToolResultBlock)]
 
+    def images(self) -> list[ImageBlock]:
+        """Images attached to this message itself, not those inside tool results."""
+        return [b for b in self.content if isinstance(b, ImageBlock)]
+
 
 _BLOCK_TYPES: dict[str, type[ContentBlock]] = {
     "text": TextBlock,
     "thinking": ThinkingBlock,
     "tool_use": ToolUseBlock,
     "tool_result": ToolResultBlock,
+    "image": ImageBlock,
 }
 
 
@@ -107,13 +150,28 @@ def block_to_dict(block: ContentBlock) -> dict[str, Any]:
         return {"type": "thinking", "text": block.text, "signature": block.signature}
     if isinstance(block, ToolUseBlock):
         return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
-    return {
+    if isinstance(block, ImageBlock):
+        return {
+            "type": "image",
+            "media_type": block.media_type,
+            "data": block.data,
+            "width": block.width,
+            "height": block.height,
+            "label": block.label,
+            "source": block.source,
+        }
+    record: dict[str, Any] = {
         "type": "tool_result",
         "tool_use_id": block.tool_use_id,
         "content": block.content,
         "is_error": block.is_error,
         "spilled_path": block.spilled_path,
     }
+    # Only when there are some, so a text-only result is written exactly as it
+    # was before images existed.
+    if block.images:
+        record["images"] = [block_to_dict(image) for image in block.images]
+    return record
 
 
 def block_from_dict(data: dict[str, Any]) -> ContentBlock:
@@ -122,6 +180,12 @@ def block_from_dict(data: dict[str, Any]) -> ContentBlock:
     if cls is None:
         raise ValueError(f"unknown content block type: {kind!r}")
     payload = {k: v for k, v in data.items() if k != "type"}
+    if cls is ToolResultBlock:
+        payload["images"] = [
+            image
+            for raw in payload.get("images") or []
+            if isinstance(image := block_from_dict(raw), ImageBlock)
+        ]
     return cls(**payload)
 
 
@@ -151,8 +215,20 @@ def from_dict(data: dict[str, Any]) -> Message:
     )
 
 
-def user_message(text: str) -> Message:
-    return Message(role="user", content=[TextBlock(text=text)])
+@dataclass(frozen=True, slots=True)
+class UserTurn:
+    """Something the user sent that is not in the transcript yet: queued behind
+    a running turn, or steered into one."""
+
+    text: str
+    images: tuple[ImageBlock, ...] = ()
+
+
+def user_message(text: str, images: Sequence[ImageBlock] = ()) -> Message:
+    """A user turn. Images follow the text, in the order they were attached."""
+    content: list[ContentBlock] = [TextBlock(text=text)] if text or not images else []
+    content.extend(images)
+    return Message(role="user", content=content)
 
 
 def assistant_message(blocks: list[ContentBlock], model: str | None = None) -> Message:

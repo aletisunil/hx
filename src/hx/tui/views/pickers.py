@@ -231,9 +231,9 @@ class CommandPalette(Picker):
 class ModelPicker(Picker):
     """Model chooser.
 
-    Each row shows id, context window, what pays for it, and whether the model
+    Each row shows id, context window, what pays for it, whether the model
     supports prompt caching - switching to a model without caching has a real
-    and otherwise invisible cost.
+    and otherwise invisible cost - and whether it can see images.
 
     "What pays for it" is a column rather than an inference from the id: with
     two credentials installed, a subscription model priced at $0.00/$0.00 is
@@ -271,6 +271,9 @@ class ModelPicker(Picker):
             fg("muted", format_tokens(model.context_window)),
             self._billing(model),
             fg(cache_role, cache),
+            # Blank rather than "no": the column answers "can I paste a
+            # screenshot here?", and a wall of "no" buries the yeses.
+            fg("muted", "images") if model.supports_images else "",
         ]
 
     def _billing(self, model: Any) -> str:

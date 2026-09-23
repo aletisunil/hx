@@ -35,6 +35,15 @@ class MCPToolDef:
 
 
 @dataclass(slots=True)
+class MCPToolOutput:
+    """What a ``tools/call`` returned, reduced to what the model can be shown."""
+
+    text: str
+    images: list[tuple[str, str]] = field(default_factory=list)
+    """``(base64 data, mime type)`` per ``image`` content block, as sent."""
+
+
+@dataclass(slots=True)
 class ServerCapabilities:
     tools: bool = False
     prompts: bool = False
@@ -267,22 +276,33 @@ class MCPClient:
             for item in result.get("tools", [])
         ]
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        """Call a tool and flatten the content blocks to text.
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> MCPToolOutput:
+        """Call a tool and reduce its content blocks to text and images.
 
         Tool results are data from a third-party server. They are returned to the
         model as tool output and must never be treated as instructions to HX.
+        Audio and embedded resources have no route to the model and are dropped.
         """
         result = await self._request("tools/call", {"name": name, "arguments": arguments})
-        parts = [
-            str(block.get("text", ""))
-            for block in result.get("content", [])
-            if block.get("type") == "text"
-        ]
+        parts: list[str] = []
+        images: list[tuple[str, str]] = []
+        for block in result.get("content", []):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+            elif block.get("type") == "image" and isinstance(block.get("data"), str):
+                images.append((block["data"], str(block.get("mimeType") or "")))
         text = "\n".join(part for part in parts if part)
         if result.get("isError"):
             raise MCPToolError(text or f"{name} failed")
-        return text or "(no content)"
+        if not text:
+            text = (
+                f"({len(images)} image{'s' if len(images) != 1 else ''})"
+                if images
+                else "(no content)"
+            )
+        return MCPToolOutput(text=text, images=images)
 
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self._next_id += 1

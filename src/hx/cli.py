@@ -54,6 +54,7 @@ Options:
   --system-prompt TEXT      Replace the system prompt (@path reads a file)
   --append-system-prompt TEXT
                             Append to the system prompt; repeatable (@path reads a file)
+  --image PATH              Attach an image to the -p prompt; repeatable
 """
 
 
@@ -69,6 +70,7 @@ class ParsedArgs:
     rest: tuple[str, ...] = ()
     overrides: dict[str, Any] | None = None
     cwd: Path | None = None
+    images: tuple[Path, ...] = ()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,6 +161,13 @@ def parse_args(args: list[str]) -> ParsedArgs:
                 raise UsageError("--append-system-prompt requires a value")
             appends = overrides.setdefault("prompt", {}).setdefault("append", [])
             appends.append(_prompt_value(args[index]))
+        elif arg == "--image":
+            index += 1
+            if index >= len(args):
+                raise UsageError("--image requires a path")
+            # Against where the command was typed, not --cwd: that is where
+            # the shell completed the path.
+            parsed.images = (*parsed.images, Path(args[index]).expanduser().absolute())
         elif arg.startswith("-"):
             raise UsageError(f"unknown option {arg}")
         else:
@@ -175,6 +184,8 @@ def parse_args(args: list[str]) -> ParsedArgs:
         elif parsed.command != "print":
             raise UsageError(f"unknown command {head!r}")
 
+    if parsed.images and parsed.command != "print":
+        raise UsageError("--image goes with -p; in the TUI, paste or drag the image in")
     parsed.overrides = overrides or None
     return parsed
 
@@ -260,6 +271,12 @@ class Runtime:
 
             self.notices.append(f"Model catalogue refresh failed: {describe(exc)}")
             return
+        finally:
+            # The loop resolved its model before the refresh, from the cache
+            # being replaced. Left alone it would gauge against yesterday's
+            # context window and decide image support from a cache that did
+            # not record it - until the user happened to switch models.
+            self.loop.model_info = self.models.get_or_default(self.loop.model)
         for label, error in self.models.subscription_errors():
             self.notices.append(f"Could not list this account's {label} models: {error}")
 
@@ -631,6 +648,13 @@ def run_print_command(parsed: ParsedArgs) -> int:
     """Headless single-prompt run. Streams assistant text to stdout and tool
     activity to stderr, so stdout stays pipeable."""
     from hx.core import events as ev
+    from hx.core.images import ImageError, load_image_file
+
+    try:
+        images = [load_image_file(path) for path in parsed.images]
+    except ImageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     try:
         runtime = build_runtime(parsed, resume=_resume_target(parsed))
@@ -660,13 +684,26 @@ def run_print_command(parsed: ParsedArgs) -> int:
 
         renderer = asyncio.create_task(render())
         await asyncio.sleep(0)
+        info = runtime.loop.model_info
+        if images and (info is None or not info.supports_images):
+            # Print mode does not refresh the catalogue - a scripted run should
+            # not wait on it - but withholding an image on the word of a stale
+            # cache is worse than the wait.
+            await runtime.refresh_models_if_stale()
+            info = runtime.loop.model_info
         for notice in runtime.notices:
             print(f"[hx] {notice}", file=sys.stderr)
+        if images and (info is None or not info.supports_images):
+            name = info.name if info is not None else runtime.loop.model
+            print(
+                f"[hx] {name} does not accept images; it is told they were attached, not shown them",
+                file=sys.stderr,
+            )
         for status in await runtime.connect_mcp():
             if not status.connected:
                 print(f"[mcp] {status.name} unavailable: {status.error}", file=sys.stderr)
         try:
-            result = await runtime.loop.run(parsed.prompt)
+            result = await runtime.loop.run(parsed.prompt, images)
             await _rename_closed_session(runtime.loop)
         finally:
             await asyncio.sleep(0.05)
@@ -674,7 +711,7 @@ def run_print_command(parsed: ParsedArgs) -> int:
             await renderer
             await runtime.aclose()
 
-        print()
+        print(flush=True)
         usage = runtime.session.usage
         print(
             f"[usage] in={usage.total_input} out={usage.total_output} "

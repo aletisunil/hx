@@ -8,10 +8,12 @@ motion, undo and soft-wrap navigation underneath the parts HX wrote.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hx.core.images import pasted_image_paths
 from hx.term.editor import Editor
 from hx.term.sanitize import plain_text
 from hx.tui.format import columns
@@ -21,7 +23,17 @@ from hx.tui.killring import KillRing
 from hx.tui.limits import LIST_VISIBLE
 from hx.tui.paint import fg, rule
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from hx.core.messages import ImageBlock
+
 MAX_HISTORY = 200
+
+IMAGE_TOKEN = re.compile(r"\[Image #(\d+)\]")
+"""What an attached image looks like in the draft. The number is the image's
+for the whole session, so a message recalled from history still means the
+picture it meant when it was sent."""
 
 
 @dataclass
@@ -112,6 +124,7 @@ class Prompt(Editor):
         rows_available: Any = None,
         on_submit: Any = None,
         on_steer: Any = None,
+        on_image_request: Any = None,
     ) -> None:
         super().__init__(
             rule_color=rule("border_muted"),
@@ -123,6 +136,13 @@ class Prompt(Editor):
         self.kill_ring = KillRing()
         self.on_submit = on_submit
         self.on_steer = on_steer
+        self.on_image_request = on_image_request
+        """Called with image paths a paste named, or ``None`` for whatever image
+        is on the clipboard. Loading is the app's job - it is disk and decoder
+        work that must not run on the keypress - and it answers with
+        :meth:`attach_image`."""
+        self._images: dict[int, ImageBlock] = {}
+        self._last_image = 0
 
         self.completion: Completion | None = None
         self._completion_dismissed = False
@@ -139,6 +159,48 @@ class Prompt(Editor):
     @property
     def value(self) -> str:
         return self.text
+
+    def attach_image(self, image: ImageBlock) -> ImageBlock:
+        """Insert an image's token at the cursor. Returns the image as labelled.
+
+        The token is the attachment: deleting it from the draft drops the
+        image, and moving it moves where the text refers to it.
+        """
+        self._last_image += 1
+        number = self._last_image
+        labelled = replace(image, label=f"Image #{number}", source=image.source or image.label)
+        self._images[number] = labelled
+        token = f"[{labelled.label}]"
+        before = self.text[: self.buffer.cursor]
+        after = self.text[self.buffer.cursor :]
+        if before and not before[-1].isspace():
+            token = " " + token
+        if not after or not after[0].isspace():
+            token += " "
+        self.insert(token)
+        self._sync_completion()
+        return labelled
+
+    def images_in(self, text: str) -> list[ImageBlock]:
+        """The images whose tokens ``text`` holds, in the order it mentions them."""
+        numbers = dict.fromkeys(int(match.group(1)) for match in IMAGE_TOKEN.finditer(text))
+        return [self._images[number] for number in numbers if number in self._images]
+
+    def remember_images(self, images: Sequence[ImageBlock]) -> None:
+        """Take back images that were sent from here before - a resumed session,
+        a rewound prompt.
+
+        Their tokens then resolve again, and the next image is numbered past
+        them: a second ``Image #1`` would leave the model two pictures by one
+        name.
+        """
+        for image in images:
+            match = IMAGE_TOKEN.fullmatch(f"[{image.label}]")
+            if match is None:
+                continue
+            number = int(match.group(1))
+            self._images[number] = image
+            self._last_image = max(self._last_image, number)
 
     def set_running(self, running: bool, *, enter_steers: bool = False) -> None:
         self._running = running
@@ -176,6 +238,9 @@ class Prompt(Editor):
         if bound("tui.input.complete"):
             self.complete()
             return True
+        if bound("tui.input.pasteImage"):
+            self._request_image(None)
+            return True
 
         # History at the edges of the buffer, so the arrows still move the
         # cursor everywhere else in a multi-line draft.
@@ -191,6 +256,16 @@ class Prompt(Editor):
     def _editing_key(self, key: str, data: str, bound: Any) -> bool:
         buffer = self.buffer
 
+        if key == "paste" and self.on_image_request is not None:
+            # A terminal sends an empty paste when the clipboard holds a
+            # picture and no text, and a dragged-in file arrives as its path.
+            # Either one is an image to attach, not text to insert.
+            if not data:
+                self._request_image(None)
+                return True
+            if paths := pasted_image_paths(data):
+                self._request_image(paths)
+                return True
         if key in ("text", "paste"):
             # A paste is whatever was on the clipboard, and the decoder's
             # "printable" run admits the C1 range, where a terminal reads 0x9b
@@ -202,13 +277,15 @@ class Prompt(Editor):
             return True
         if key == "backspace":
             self.undo_stack.record(self.text, buffer.cursor, coalesce=True)
-            buffer.backspace()
+            if buffer.cursor > 0:
+                buffer.delete_range(*self._widened(buffer.cursor - 1, buffer.cursor))
             self.invalidate()
             self._sync_completion()
             return True
         if key == "delete":
             self.undo_stack.record(self.text, buffer.cursor)
-            buffer.delete_forward()
+            if buffer.cursor < len(self.text):
+                buffer.delete_range(*self._widened(buffer.cursor, buffer.cursor + 1))
             self.invalidate()
             self._sync_completion()
             return True
@@ -252,11 +329,27 @@ class Prompt(Editor):
         self._sync_completion()
         return True
 
+    def _widened(self, start: int, end: int) -> tuple[int, int]:
+        """``[start, end)`` grown to swallow any image token it cuts into.
+
+        An image token goes as a whole, whichever key deletes it: half of one
+        is a stray bracket, and the image it named would be silently dropped.
+        """
+        start, end = sorted((start, end))
+        for match in IMAGE_TOKEN.finditer(self.text):
+            if match.start() < end and match.end() > start:
+                start, end = min(start, match.start()), max(end, match.end())
+        return start, end
+
+    def _request_image(self, paths: list[Path] | None) -> None:
+        if self.on_image_request is not None:
+            self.on_image_request(paths)
+
     # -- kill ring ---------------------------------------------------------
 
     def _kill_to(self, target: int) -> None:
         """Delete between the cursor and ``target``, keeping the text on the ring."""
-        killed = self.kill_range(self.buffer.cursor, target)
+        killed = self.kill_range(*self._widened(self.buffer.cursor, target))
         if not killed:
             return
         self.kill_ring.kill(killed)
@@ -309,7 +402,7 @@ class Prompt(Editor):
             return
         self._remember(text)
         if self.on_submit is not None:
-            self.on_submit(text)
+            self.on_submit(text, self.images_in(text))
 
     def _steer(self) -> None:
         """Steer the draft, or - with nothing typed - whatever is queued."""
@@ -318,7 +411,7 @@ class Prompt(Editor):
         if text:
             self._remember(text)
         if self.on_steer is not None:
-            self.on_steer(text)
+            self.on_steer(text, self.images_in(text))
 
     def _remember(self, text: str) -> None:
         """File the sent text in history and clear the buffer for the next one."""
@@ -494,4 +587,11 @@ class Prompt(Editor):
         self.set_completions(lines)
 
 
-__all__ = ["Candidate", "Completion", "FileCompleter", "Prompt", "placeholder_text"]
+__all__ = [
+    "IMAGE_TOKEN",
+    "Candidate",
+    "Completion",
+    "FileCompleter",
+    "Prompt",
+    "placeholder_text",
+]

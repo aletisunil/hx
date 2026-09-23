@@ -17,7 +17,7 @@ from hx.core.context import ContextBuilder
 from hx.core.events import EventBus
 from hx.core.lateinject import InjectionRegistry
 from hx.core.loop import AgentLoop
-from hx.core.messages import StopReason, ToolUseBlock
+from hx.core.messages import StopReason, ToolUseBlock, UserTurn
 from hx.core.session import new_session
 from hx.core.usage import TurnUsage
 from hx.providers.base import StreamDelta, StreamEnd, StreamItem
@@ -172,7 +172,7 @@ async def test_a_steer_delivered_between_turns_is_not_lost(hx_home: Path, tmp_pa
 
     await loop.run("do the thing")
     assert loop.steer("and now this") is False
-    assert loop.take_pending_steer() == ["and now this"]
+    assert loop.take_pending_steer() == [UserTurn("and now this")]
     assert loop.take_pending_steer() == []
 
 
@@ -191,7 +191,7 @@ async def test_a_cancelled_turn_hands_pending_steers_back(hx_home: Path, tmp_pat
         await turn
     pause.release()
 
-    assert loop.take_pending_steer() == ["wait, stop"]
+    assert loop.take_pending_steer() == [UserTurn("wait, stop")]
 
 
 async def test_steering_a_subagent_is_refused(hx_home: Path, tmp_path: Path) -> None:

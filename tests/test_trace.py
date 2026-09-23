@@ -17,6 +17,7 @@ import pytest
 
 from hx.core.checkpoints import Checkpoint
 from hx.core.messages import (
+    ImageBlock,
     Message,
     TextBlock,
     ThinkingBlock,
@@ -513,3 +514,25 @@ def test_no_browser_at_all_is_not_an_error(monkeypatch: pytest.MonkeyPatch, tmp_
     target.write_text("<html></html>")
 
     assert open_in_browser(target) is False
+
+
+def test_images_are_carried_and_drawn(hx_home: Path, tmp_path: Path) -> None:
+    """The trace shows what the model was shown, pictures included."""
+    session = new_session(tmp_path, "m")
+    picture = ImageBlock("image/png", "iVBORw0KGgo=", width=4, height=3, label="Image #1")
+    session.append(user_message("what is [Image #1]?", [picture]))
+    session.append(
+        assistant_message([ToolUseBlock(id="t1", name="Read", input={"file_path": "a.png"})])
+    )
+    session.append(tool_result_message([ToolResultBlock("t1", "Image a.png", images=[picture])]))
+
+    trace = build_trace(session)
+    assert trace["messages"][0]["content"][1]["type"] == "image"
+    assert trace["messages"][2]["content"][0]["images"][0]["label"] == "Image #1"
+
+    page = render_html(trace)
+    assert 'if (block.type === "image") { return renderImage(block); }' in page
+    assert "result.images || []" in page
+    # Only known formats and base64 make it into a data URL.
+    assert '"image/png": 1' in page
+    assert "/^[A-Za-z0-9+\\/=]*$/" in page

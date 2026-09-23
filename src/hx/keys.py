@@ -92,6 +92,9 @@ def _defaults() -> dict[str, KeyBinding]:
         KeyBinding("tui.input.steer", ("alt+enter",), "Steer the running turn"),
         KeyBinding("tui.input.newLine", ("shift+enter", "ctrl+j"), "Insert a newline"),
         KeyBinding("tui.input.complete", ("tab",), "Accept or cycle a completion"),
+        # ctrl+v, not the platform paste: a terminal's own paste carries text
+        # only, and many send nothing at all when the clipboard holds a picture.
+        KeyBinding("tui.input.pasteImage", ("ctrl+v",), "Paste an image from the clipboard"),
         KeyBinding("tui.editor.cursorLeft", ("ctrl+b",), "Move left one character"),
         KeyBinding("tui.editor.cursorRight", ("ctrl+f",), "Move right one character"),
         KeyBinding("tui.editor.cursorWordLeft", ("alt+b",), "Move left one word"),

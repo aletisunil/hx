@@ -380,7 +380,7 @@ async def test_a_slash_command_runs_and_prints_into_the_transcript(
         # The output is longer than the screen, so assert on its tail - what
         # scrolled off is the terminal's now, which is the point of the renderer.
         shown = " ".join(driver.display())
-        assert "Cancel or abort" in shown
+        assert "runs a shell command directly" in shown
 
 
 async def test_an_unknown_command_suggests_rather_than_failing_silently(

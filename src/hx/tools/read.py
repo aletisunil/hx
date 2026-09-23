@@ -7,6 +7,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from hx.core.images import ImageError, describe, is_image_path, load_image_file, sniff_image
 from hx.tools import anchors
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 
@@ -15,7 +16,10 @@ DESCRIPTION = """Read a file from the local filesystem.
 Returns numbered lines, each labelled with a short content anchor:
 `   12 a3f9\tcontent`. Pass those anchors to Edit's `hashline` argument to
 replace a span without retyping it. Use `offset`/`limit` for large files.
-Prefer reading the part you need over reading a whole large file."""
+Prefer reading the part you need over reading a whole large file.
+
+An image file (PNG, JPEG, GIF, WebP, BMP, TIFF) is returned as the image
+itself, for you to look at - screenshots, diagrams, mockups."""
 
 DEFAULT_LINE_LIMIT = 2000
 MAX_LINE_LENGTH = 2000
@@ -58,6 +62,10 @@ class ReadTool(Tool):
             raise ToolError(f"{path}: no such file")
         if path.is_dir():
             raise ToolError(f"{path} is a directory. Use Glob to list its contents.")
+        # Sniffed only when the file is binary anyway, so a text file that
+        # happens to open with an image signature is still read as text.
+        if is_image_path(path) or (is_binary(path) and _looks_like_image(path)):
+            return _read_image(path)
         if is_binary(path):
             size = path.stat().st_size
             raise ToolError(f"{path}: binary file ({size} bytes), not read as text")
@@ -137,6 +145,33 @@ class FileTracker:
 
     def stale_files(self) -> list[Path]:
         return [path for path in self._hashes if self.changed_since_read(path)]
+
+
+def _read_image(path: Path) -> ToolResult:
+    """An image, attached to the result for the model to look at.
+
+    The text names it too. That line is all a text-only model gets, once the
+    loop has withheld the image (see :func:`hx.core.images.without_images`),
+    and it is what the transcript shows in place of the picture.
+    """
+    try:
+        image = load_image_file(path)
+    except ImageError as exc:
+        raise ToolError(f"{path}: {exc}") from exc
+    return ToolResult(
+        content=f"Image {path} ({describe(image)}), attached.",
+        summary=f"read image {image.width}x{image.height}",
+        images=[image],
+    )
+
+
+def _looks_like_image(path: Path) -> bool:
+    """An image saved without an extension - ``screenshot``, a temp file."""
+    try:
+        with path.open("rb") as handle:
+            return sniff_image(handle.read(16))
+    except OSError:
+        return False
 
 
 def _shown(line: str) -> str:

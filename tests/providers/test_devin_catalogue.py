@@ -25,11 +25,13 @@ def config(
     features: dict[str, bool] | None = None,
     max_tokens: int = 0,
     max_output: int = 0,
+    images: bool = False,
 ) -> Writer:
     """A ``ClientModelConfig`` as the server encodes one."""
     message = Writer()
     message.put_str(1, label or uid)
     message.put_bool(4, disabled)
+    message.put_bool(5, images)
     message.put_uint(18, max_tokens)
     message.put_str(22, uid)
 
@@ -204,3 +206,24 @@ def test_an_unknown_model_is_sent_by_its_bare_id() -> None:
         pricing=ModelPricing(),
     )
     assert wire_model(info, "high") == "swe-9"
+
+
+def test_image_support_comes_from_the_config() -> None:
+    models = by_id(catalogue(config("swe-2", images=True), config("swe-1-6")))
+    assert models["devin/swe-2"].supports_images
+    assert not models["devin/swe-1-6"].supports_images
+
+
+def test_a_family_sees_images_only_if_every_tier_does() -> None:
+    """Any effort may be picked, and an image sent to the one tier that cannot
+    see it is a failed turn."""
+    seeing = catalogue(
+        config("o-low", family="Opus", effort="Low", images=True),
+        config("o-high", family="Opus", effort="High", images=True),
+    )
+    mixed = catalogue(
+        config("s-low", family="Sonnet", effort="Low", images=True),
+        config("s-high", family="Sonnet", effort="High"),
+    )
+    assert [m.supports_images for m in seeing] == [True]
+    assert [m.supports_images for m in mixed] == [False]

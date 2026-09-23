@@ -69,7 +69,7 @@ def test_arrows_move_within_a_multi_line_draft(prompt: Prompt) -> None:
 
 def test_enter_submits_and_clears(prompt: Prompt) -> None:
     sent: list[str] = []
-    prompt.on_submit = sent.append
+    prompt.on_submit = lambda text, _images: sent.append(text)
     typed(prompt, "  a question  ")
     prompt.handle_input("enter", "")
     assert sent == ["a question"]
@@ -78,14 +78,14 @@ def test_enter_submits_and_clears(prompt: Prompt) -> None:
 
 def test_enter_on_an_empty_prompt_sends_nothing(prompt: Prompt) -> None:
     sent: list[str] = []
-    prompt.on_submit = sent.append
+    prompt.on_submit = lambda text, _images: sent.append(text)
     prompt.handle_input("enter", "")
     assert sent == []
 
 
 def test_ctrl_j_inserts_a_newline_rather_than_submitting(prompt: Prompt) -> None:
     sent: list[str] = []
-    prompt.on_submit = sent.append
+    prompt.on_submit = lambda text, _images: sent.append(text)
     typed(prompt, "one")
     prompt.handle_input("ctrl+j", "")
     typed(prompt, "two")
@@ -95,7 +95,7 @@ def test_ctrl_j_inserts_a_newline_rather_than_submitting(prompt: Prompt) -> None
 
 def test_alt_enter_steers(prompt: Prompt) -> None:
     steered: list[str] = []
-    prompt.on_steer = steered.append
+    prompt.on_steer = lambda text, _images: steered.append(text)
     typed(prompt, "a steer")
     prompt.handle_input("alt+enter", "")
     assert steered == ["a steer"]
@@ -105,7 +105,7 @@ def test_alt_enter_with_nothing_typed_still_steers(prompt: Prompt) -> None:
     """With an empty draft it means "promote whatever is queued", so it must
     still fire - this is subtle and easy to optimise away."""
     steered: list[str] = []
-    prompt.on_steer = steered.append
+    prompt.on_steer = lambda text, _images: steered.append(text)
     prompt.handle_input("alt+enter", "")
     assert steered == [""]
 
@@ -114,7 +114,7 @@ def test_alt_enter_with_nothing_typed_still_steers(prompt: Prompt) -> None:
 
 
 def test_history_recalls_what_was_sent(prompt: Prompt) -> None:
-    prompt.on_submit = lambda _text: None
+    prompt.on_submit = lambda _text, _images: None
     typed(prompt, "first")
     prompt.handle_input("enter", "")
     typed(prompt, "second")
@@ -130,7 +130,7 @@ def test_history_recalls_what_was_sent(prompt: Prompt) -> None:
 
 def test_history_only_triggers_at_the_edges_of_the_buffer(prompt: Prompt) -> None:
     """Which is why the arrows still move the cursor in a multi-line draft."""
-    prompt.on_submit = lambda _text: None
+    prompt.on_submit = lambda _text, _images: None
     typed(prompt, "old")
     prompt.handle_input("enter", "")
 
@@ -142,7 +142,7 @@ def test_history_only_triggers_at_the_edges_of_the_buffer(prompt: Prompt) -> Non
 
 
 def test_leaving_history_restores_the_draft(prompt: Prompt) -> None:
-    prompt.on_submit = lambda _text: None
+    prompt.on_submit = lambda _text, _images: None
     typed(prompt, "sent")
     prompt.handle_input("enter", "")
     typed(prompt, "a draft")
@@ -268,7 +268,7 @@ def test_enter_submits_when_the_text_already_is_the_completion(tmp_path: Path) -
     """Treating it as another acceptance made /clear need a second Enter."""
     sent: list[str] = []
     prompt = Prompt(tmp_path, commands=FakeCommands([("clear", "clear it")]))
-    prompt.on_submit = sent.append
+    prompt.on_submit = lambda text, _images: sent.append(text)
     typed(prompt, "/clear")
     prompt.handle_input("enter", "")
     assert sent == ["/clear"]
