@@ -259,7 +259,7 @@ hx                          # interactive TUI in the current directory
 hx -p "explain this repo"   # headless: streams to stdout, tool activity to stderr
 hx -p "why?" --image s.png  # attach an image to a headless prompt; repeatable
 hx resume                   # resume the last session here
-hx resume <session-id>      # resume a specific one
+hx resume <session-id>      # resume a specific one, in the directory it was recorded in
 hx prompt                   # print the system prompt this directory would use
 hx trace                    # write the last session here to an HTML page
 hx trace out.html           # the same, to a path you choose
@@ -271,6 +271,8 @@ hx --no-sandbox             # disable OS sandboxing (rules still apply)
 hx --system-prompt @p.md    # replace the system prompt for one run
 hx --append-system-prompt "Always run the tests"   # add to it; repeatable
 hx mcp list|add|remove      # manage MCP servers
+hx mcp login <server>       # sign in to a remote MCP server in the browser
+hx mcp logout <server>      # forget a remote MCP server's sign-in
 hx auth [set|clear]         # manage the OpenRouter key
 hx auth login [provider]    # sign in (openrouter, openai-codex, devin)
 hx auth logout <provider>   # forget a stored credential
@@ -438,14 +440,14 @@ than being silently resolved.
 | `/cost` | tokens, cache savings, spend |
 | `/compact [focus]` | summarise older turns now |
 | `/clear` | fresh session, same directory |
-| `/resume` | reopen a previous session, listed by name |
+| `/resume` | switch to another session - this directory's first, then the rest |
 | `/rewind` | go back to an earlier prompt, restoring the files HX changed |
 | `/title [text]` | show or set this session's name |
 | `/prompt` | the system prompt this session is running with |
 | `/todos` | show the current plan |
 | `/skills` | installed skills |
 | `/agents` | subagent types |
-| `/mcp` | server status |
+| `/mcp [login\|logout\|reconnect <server>]` | server status, and signing in to remote servers |
 | `/hooks` | configured hooks, and any that were refused |
 | `/theme [name]` | `dark`, `light`, `ansi`, or any theme in `~/.hx/themes` |
 | `/queue [steer <n>\|clear]` | messages waiting for the turn to end, and what to do with them |
@@ -660,6 +662,13 @@ than timestamps. It is one small call — cap 32 output tokens, `models.title_mo
 if you want a cheaper model for it — and it is counted in `/cost` like any other.
 If the call fails the session is still named, from your first message. `/title
 <text>` renames it.
+
+`/resume` lists every session except the one you are in: this directory's
+first, then other directories', each row naming where it lives. A session from
+this directory is swapped in place. One from elsewhere belongs to that
+directory - its sandbox, permission rules, prompt and tools - so HX restarts
+itself there with `hx resume <id>`, keeping options like `--mode` and
+`--model`.
 
 ### Themes
 
@@ -956,10 +965,41 @@ construction.
 }
 ```
 
-Or `hx mcp add local python server.py`. Tools arrive namespaced
+Or `hx mcp add local python server.py`, or
+`hx mcp add remote --url https://example.com/mcp`. Tools arrive namespaced
 `mcp__<server>__<tool>` in a deterministic order. Servers connect concurrently
 with a per-server timeout; one that is broken or slow logs a warning and is
-dropped rather than taking the session with it.
+dropped rather than taking the session with it. A server that changes its tool
+list mid-session (`notifications/tools/list_changed`) has the new list swapped
+in without a restart.
+
+A remote server that asks for sign-in - Atlassian's, for one - is signed in to
+over OAuth, with nothing to configure:
+
+```json
+{ "mcpServers": { "atlassian": { "url": "https://mcp.atlassian.com/v2/mcp" } } }
+```
+
+It shows as needing sign-in until you run `/mcp login atlassian` in a session
+or `hx mcp login atlassian` in a shell. That opens the browser, and the tools
+arrive as soon as you approve - no restart. HX follows the MCP authorization
+spec: it finds the authorization server from the server's metadata, registers
+itself as a client, signs in with PKCE, and keeps the token in `~/.hx/auth.json`
+(mode 0600), refreshing it before it expires and again if the server rejects
+it. Over SSH, paste the final redirect URL into the prompt instead.
+`/mcp logout atlassian` forgets it.
+
+A server that does not offer client registration needs a client you register
+with it yourself, and anything else about the sign-in can be pinned the same
+way:
+
+```json
+"oauth": { "clientId": "...", "clientSecret": "...", "scope": "read write", "callbackPort": 33418 }
+```
+
+To send a token of your own instead - an API key - give the server an
+`Authorization` header, and OAuth stays out of the way:
+`hx mcp add jira --url https://mcp.atlassian.com/v2/mcp --header "Authorization: Basic <base64 email:token>"`.
 
 **Hooks** are shell commands HX runs at named points in a turn. Four events:
 `PreToolUse`, `PostToolUse`, `UserPromptSubmit` and `Stop`.

@@ -9,11 +9,15 @@ forever. Measuring the data costs a pass and is always right.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
+from pathlib import Path
 
 from hx.term.sanitize import plain_text
 from hx.term.width import cell_width, truncate_to_width
 from hx.tui.glyphs import ELLIPSIS
+
+_LINE_BREAKS = re.compile(r"\r\n|\r|\n")
 
 
 def columns(rows: Sequence[Sequence[str]], gap: int = 2) -> list[str]:
@@ -25,6 +29,10 @@ def columns(rows: Sequence[Sequence[str]], gap: int = 2) -> list[str]:
     """
     if not rows:
         return []
+    # A cell is one row by definition. Data with a line break in it - a title
+    # a model wrote, a description - would otherwise split the row behind the
+    # screen's back, so the break is shown instead of obeyed.
+    rows = [[_LINE_BREAKS.sub("↵", cell) for cell in row] for row in rows]
 
     count = max(len(row) for row in rows)
     widths = [
@@ -68,3 +76,17 @@ def one_line(text: str, width: int) -> str:
     if cell_width(flat) <= width:
         return flat
     return truncate_to_width(flat, max(0, width - cell_width(ELLIPSIS))) + ELLIPSIS
+
+
+def tilde(path: str | Path) -> str:
+    """``path`` with the home directory written as ``~``.
+
+    Compared as text, not resolved: a session records the path it resolved
+    when it was made, and the directory may be gone by the time it is drawn.
+    """
+    text, home = str(path), str(Path.home())
+    if text == home:
+        return "~"
+    if text.startswith(home.rstrip("/") + "/"):
+        return "~" + text[len(home.rstrip("/")) :]
+    return text

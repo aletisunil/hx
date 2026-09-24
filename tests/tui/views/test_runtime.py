@@ -122,6 +122,20 @@ async def test_the_status_bar_names_the_branch_and_follows_checkouts(
         assert session.view.dock.status.branch == "feature/status"
 
 
+@pytest.mark.parametrize(("where", "shown"), [("", "~ "), ("work/app", "~/work/app ")])
+async def test_the_status_bar_writes_home_as_a_tilde(
+    hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str, shown: str
+) -> None:
+    """Started in the home directory itself, it read ``~/.``."""
+    home = (tmp_path / "home").resolve()
+    cwd = home / where
+    cwd.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    async with Driver(build(cwd)) as driver:
+        assert any(line.startswith(f" {shown}") for line in driver.display()), driver.display()
+
+
 async def test_typing_reaches_the_prompt(hx_home: Path, tmp_path: Path) -> None:
     async with Driver(build(tmp_path)) as driver:
         driver.type("a question")
@@ -276,6 +290,46 @@ async def test_a_tool_call_that_needs_approval_blocks_and_is_answered(
         result = await asyncio.wait_for(answer, timeout=2)
         assert result.allowed is True
         assert any("allowed for this session" in line for line in driver.display())
+
+
+async def test_a_multi_line_command_is_asked_about_a_row_per_line(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """Drawn raw, the script stair-stepped across the screen and the frames
+    after it landed on the wrong rows, stacking copies of the options."""
+    from hx.permissions.engine import PermissionRequest
+
+    script = 'set -u\nuid=$(id -u)\n/bin/launchctl bootout "gui/$uid/x" || true'
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        answer = asyncio.create_task(
+            session.ask_permission(
+                PermissionRequest(
+                    tool_name="Bash",
+                    specifier=script,
+                    params={"command": script},
+                    mutating=True,
+                    description="run a shell command",
+                    detail=script,
+                    detail_kind="command",
+                )
+            )
+        )
+        await driver.settle()
+        driver.type("\x1b[B")
+        await driver.settle()
+        driver.type("\x1b[A")
+        await driver.settle()
+
+        shown = driver.display()
+        assert " $ set -u" in shown
+        assert "   uid=$(id -u)" in shown
+        assert '   /bin/launchctl bootout "gui/$uid/x" || true' in shown
+        assert sum("allow for this session" in line for line in shown) == 1
+        assert sum("Ask HX" in line for line in shown) == 1
+
+        driver.type("n")
+        assert (await asyncio.wait_for(answer, timeout=2)).allowed is False
 
 
 async def test_typing_while_an_approval_is_open_does_not_reach_the_prompt(
@@ -461,6 +515,90 @@ async def test_resuming_an_unknown_session_reports_rather_than_raises(
         assert any("Could not resume" in line for line in driver.display())
 
 
+async def test_resume_from_a_resumed_session_lists_a_multi_line_title_on_one_row(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A title is model-written, and nothing stops it holding a newline. Drawn
+    raw in the picker it split its row behind the screen's back."""
+    from hx.core.messages import user_message
+
+    earlier = new_session(tmp_path, MODEL)
+    earlier.append(user_message("the first prompt"))
+    earlier.set_title("Fix the login\nand the logout")
+    earlier.flush()
+    later = new_session(tmp_path, MODEL)
+    later.append(user_message("the second prompt"))
+    later.set_title("later work")
+    later.flush()
+
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        session.resume_session(later.meta.session_id)
+        await driver.settle()
+        driver.type("/resume\r")
+        await driver.settle()
+
+        shown = driver.display()
+        assert any("Fix the login and the logout" in line for line in shown)
+
+        driver.type("\x1b[B\r")
+        await driver.settle()
+        assert session.loop.session.meta.session_id == earlier.meta.session_id
+        assert any("the first prompt" in line for line in driver.display())
+
+
+async def test_resume_in_a_fresh_directory_offers_sessions_from_elsewhere(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """It used to say "no previous sessions in this directory" and stop. A row
+    from elsewhere names its directory, and picking it hands HX back to the
+    CLI to start again there."""
+    from hx.core.messages import user_message
+
+    project = tmp_path / "project"
+    project.mkdir()
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    elsewhere = new_session(project, MODEL)
+    elsewhere.append(user_message("work in the project"))
+    elsewhere.set_title("project work")
+    elsewhere.flush()
+
+    session = build(fresh)
+    async with Driver(session) as driver:
+        driver.type("/resume\r")
+        await driver.settle()
+
+        [row] = [line for line in driver.display() if "project work" in line]
+        # Cut from the left to fit 80 columns: the tail tells directories apart.
+        assert row.rstrip().endswith("/project")
+        assert "…" in row
+
+        driver.type("\r")
+        await driver.settle()
+
+    assert session.relaunch == elsewhere.meta.session_id
+    assert session.loop.session.meta.session_id != elsewhere.meta.session_id
+
+
+async def test_resume_does_not_offer_the_session_already_open(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    from hx.core.messages import user_message
+
+    only = new_session(tmp_path, MODEL)
+    only.append(user_message("the only one"))
+    only.flush()
+
+    session = build(tmp_path)
+    async with Driver(session) as driver:
+        session.resume_session(only.meta.session_id)
+        await driver.settle()
+        driver.type("/resume\r")
+        await driver.settle()
+        assert any("No other sessions to resume." in line for line in driver.display())
+
+
 async def test_a_rewind_hands_the_cut_prompt_back_to_the_editor(
     hx_home: Path, tmp_path: Path
 ) -> None:
@@ -515,6 +653,38 @@ class EchoTool(Tool):
 
     async def run(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(content=params["text"], summary="echoed")
+
+
+class MultiLineSummaryGrep(Tool):
+    """Named like a tool whose header shows its summary, with a line break in it."""
+
+    name = "Grep"
+    description = "grep"
+    mutating = False
+
+    def schema(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {"pattern": {"type": "string"}}}
+
+    async def run(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        return ToolResult(content="a.py:1: x", summary="3 matches\nin 2 files")
+
+
+async def test_a_tool_summary_with_a_line_break_stays_on_its_header_row(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A header is one row; a summary drawn into it raw broke the row in two,
+    which the screen refuses - taking the session down with it."""
+    tools = ToolRegistry()
+    tools.register(MultiLineSummaryGrep())
+    script = [tool_turn("Grep", {"pattern": "x"}), text_turn("found them")]
+    session = build(tmp_path, script, tools=tools)
+    async with Driver(session) as driver:
+        driver.type("look\r")
+        await driver.settle(rounds=40)
+
+        shown = driver.display()
+        assert any("grep x" in line and "3 matches↵in 2 files" in line for line in shown)
+        assert any("found them" in line for line in shown)
 
 
 async def test_replaying_draws_the_tool_calls_rather_than_blank_bars(

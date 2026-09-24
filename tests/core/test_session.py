@@ -262,3 +262,54 @@ def test_a_failed_flush_keeps_its_records_for_the_next_one(
 
     lines = (session_dir(session.meta.session_id) / "transcript.jsonl").read_text().splitlines()
     assert [json.loads(line)["kind"] for line in lines] == ["message", "usage"]
+
+
+def _spoken(cwd: Path, text: str) -> str:
+    from hx.core.messages import user_message
+
+    session = new_session(cwd, "m")
+    session.append(user_message(text))
+    time.sleep(0.01)
+    return session.meta.session_id
+
+
+def test_resume_offers_this_directory_first_then_everywhere_else(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    """A fresh directory, or a session resumed from somewhere else, used to
+    answer "no previous sessions" while the history sat one ``cd`` away."""
+    from hx.core.session import resumable_sessions
+
+    here, there = tmp_path / "here", tmp_path / "there"
+    here.mkdir()
+    there.mkdir()
+    old_here = _spoken(here, "a")
+    old_there = _spoken(there, "b")
+    new_there = _spoken(there, "c")
+    current = _spoken(here, "d")
+
+    offered = [m.session_id for m in resumable_sessions(here, exclude=current)]
+    assert offered == [old_here, new_there, old_there]
+
+
+def test_resume_leaves_out_sessions_whose_directory_is_gone(hx_home: Path, tmp_path: Path) -> None:
+    from hx.core.session import resumable_sessions
+
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    _spoken(gone, "orphaned")
+    gone.rmdir()
+
+    assert resumable_sessions(tmp_path) == []
+
+
+def test_resume_is_not_capped_at_twenty(hx_home: Path, tmp_path: Path) -> None:
+    """Past the twentieth, a session could not be reached even by filtering."""
+    from hx.core.messages import user_message
+    from hx.core.session import resumable_sessions
+
+    for index in range(25):
+        session = new_session(tmp_path, "m")
+        session.append(user_message(str(index)))
+
+    assert len(resumable_sessions(tmp_path)) == 25

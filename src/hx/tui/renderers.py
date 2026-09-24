@@ -89,6 +89,10 @@ def sanitized_fields(changes: dict[str, Any]) -> dict[str, Any]:
                 key: plain_text(item) if isinstance(item, str) else item
                 for key, item in (value or {}).items()
             }
+        elif name == "summary" and isinstance(value, str):
+            # Drawn only into a header, which is one row: a raw break there
+            # splits the row, and the screen refuses the frame.
+            out[name] = single_row(plain_text(value))
         elif isinstance(value, str):
             out[name] = plain_text(value)
     return out
@@ -113,6 +117,28 @@ def sanitized_call(call: ToolCall) -> ToolCall:
     )
 
 
+def replace_params(call: ToolCall, **params: Any) -> ToolCall:
+    """``call`` with some parameters swapped, the rest kept."""
+    from dataclasses import replace
+
+    return replace(call, params={**call.params, **params})
+
+
+LINE_BREAK = "↵"
+
+
+def single_row(value: Any) -> str:
+    """A parameter as text for a one-row header, its line breaks shown as ``↵``.
+
+    A pattern or a description with a newline in it is legal, and the newline
+    matters - so it is marked rather than dropped - but written raw into a
+    header it breaks the row in two behind the renderer's back.
+    """
+    if value is None:
+        return ""
+    return re.sub(r"\r\n|\r|\n", LINE_BREAK, str(value))
+
+
 def display_path(raw: Any, cwd: Path) -> str:
     """Path as a human would name it: relative to the project, else under ``~``.
 
@@ -125,14 +151,14 @@ def display_path(raw: Any, cwd: Path) -> str:
     try:
         path = Path(text).expanduser()
     except (OSError, ValueError):
-        return text
+        return single_row(text)
 
     for base, prefix in ((cwd, ""), (Path.home(), "~/")):
         try:
-            return prefix + str(path.resolve().relative_to(base.resolve()))
+            return single_row(prefix + str(path.resolve().relative_to(base.resolve())))
         except (OSError, ValueError):
             continue
-    return text
+    return single_row(text)
 
 
 _LEXERS = {
@@ -457,19 +483,43 @@ class BashRenderer(ToolRenderer):
     verb = "$"
 
     def header(self, call: ToolCall) -> str:
-        command = str(call.params.get("command") or "")
-        header = fg("accent", BASH, bold=True) + fg(
-            "tool_title", command.strip() or ELLIPSIS, bold=True
-        )
+        """The command's first line, and how many more there are.
+
+        A header is one row. A script's newlines, written into it raw, left
+        each line starting where the last one ended - and threw off the row
+        count the screen diffs against, so every later frame landed in the
+        wrong place.
+        """
+        first, rest = self._command_lines(call)
+        header = fg("accent", BASH, bold=True) + fg("tool_title", first or ELLIPSIS, bold=True)
+        if rest:
+            header += fg("muted", f"  +{len(rest)} line{'s' if len(rest) != 1 else ''}")
         if timeout := call.params.get("timeout"):
             header += fg("muted", f" (timeout {timeout}s)")
         if call.params.get("run_in_background"):
             header += fg("warning", "  background")
         return header
 
+    @staticmethod
+    def _command_lines(call: ToolCall) -> tuple[str, list[str]]:
+        lines = re.split(r"\r\n|\r|\n", str(call.params.get("command") or "").strip())
+        return lines[0].strip(), [line.rstrip() for line in lines[1:]]
+
+    def _continuation(self, rest: list[str]) -> list[str]:
+        # Under the first line's text, not under the `$`: one left edge.
+        indent = " " * cell_width(BASH)
+        return [fg("tool_title", f"{indent}{line}", bold=True) for line in rest]
+
     def body(self, call: ToolCall) -> list[str]:
-        """The tail, not the head: a command's answer is at the end of it."""
+        """The tail, not the head: a command's answer is at the end of it.
+
+        Expanded, the rest of a multi-line command comes first - the header
+        only ever has room for its first line.
+        """
         out: list[str] = []
+        _first, rest = self._command_lines(call)
+        if rest and call.expanded:
+            out.extend(self._continuation(rest))
         output = call.output.strip("\n")
         if output:
             lines, hidden = _tail(output, self.preview_lines, call.expanded)
@@ -482,7 +532,10 @@ class BashRenderer(ToolRenderer):
         return out
 
     def detail(self, call: ToolCall) -> list[str]:
-        return [self.header(call)]
+        """The whole command, a row per line - an approval shows what will run."""
+        first, rest = self._command_lines(call)
+        head = BashRenderer.header(self, replace_params(call, command=first))
+        return [head, *self._continuation(rest)]
 
 
 class GrepRenderer(ToolRenderer):
@@ -490,11 +543,11 @@ class GrepRenderer(ToolRenderer):
 
     def header(self, call: ToolCall) -> str:
         header = fg("tool_title", "grep ", bold=True) + fg(
-            "accent", str(call.params.get("pattern") or "")
+            "accent", single_row(call.params.get("pattern"))
         )
         if shown := _elsewhere(call.params.get("path"), call.cwd):
             header += fg("muted", f" in {shown}")
-        if glob := call.params.get("glob"):
+        if glob := single_row(call.params.get("glob")):
             header += fg("muted", f" ({glob})")
         if call.finished and call.summary:
             header += fg("dim", f"  {call.summary}")
@@ -506,7 +559,7 @@ class GlobRenderer(ToolRenderer):
 
     def header(self, call: ToolCall) -> str:
         header = fg("tool_title", "glob ", bold=True) + fg(
-            "accent", str(call.params.get("pattern") or "")
+            "accent", single_row(call.params.get("pattern"))
         )
         if shown := _elsewhere(call.params.get("path"), call.cwd):
             header += fg("muted", f" in {shown}")
@@ -576,10 +629,10 @@ class SymbolsRenderer(ToolRenderer):
     verb = "symbols"
 
     def header(self, call: ToolCall) -> str:
-        mode = str(call.params.get("mode") or "")
+        mode = single_row(call.params.get("mode"))
         # The subject is the symbol for a search and the file for an outline -
         # whichever one the user would name if they described the call.
-        subject = str(call.params.get("symbol") or "")
+        subject = single_row(call.params.get("symbol"))
         header = fg("tool_title", f"symbols {mode} ", bold=True) + fg("accent", subject)
         if shown := _elsewhere(call.params.get("file_path") or call.params.get("path"), call.cwd):
             header += fg("muted", f"{' in ' if subject else ''}{shown}")
@@ -593,9 +646,9 @@ class TaskRenderer(ToolRenderer):
 
     def header(self, call: ToolCall) -> str:
         header = fg("tool_title", "task ", bold=True) + fg(
-            "accent", str(call.params.get("subagent_type") or "agent")
+            "accent", single_row(call.params.get("subagent_type")) or "agent"
         )
-        if description := call.params.get("description"):
+        if description := single_row(call.params.get("description")):
             header += fg("muted", f"  {description}")
         return header
 

@@ -26,6 +26,49 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Sign in to remote MCP servers over OAuth. A server that asks for it -
+  Atlassian's `https://mcp.atlassian.com/v2/mcp`, for one - shows as needing
+  sign-in; `/mcp login <server>` or `hx mcp login <server>` opens the browser
+  and the tools arrive without a restart. Tokens refresh on their own;
+  `/mcp logout <server>` forgets them. `"oauth": {"clientId": ...}` in
+  `mcp.json` covers servers without client registration.
+- MCP servers that change their tool list mid-session have the new list
+  swapped in, whether they announce it in a reply or on their own stream.
+- `hx mcp add NAME --url URL --header "Name: value"` saves headers, such as an
+  API token, with the server.
+- `/mcp reconnect <server>` restarts one server without restarting HX.
+- `/resume` always offers a list to switch to: this directory's sessions
+  first, then every other directory's, each row naming where it lives.
+  Picking one from elsewhere restarts HX in that directory on it, with the
+  same `--mode` and `--model`. The session already open is no longer listed,
+  and the list is no longer cut at 20.
+
+### Fixed
+
+- `/resume` said "No previous sessions in this directory" in a fresh
+  directory, or inside a session resumed from another one, instead of
+  listing anything.
+- `hx resume <id>` ran the session in whatever directory you typed it in,
+  not the one it was recorded in, so its paths and tool calls pointed at the
+  wrong project.
+- `hx mcp add NAME --url URL`, `--user`, and server arguments like `npx -y`
+  were refused as unknown options, so none of them could be run.
+- `hx mcp add` dropped headers from the entry it wrote.
+- A remote MCP server that expires its session is initialized again instead
+  of failing every call until HX restarts.
+- A multi-line shell command no longer breaks the screen. Its approval shows
+  one row per line, the tool call shows the first line and `+N lines`
+  (`ctrl+o` shows the rest), and the approval options and prompt are no longer
+  drawn several times over.
+- `/resume` from inside a resumed session showed the resumed conversation
+  pushed off the top of the screen, leaving only the "Resumed" notice.
+- A session title with a line break in it no longer splits its row in the
+  `/resume` picker.
+- Started in your home directory, the status bar named it `~/.`; it now reads
+  `~`.
+
 ---
 
 ## [0.2.5] - 2026-09-23

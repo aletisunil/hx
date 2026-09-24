@@ -434,21 +434,32 @@ async def cmd_todos(ctx: CommandContext, args: str) -> None:
 
 
 async def cmd_resume(ctx: CommandContext, args: str) -> None:
-    """``/resume`` - pick a previous session in this directory."""
-    from hx.core.session import list_sessions
+    """``/resume`` - switch to another session.
+
+    One in this directory is swapped in place. One recorded elsewhere belongs
+    to that directory - its sandbox, rules, prompt and tools all hang off it -
+    so HX relaunches itself there rather than resuming it against this one.
+    """
+    from hx.core.session import resumable_sessions
     from hx.tui.views.pickers import SessionPicker
 
     if ctx.app.is_busy:
         ctx.app.notice("Interrupt the running turn before resuming another.", "warning")
         return
 
-    sessions = list_sessions(ctx.settings.cwd)
+    here = str(ctx.settings.cwd.resolve())
+    sessions = resumable_sessions(ctx.settings.cwd, exclude=ctx.app.loop.session.meta.session_id)
     if not sessions:
-        ctx.app.notice("No previous sessions in this directory.", "warning")
+        ctx.app.notice("No other sessions to resume.", "warning")
         return
-    chosen = await ctx.app.ask(SessionPicker(sessions))
-    if chosen:
+    chosen = await ctx.app.ask(SessionPicker(sessions, here))
+    if not chosen:
+        return
+    meta = next(meta for meta in sessions if meta.session_id == chosen)
+    if meta.cwd == here:
         ctx.app.resume_session(chosen)
+    else:
+        ctx.app.relaunch_into(meta)
 
 
 async def cmd_rewind(ctx: CommandContext, args: str) -> None:
@@ -577,21 +588,97 @@ async def cmd_agents(ctx: CommandContext, args: str) -> None:
 
 
 async def cmd_mcp(ctx: CommandContext, args: str) -> None:
-    """``/mcp`` - server status and their tools."""
+    """``/mcp [login|logout|reconnect NAME]`` - server status, and signing in."""
     manager = ctx.app.mcp
     if manager is None or not manager.configs:
         ctx.app.notice("No MCP servers configured. Add one with `hx mcp add`.", "warning")
+        return
+
+    action, _, name = args.strip().partition(" ")
+    name = name.strip()
+    if action in {"login", "logout", "reconnect"}:
+        if not name:
+            name = _only_server_needing_login(manager) if action == "login" else ""
+        if not name or manager.config(name) is None:
+            names = ", ".join(config.name for config in manager.configs)
+            ctx.app.notice(f"Usage: /mcp {action} <server>. Servers: {names}", "warning")
+            return
+        if action == "login":
+            await _mcp_login(ctx, manager, name)
+        elif action == "logout":
+            if not manager.config(name).uses_oauth:
+                ctx.app.notice(f"{name} does not sign in with OAuth; nothing to forget.", "warning")
+                return
+            removed = await manager.logout(name)
+            ctx.app.notice(
+                f"Signed out of {name}." if removed else f"Not signed in to {name}.",
+                "success" if removed else "warning",
+            )
+        else:
+            _mcp_status_notice(ctx, name, await manager.reconnect(name))
+        return
+    if action:
+        ctx.app.notice("Usage: /mcp [login|logout|reconnect <server>]", "warning")
         return
 
     lines = ["MCP servers:"]
     for status in manager.status():
         if status.connected:
             lines.append(f"  {status.name:<20} connected, {status.tool_count} tools")
+        elif status.needs_login:
+            lines.append(f"  {status.name:<20} {status.error} - /mcp login {status.name}")
         else:
             lines.append(f"  {status.name:<20} unavailable - {status.error}")
     ctx.app.notice(
         "\n".join(lines), "info" if all(s.connected for s in manager.status()) else "warning"
     )
+
+
+def _only_server_needing_login(manager: Any) -> str:
+    """The server ``/mcp login`` means when there is exactly one it could mean."""
+    waiting = [status.name for status in manager.status() if status.needs_login]
+    return waiting[0] if len(waiting) == 1 else ""
+
+
+async def _mcp_login(ctx: CommandContext, manager: Any, name: str) -> None:
+    from hx.auth.oauth.browser import OAuthError
+    from hx.auth.oauth.callback import CallbackError
+    from hx.mcp.client import MCPError
+    from hx.mcp.oauth import SignInNotRequired
+    from hx.tui.views.login import LoginDialog
+
+    modal = LoginDialog(f"Sign in to {name}", on_change=ctx.app.repaint)
+    ctx.app.show(modal)
+    try:
+        status = await manager.login(name, modal)
+    except asyncio.CancelledError:
+        ctx.app.notice("Sign-in cancelled.", "warning")
+        return
+    except SignInNotRequired as exc:
+        ctx.app.notice(str(exc), "info")
+        return
+    except (MCPError, OAuthError, CallbackError) as exc:
+        ctx.app.notice(f"Sign-in failed: {exc}", "error")
+        return
+    except Exception as exc:
+        # As in /login: a bug here must not cost the user their terminal.
+        ctx.app.notice(f"Sign-in failed: {exc}", "error")
+        return
+    finally:
+        ctx.app.dismiss_modal(modal)
+    _mcp_status_notice(ctx, name, status, signed_in=True)
+
+
+def _mcp_status_notice(
+    ctx: CommandContext, name: str, status: Any, signed_in: bool = False
+) -> None:
+    prefix = f"Signed in to {name}" if signed_in else name
+    if status.connected:
+        ctx.app.notice(f"{prefix}: {status.tool_count} tools available.", "success")
+    elif status.needs_login:
+        ctx.app.notice(f"{name} needs sign-in. Run /mcp login {name}.", "warning")
+    else:
+        ctx.app.notice(f"{prefix}, but it is unavailable: {status.error}", "error")
 
 
 async def cmd_hooks(ctx: CommandContext, args: str) -> None:
@@ -1130,7 +1217,13 @@ def build_default_commands() -> CommandRegistry:
         Command("context", "What is filling the context window", cmd_context),
         Command("skills", "List installed skills", cmd_skills),
         Command("agents", "List subagent types", cmd_agents),
-        Command("mcp", "MCP server status", cmd_mcp),
+        Command(
+            "mcp",
+            "MCP servers, and signing in to them",
+            cmd_mcp,
+            "[login|logout|reconnect <server>]",
+            takes_args=True,
+        ),
         Command("hooks", "Show configured hooks", cmd_hooks),
         Command("permissions", "Show permission rules and sandbox", cmd_permissions),
         Command("mode", "Set the permission mode", cmd_mode, "[mode]", takes_args=True),

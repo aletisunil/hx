@@ -116,6 +116,9 @@ class LoginDialog(Widget, Framed):
         self._highlight = url
         self._highlight_url = url
         self._instructions = instructions
+        # Whatever the flow said before it had a URL - "looking up how this
+        # server signs in" - is finished by the time there is one.
+        self._note = ""
         self._changed()
 
     def show_device_code(self, user_code: str, verification_uri: str) -> None:

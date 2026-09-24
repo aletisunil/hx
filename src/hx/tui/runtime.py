@@ -28,6 +28,7 @@ from hx.core.usage import format_tokens
 from hx.git import BranchWatcher
 from hx.term.loop import TuiRunner
 from hx.term.terminal import Terminal
+from hx.tui.format import tilde
 from hx.tui.renderers import ToolCall
 from hx.tui.views.blocks import (
     AssistantMessage,
@@ -153,6 +154,8 @@ class HXSession:
         talking."""
         self._side: asyncio.Task[None] | None = None
         """A slash command or shell line, which runs beside a turn."""
+        self.relaunch: str | None = None
+        """A session from another directory to start again on, once this exits."""
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -206,7 +209,7 @@ class HXSession:
             current = self._branch.poll()
             status = self.view.dock.status
             if current != previous or status.branch != current:
-                status.set_location(_tilde(Path(self.settings.cwd)), current)
+                status.set_location(tilde(self.settings.cwd), current)
                 self.runner.request_render()
 
     # -- the surface the slash commands expect -----------------------------
@@ -334,6 +337,18 @@ class HXSession:
         self.runner.request_immediate_render()
 
     def exit(self) -> None:
+        self.runner.stop()
+
+    def relaunch_into(self, meta: Any) -> None:
+        """Leave, so HX can start again on a session from another directory.
+
+        Only the request is recorded here. The process replaces itself once
+        the terminal is restored and everything this session started is shut
+        down - see :func:`hx.cli.run_tui_command`.
+        """
+        self.relaunch = meta.session_id
+        self._notice(f"Opening {meta.title or meta.session_id} in {tilde(meta.cwd)}…", "info")
+        self.runner.request_immediate_render()
         self.runner.stop()
 
     def set_mode(self, mode: str) -> None:
@@ -1280,7 +1295,7 @@ class HXSession:
 
     def _refresh_status(self) -> None:
         status = self.view.dock.status
-        status.set_location(_tilde(Path(self.settings.cwd)), self._branch.poll())
+        status.set_location(tilde(self.settings.cwd), self._branch.poll())
         status.set_mode(
             str(self.settings.permissions.mode),
             self.extra.get("sandbox_active", True),
@@ -1292,19 +1307,20 @@ class HXSession:
             status.set_context(0, getattr(model, "context_window", 0) or 0)
 
 
-def _tilde(path: Path) -> str:
-    try:
-        return f"~/{path.resolve().relative_to(Path.home())}"
-    except ValueError:
-        return str(path)
+async def run_session(
+    loop: AgentLoop, bus: EventBus, settings: Settings, **kwargs: Any
+) -> str | None:
+    """Run one interactive session to completion.
 
-
-async def run_session(loop: AgentLoop, bus: EventBus, settings: Settings, **kwargs: Any) -> None:
-    """Run one interactive session to completion."""
+    Returns the id of a session to relaunch into, when ``/resume`` picked one
+    from another directory.
+    """
     import sys
 
     if sys.platform == "win32":
         raise RuntimeError(
             "HX's terminal interface needs a POSIX terminal. On Windows, run it under WSL."
         )
-    await HXSession(loop, bus, settings, **kwargs).run()
+    session = HXSession(loop, bus, settings, **kwargs)
+    await session.run()
+    return session.relaunch

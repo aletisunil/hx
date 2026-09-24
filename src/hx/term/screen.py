@@ -79,6 +79,15 @@ class LineTooWide(RuntimeError):
     """
 
 
+class LineHasBreak(LineTooWide):
+    """A component returned a line with a line break inside it.
+
+    One row is one row: a raw newline or carriage return in the middle of a
+    line moves the terminal's cursor behind the differ's back. Fatal at the
+    same seam, and for the same reason, as a line that is too wide.
+    """
+
+
 class MainScreen:
     """Draws a component tree into the terminal's normal screen."""
 
@@ -203,9 +212,8 @@ class MainScreen:
     def render(self) -> None:
         """Reconcile the document with what is on screen."""
         width, height = self._terminal.size
-        lines = [terminate(line) for line in self._root.render(width)]
-        if not self._alt:
-            lines = self._seat_footer(lines, width, height)
+        raw = [terminate(line) for line in self._root.render(width)]
+        lines = raw if self._alt else self._seat_footer(raw, width, height)
         lines, cursor = self._extract_cursor(lines, width)
         self._check_widths(lines, width)
 
@@ -225,7 +233,12 @@ class MainScreen:
                 return
             viewport_top = max(0, len(self._previous) - height)
             if first < viewport_top:
-                # Above the fold: unreachable by cursor movement.
+                # Above the fold: unreachable by cursor movement. The clear
+                # takes the scrollback with it, so the rows the old document
+                # held no longer need keeping - seated against them, a resumed
+                # transcript was pushed off the top by padding.
+                seated = self._seat_footer(raw, width, height, keep_previous=False)
+                lines, cursor = self._extract_cursor(seated, width)
                 self._paint_all(lines, clear=True)
             else:
                 self._paint_from(first, lines)
@@ -281,7 +294,9 @@ class MainScreen:
 
     # -- seating the dock --------------------------------------------------
 
-    def _seat_footer(self, lines: list[str], width: int, height: int) -> list[str]:
+    def _seat_footer(
+        self, lines: list[str], width: int, height: int, *, keep_previous: bool = True
+    ) -> list[str]:
         """Blank rows between the conversation and the dock, so the dock sits
         on the bottom row of a screen the conversation has not filled yet.
 
@@ -301,7 +316,12 @@ class MainScreen:
         if footer <= 0 or footer >= height:
             return lines
         target = height
-        if self._previous and width == self._previous_width and height == self._previous_height:
+        if (
+            keep_previous
+            and self._previous
+            and width == self._previous_width
+            and height == self._previous_height
+        ):
             # Rows that have scrolled off the top cannot be handed back: the
             # terminal does not scroll backwards. So a document that shrinks -
             # a picker closing, a block collapsing - keeps the rows it has, and
@@ -478,6 +498,14 @@ class MainScreen:
 
     def _check_widths(self, lines: list[str], width: int) -> None:
         for index, line in enumerate(lines):
+            if "\n" in line or "\r" in line:
+                # Worse than too wide: the terminal moves down (or back to the
+                # left edge) mid-row, so the row count every later diff relies
+                # on is off from here on and old frames are left on screen.
+                report = self._break_report(lines, index)
+                if self._on_error is not None:
+                    self._on_error(report)
+                raise LineHasBreak(report)
             measured = cell_width(line)
             if measured <= width:
                 continue
@@ -485,6 +513,9 @@ class MainScreen:
             if self._on_error is not None:
                 self._on_error(report)
             raise LineTooWide(report)
+
+    def _break_report(self, lines: list[str], index: int) -> str:
+        return f"line {index} contains a line break: {strip_ansi(lines[index])[:200]!r}"
 
     def _width_report(self, lines: list[str], index: int, measured: int, width: int) -> str:
         window = lines[max(0, index - 2) : index + 3]
@@ -522,4 +553,4 @@ def _first_difference(before: list[str], after: list[str]) -> int | None:
     return None
 
 
-__all__ = ["CURSOR_MARKER", "SEGMENT_RESET", "LineTooWide", "MainScreen"]
+__all__ = ["CURSOR_MARKER", "SEGMENT_RESET", "LineHasBreak", "LineTooWide", "MainScreen"]

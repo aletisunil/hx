@@ -202,3 +202,77 @@ def test_renderers_follow_the_active_palette() -> None:
     THEME.use("dark")
     assert dark != light
     assert strip_ansi(dark) == strip_ansi(light), "the text changed, not just the colour"
+
+
+SCRIPT = 'set -u\nplist="$HOME/x.plist"\r\nuid=$(id -u)\n/bin/launchctl bootout "gui/$uid/x"'
+
+
+def test_a_multi_line_command_keeps_its_header_to_one_row() -> None:
+    """Written raw, each line started where the last ended, and the frame
+    count the screen diffs against drifted - leaving old frames on screen."""
+    header = _r("Bash")._header_text(_call("Bash", {"command": SCRIPT}))  # type: ignore[attr-defined]
+    assert header == "$ set -u  +3 lines"
+
+
+def test_an_approval_shows_every_line_of_the_command() -> None:
+    lines = [
+        strip_ansi(line) for line in renderer_for("Bash").detail(_call("Bash", {"command": SCRIPT}))
+    ]
+    assert lines == [
+        "$ set -u",
+        '  plist="$HOME/x.plist"',
+        "  uid=$(id -u)",
+        '  /bin/launchctl bootout "gui/$uid/x"',
+    ]
+
+
+def test_expanding_a_multi_line_command_shows_the_rest_of_it() -> None:
+    collapsed = _call("Bash", {"command": SCRIPT}, output="ok", finished=True)
+    expanded = _call("Bash", {"command": SCRIPT}, output="ok", finished=True, expanded=True)
+    assert _plain(renderer_for("Bash").body(collapsed)) == "ok"
+    assert _plain(renderer_for("Bash").body(expanded)).startswith('  plist="$HOME/x.plist"\n')
+
+
+def test_no_renderer_puts_a_line_break_inside_a_row() -> None:
+    """Every string parameter a model can fill, filled with newlines."""
+    import pytest
+
+    tricky = "one\ntwo\r\nthree\rfour"
+    params = {
+        key: tricky
+        for key in (
+            "command",
+            "pattern",
+            "glob",
+            "path",
+            "file_path",
+            "symbol",
+            "mode",
+            "description",
+            "subagent_type",
+            "prompt",
+            "content",
+            "query",
+            "url",
+        )
+    }
+    for name in (
+        "Bash",
+        "Grep",
+        "Glob",
+        "Read",
+        "Write",
+        "Edit",
+        "Symbols",
+        "Task",
+        "TodoWrite",
+        "WebSearch",
+        "mcp__jira__search",
+    ):
+        renderer = renderer_for(name)
+        for expanded in (False, True):
+            call = _call(name, dict(params), output=tricky, finished=True, expanded=expanded)
+            rows = [renderer.header(call), *renderer.body(call), *renderer.detail(call)]
+            for row in rows:
+                if "\n" in row or "\r" in row:
+                    pytest.fail(f"{name} (expanded={expanded}) emitted {row!r}")

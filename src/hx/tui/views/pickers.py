@@ -18,8 +18,7 @@ from typing import Any, ClassVar
 from hx.core.usage import format_tokens
 from hx.term.component import Widget
 from hx.term.primitives import Lines, Rule, Spacer, Text
-from hx.term.sanitize import plain_text
-from hx.tui.format import columns, one_line
+from hx.tui.format import columns, one_line, tilde
 from hx.tui.fuzzy import filter_items
 from hx.tui.glyphs import CURRENT, CURSOR, GUTTER
 from hx.tui.limits import LIST_MINIMUM, LIST_VISIBLE, RECORD_WIDTH
@@ -331,32 +330,97 @@ class EffortPicker(Picker):
 
 
 class SessionPicker(Picker):
-    """Resume a previous session in this directory."""
+    """Resume a previous session.
+
+    This directory's sessions first, then everyone else's with the directory
+    named - a row from elsewhere has to say so, because picking it moves HX
+    there.
+    """
 
     title = "Resume session"
     placeholder = "Filter sessions…"
 
-    def __init__(self, sessions: list[Any]) -> None:
+    def __init__(self, sessions: list[Any], here: str | None = None) -> None:
         self.sessions = sessions
+        self.here = here
+        self._directories: dict[str, str] = {}
+        """Per row, the directory it belongs to when that is not this one.
+        Kept raw, because how much of it fits is only known at draw time."""
         super().__init__()
+
+    def _elsewhere(self, meta: Any) -> str:
+        if self.here is None or meta.cwd == self.here:
+            return ""
+        return tilde(meta.cwd)
 
     def rows(self, query: str) -> list[tuple[str, list[str]]]:
         def plain(meta: Any) -> str:
-            return f"{_when(meta.updated_at)} {_size(meta)} {meta.title or meta.session_id}"
+            title = meta.title or meta.session_id
+            return f"{_when(meta.updated_at)} {_size(meta)} {title} {self._elsewhere(meta)}"
 
-        return [
-            (
-                meta.session_id,
-                [
-                    fg("dim", _when(meta.updated_at)),
-                    fg("muted", _size(meta)),
-                    # A session title is written by the model, at the end of
-                    # the session it names.
-                    fg("text", plain_text(meta.title or meta.session_id)),
-                ],
+        rows = []
+        self._directories = {}
+        for meta in filter_items(self.sessions, query, key=plain):
+            if elsewhere := self._elsewhere(meta):
+                self._directories[meta.session_id] = elsewhere
+            rows.append(
+                (
+                    meta.session_id,
+                    [
+                        fg("dim", _when(meta.updated_at)),
+                        fg("muted", _size(meta)),
+                        # A session title is written by the model, at the end
+                        # of the session it names.
+                        fg("text", one_line(meta.title or meta.session_id, RECORD_WIDTH)),
+                    ],
+                )
             )
-            for meta in filter_items(self.sessions, query, key=plain)
+        return rows
+
+    def draw(self, width: int) -> list[str]:
+        """The directory gets whatever the row has left, cut from the left.
+
+        Measured here rather than in :meth:`rows`, which has no width: a path
+        cut to a fixed size is still cut again at the right edge of a narrow
+        terminal - losing the tail, which is the part that tells two
+        directories apart.
+        """
+        from hx.term.width import cell_width
+
+        base = [(value, cells[:3]) for value, cells in self._rows]
+        used = max((cell_width(line) for line in columns([c for _v, c in base])), default=0)
+        prefix = cell_width(CURSOR) + cell_width(GUTTER)
+        room = min(DIRECTORY_WIDTH, width - 2 - prefix - used - 2)
+        self._rows = [
+            (
+                value,
+                [*cells, fg("dim", _path_tail(self._directories[value], room))]
+                if value in self._directories and room >= DIRECTORY_MINIMUM
+                else cells,
+            )
+            for value, cells in base
         ]
+        return super().draw(width)
+
+
+DIRECTORY_WIDTH = 40
+"""Most cells the directory of a session from elsewhere is given."""
+
+DIRECTORY_MINIMUM = 8
+"""Below this a directory says nothing useful, and the row leaves it out."""
+
+
+def _path_tail(path: str, width: int) -> str:
+    """``path`` cut from the left to fit: the end of a path is the part that
+    tells two directories apart, and the start is the part they share."""
+    from hx.term.width import cell_width
+
+    text = one_line(path, len(path) + 1)
+    if cell_width(text) <= width:
+        return text
+    while text and cell_width(text) > width - 1:
+        text = text[1:]
+    return f"…{text}"
 
 
 class RewindPicker(Picker):

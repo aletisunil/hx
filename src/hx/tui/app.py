@@ -31,15 +31,16 @@ async def run_tui(
     notices: list[str] | None = None,
     checkpoints: Any = None,
     tracker: Any = None,
-) -> None:
+) -> str | None:
     """Run the interactive session.
 
     The signature is the boundary ``hx.cli`` calls, and it did not change as
-    the frontend underneath it was replaced.
+    the frontend underneath it was replaced. Returns the id of a session to
+    relaunch into, when ``/resume`` picked one from another directory.
     """
     from hx.tui.runtime import run_session
 
-    await run_session(
+    return await run_session(
         loop,
         bus,
         settings,

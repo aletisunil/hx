@@ -24,6 +24,10 @@ class ToolRegistry:
             raise DuplicateTool(tool.name)
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> None:
+        """Remove a tool, if present. For an MCP server whose tools changed."""
+        self._tools.pop(name, None)
+
     def get(self, name: str) -> Tool:
         try:
             return self._tools[name]

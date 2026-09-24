@@ -38,7 +38,8 @@ Usage:
   hx prompt                 Print the system prompt this directory would use
   hx trace [SESSION_ID] [PATH]
                             Write a session to a self-contained HTML trace
-  hx mcp list|add|remove    Manage MCP servers
+  hx mcp list|add|remove|login|logout
+                            Manage MCP servers, and sign in to remote ones
   hx auth [set|clear]       Show or change the OpenRouter API key
   hx docs [SECTION|--all]   Print the manual, or one section of it
   hx changelog [VERSION]    Print what shipped in each version
@@ -61,6 +62,14 @@ Options:
 DOC_COMMANDS = frozenset({"docs", "changelog"})
 """Commands that print a shipped document and exit, taking no run options."""
 
+VERBATIM_COMMANDS = DOC_COMMANDS | {"mcp", "auth"}
+"""Commands with flags of their own, so their arguments are taken as typed.
+
+`hx mcp add jira --url URL` and `hx mcp add fs npx -y server` are the
+documented forms; read as run options, `--url` and `-y` were refused as
+unknown before the command ever saw them.
+"""
+
 
 @dataclass(slots=True)
 class ParsedArgs:
@@ -76,6 +85,10 @@ class ParsedArgs:
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments and dispatch. Returns a process exit code."""
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] in VERBATIM_COMMANDS:
+        # `hx mcp add fs npx server --help` is a server's argument, not a
+        # request for HX's usage.
+        return _dispatch(args)
 
     if "--version" in args or "-V" in args:
         print(f"hx {__version__}")
@@ -114,10 +127,11 @@ def _dispatch(args: list[str]) -> int:
 
 
 def parse_args(args: list[str]) -> ParsedArgs:
-    # The documentation commands print and exit, so their arguments are taken
-    # verbatim: `hx docs --all` is a request for a section of the manual, not a
-    # run of HX with an unknown option.
-    if args and args[0] in DOC_COMMANDS:
+    # The documentation and management commands take their arguments verbatim:
+    # `hx docs --all` is a request for a section of the manual, and
+    # `hx mcp add jira --url URL` is for `hx mcp`, not a run of HX with an
+    # unknown option.
+    if args and args[0] in VERBATIM_COMMANDS:
         return ParsedArgs(command=args[0], rest=tuple(args[1:]))
 
     parsed = ParsedArgs()
@@ -250,6 +264,11 @@ class Runtime:
             return []
         statuses: list[Any] = await self.mcp.connect_all()
         await self.mcp.register_tools(self.tools)
+        for status in statuses:
+            if status.needs_login:
+                self.notices.append(
+                    f"MCP server {status.name} needs sign-in. Run /mcp login {status.name}."
+                )
         return statuses
 
     async def refresh_models_if_stale(self) -> None:
@@ -582,24 +601,31 @@ def run_tui_command(parsed: ParsedArgs) -> int:
     from hx.tui.app import run_tui
 
     try:
-        runtime = build_runtime(parsed, resume=_resume_target(parsed))
+        resume = _resume_target(parsed)
+        moved = _adopt_session_directory(parsed, resume)
+        runtime = build_runtime(parsed, resume=resume)
     except MissingCredential as exc:
         # Onboard for the route the configured model needs, not always for
         # OpenRouter: a user set to a Codex model wants a sign-in, not a key.
         if run_login(exc.provider_id) != 0:
             return _report(exc)
         try:
-            runtime = build_runtime(parsed, resume=_resume_target(parsed))
+            runtime = build_runtime(parsed, resume=resume)
         except Exception as retry_exc:
             return _report(retry_exc)
     except Exception as exc:
         return _report(exc)
+    if moved:
+        runtime.notices.append(moved)
+
+    relaunch: str | None = None
 
     async def main_async() -> None:
+        nonlocal relaunch
         try:
             await runtime.connect_mcp()
             await runtime.refresh_models_if_stale()
-            await run_tui(
+            relaunch = await run_tui(
                 runtime.loop,
                 runtime.bus,
                 runtime.settings,
@@ -619,10 +645,93 @@ def run_tui_command(parsed: ParsedArgs) -> int:
             await _rename_closed_session(runtime.loop)
         finally:
             runtime.bus.close()
-            await runtime.provider.aclose()
+            # Everything, not only the provider: a relaunch replaces this
+            # process, and an MCP server or background job left running would
+            # outlive the session that started it.
+            await runtime.aclose()
 
     asyncio.run(main_async())
+    if relaunch is not None:
+        _relaunch(relaunch)
     return 0
+
+
+def _adopt_session_directory(parsed: ParsedArgs, session_id: str | None) -> str | None:
+    """Run ``hx resume <id>`` in the directory the session was recorded in.
+
+    A session's paths, tool calls and permission grants all mean something in
+    its own directory; resumed against another one, the model edits files that
+    are not the ones it read. An explicit ``--cwd`` still wins.
+
+    Returns a notice when the recorded directory is gone and the session is
+    resumed here instead.
+    """
+    if session_id is None or parsed.cwd is not None:
+        return None
+    from hx.core.session import SessionNotFound, read_meta
+
+    try:
+        recorded = Path(read_meta(session_id).cwd)
+    except SessionNotFound:
+        return None  # build_runtime reports it
+    if recorded.is_dir():
+        parsed.cwd = recorded
+        return None
+    return f"This session was recorded in {recorded}, which no longer exists; resumed here."
+
+
+RUN_OPTIONS_WITH_VALUES = frozenset(
+    {"--model", "--mode", "--cwd", "--system-prompt", "--append-system-prompt", "--image"}
+)
+"""The run options that take the next argument as their value."""
+
+
+def relaunch_argv(argv: list[str], session_id: str) -> list[str]:
+    """The arguments to start HX again on ``session_id``.
+
+    The run's own options - ``--mode bypass``, ``--model`` - carry over, since
+    the user asked for them and nothing about switching sessions un-asks.
+    What picked the old session does not: the ``resume`` and its id, and a
+    ``--cwd``, which the new session's own directory replaces.
+    """
+    kept: list[str] = []
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--cwd":
+            index += 2
+            continue
+        if arg in RUN_OPTIONS_WITH_VALUES:
+            kept += argv[index : index + 2]
+            index += 2
+            continue
+        if arg == "resume":
+            index += 1
+            if index < len(argv) and not argv[index].startswith("-"):
+                index += 1
+            continue
+        kept.append(arg)
+        index += 1
+    return [*kept, "resume", session_id]
+
+
+def _relaunch(session_id: str) -> None:
+    """Replace this process with HX resumed on ``session_id``.
+
+    ``exec`` rather than a child: the terminal, the pid and the shell's job
+    control stay exactly as they were, and there is no parent left waiting.
+
+    From the directory this process was started in, as if the user had typed
+    ``hx resume <id>`` there: that command moves into the session's own
+    directory by itself (:func:`_adopt_session_directory`), and the arguments
+    carried over - a script path, ``--system-prompt @p.md`` - were written
+    relative to here.
+    """
+    prefix = sys.orig_argv[: len(sys.orig_argv) - len(sys.argv) + 1]
+    command = [sys.executable, *prefix[1:], *relaunch_argv(sys.argv[1:], session_id)]
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, command)
 
 
 RENAME_TIMEOUT_SECONDS = 10.0
@@ -701,7 +810,13 @@ def run_print_command(parsed: ParsedArgs) -> int:
             )
         for status in await runtime.connect_mcp():
             if not status.connected:
-                print(f"[mcp] {status.name} unavailable: {status.error}", file=sys.stderr)
+                if status.needs_login:
+                    print(
+                        f"[mcp] {status.name} {status.error} - run `hx mcp login {status.name}`",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"[mcp] {status.name} unavailable: {status.error}", file=sys.stderr)
         try:
             result = await runtime.loop.run(parsed.prompt, images)
             await _rename_closed_session(runtime.loop)
@@ -876,10 +991,14 @@ def _resume_target(parsed: ParsedArgs) -> str | None:
 MCP_USAGE = """\
 hx mcp list                                  Show configured servers
 hx mcp add NAME COMMAND [ARGS...]            Add a stdio server
-hx mcp add NAME --url URL                    Add an HTTP server
+hx mcp add NAME --url URL [--header K:V]...  Add an HTTP server
+hx mcp login NAME                            Sign in to an HTTP server in the browser
+hx mcp logout NAME                           Forget a server's sign-in
 hx mcp remove NAME                           Remove a server
 
 Add --user to write to ~/.hx/mcp.json instead of the project's .hx/mcp.json.
+An HTTP server that asks for sign-in gets it over OAuth unless a --header
+already sends Authorization.
 """
 
 
@@ -891,6 +1010,9 @@ def run_mcp_command(args: list[str]) -> int:
         save_config,
     )
 
+    if args and args[0] in {"--help", "-h", "help"}:
+        print(MCP_USAGE)
+        return 0
     user_level = "--user" in args
     args = [arg for arg in args if arg != "--user"]
     cwd = Path.cwd()
@@ -903,6 +1025,9 @@ def run_mcp_command(args: list[str]) -> int:
             return 0
         statuses = asyncio.run(_probe_servers(configs))
         for status in statuses:
+            if status.needs_login:
+                print(f"{status.name:<20} {status.error} - run `hx mcp login {status.name}`")
+                continue
             mark = "ok" if status.connected else "unavailable"
             detail = f" - {status.error}" if status.error else f" ({status.tool_count} tools)"
             print(f"{status.name:<20} {mark}{detail}")
@@ -914,13 +1039,28 @@ def run_mcp_command(args: list[str]) -> int:
             return 2
         name = args[1]
         if args[2] == "--url":
-            config = MCPServerConfig(name=name, transport="http", url=args[3])
+            try:
+                url, headers = _parse_http_add(args[3:])
+            except UsageError as exc:
+                print(f"error: {exc}\n\n{MCP_USAGE}", file=sys.stderr)
+                return 2
+            config = MCPServerConfig(name=name, transport="http", url=url, headers=headers)
         else:
             config = MCPServerConfig(
                 name=name, transport="stdio", command=args[2], args=tuple(args[3:])
             )
         print(f"Added {name} to {save_config(config, cwd, user_level)}")
         return 0
+
+    if args[0] in {"login", "logout"}:
+        if len(args) < 2:
+            print(MCP_USAGE, file=sys.stderr)
+            return 2
+        server = next((c for c in load_configs(cwd) if c.name == args[1]), None)
+        if server is None:
+            print(f"No server named {args[1]}.", file=sys.stderr)
+            return 1
+        return _mcp_login(server) if args[0] == "login" else _mcp_logout(server)
 
     if args[0] == "remove":
         if len(args) < 2:
@@ -934,6 +1074,69 @@ def run_mcp_command(args: list[str]) -> int:
 
     print(MCP_USAGE, file=sys.stderr)
     return 2
+
+
+def _parse_http_add(rest: list[str]) -> tuple[str, dict[str, str]]:
+    """``URL [--header 'Name: value']...`` from ``hx mcp add NAME --url``."""
+    if not rest or rest[0].startswith("--"):
+        raise UsageError("--url needs a URL")
+    url, headers = rest[0], {}
+    tail = rest[1:]
+    while tail:
+        flag = tail.pop(0)
+        if flag not in {"--header", "-H"} or not tail:
+            raise UsageError(f"unexpected {flag!r}")
+        name, sep, value = tail.pop(0).partition(":")
+        if not sep or not name.strip():
+            raise UsageError("a header is written 'Name: value'")
+        headers[name.strip()] = value.strip()
+    return url, headers
+
+
+def _mcp_login(config: Any) -> int:
+    from hx.auth.oauth.browser import OAuthError
+    from hx.auth.oauth.callback import CallbackError
+    from hx.mcp.client import MCPError
+    from hx.mcp.manager import sign_in
+    from hx.mcp.oauth import SignInNotRequired
+
+    try:
+        asyncio.run(sign_in(config, ConsoleLogin()))
+    except SignInNotRequired as exc:
+        print(str(exc))
+        return 0
+    except (MCPError, OAuthError, CallbackError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        return 1
+
+    status = asyncio.run(_probe_servers([config]))[0]
+    if status.connected:
+        print(f"Signed in to {config.name}: {status.tool_count} tools available.")
+        return 0
+    print(f"Signed in, but {config.name} is still unavailable: {status.error}", file=sys.stderr)
+    return 1
+
+
+def _mcp_logout(config: Any) -> int:
+    from hx.auth.store import AuthStore
+    from hx.mcp.oauth import credential_id
+
+    if not config.url:
+        print(f"{config.name} is a local server; there is no sign-in to forget.")
+        return 0
+    if not config.uses_oauth:
+        # The stored sign-in is the server's, not this entry's: another
+        # project may reach the same server over OAuth and still need it.
+        print(f"{config.name} sends its own Authorization header; there is no sign-in to forget.")
+        return 0
+    if AuthStore().delete(credential_id(config.url)):
+        print(f"Signed out of {config.name}.")
+    else:
+        print(f"Not signed in to {config.name}.")
+    return 0
 
 
 async def _probe_servers(configs: list[Any]) -> list[Any]:
@@ -1093,6 +1296,9 @@ def run_auth_command(args: list[str]) -> int:
     from hx.providers import registry
 
     action = args[0] if args else "status"
+    if action in {"--help", "-h", "help"}:
+        print(AUTH_USAGE)
+        return 0
     resolver = AuthResolver()
 
     if action == "status":

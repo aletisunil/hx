@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -262,3 +264,146 @@ async def test_a_refreshed_catalogue_reaches_the_running_loop() -> None:
     runtime = SimpleNamespace(models=Models(), auth=None, notices=[], loop=loop)
     await Runtime.refresh_models_if_stale(runtime)  # type: ignore[arg-type]
     assert loop.model_info is fresh
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["mcp", "add", "jira", "--url", "https://mcp.example/mcp", "--header", "A: b"],
+        ["mcp", "add", "fs", "npx", "-y", "@modelcontextprotocol/server-filesystem", "--help"],
+        ["mcp", "add", "--user", "local", "python", "server.py"],
+    ],
+)
+def test_mcp_arguments_reach_hx_mcp_as_typed(args: list[str]) -> None:
+    """`--url`, `--user` and a server's own `-y` were refused as unknown run
+    options before `hx mcp` ever saw them - the documented `add --url` form
+    could not be run at all."""
+    parsed = parse_args(args)
+    assert parsed.command == "mcp"
+    assert parsed.rest == tuple(args[1:])
+
+
+def test_a_server_argument_named_help_is_not_hxs_help(
+    project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(project)
+    assert main(["mcp", "add", "fs", "npx", "-y", "server", "--help"]) == 0
+    assert "Added fs" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["mcp", "auth"])
+def test_subcommand_help_is_its_own_usage(command: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main([command, "--help"]) == 0
+    assert f"hx {command} " in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], ["resume", "NEW"]),
+        (["--mode", "bypass"], ["--mode", "bypass", "resume", "NEW"]),
+        (["resume", "OLD", "--model", "x/y"], ["--model", "x/y", "resume", "NEW"]),
+        (["--cwd", "/somewhere", "resume"], ["resume", "NEW"]),
+        (["resume", "--mode", "plan"], ["--mode", "plan", "resume", "NEW"]),
+    ],
+)
+def test_a_relaunch_keeps_the_run_options_and_swaps_the_session(
+    argv: list[str], expected: list[str]
+) -> None:
+    from hx.cli import relaunch_argv
+
+    assert relaunch_argv(argv, "NEW") == expected
+    assert parse_args(expected).session_id == "NEW"
+
+
+def test_every_option_a_relaunch_treats_as_taking_a_value_does(tmp_path: Path) -> None:
+    from hx.cli import RUN_OPTIONS_WITH_VALUES
+
+    for option in RUN_OPTIONS_WITH_VALUES - {"--image"}:
+        value = str(tmp_path) if option == "--cwd" else "plan" if option == "--mode" else "x"
+        with pytest.raises(UsageError):
+            parse_args([option])
+        parse_args([option, value])
+
+
+def test_hx_resume_runs_in_the_directory_the_session_was_recorded_in(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    from hx.cli import _adopt_session_directory
+
+    recorded = tmp_path / "project"
+    recorded.mkdir()
+    session = new_session_with_a_prompt(recorded)
+
+    parsed = parse_args(["resume", session])
+    assert _adopt_session_directory(parsed, session) is None
+    assert parsed.cwd == recorded.resolve()
+
+    explicit = parse_args(["--cwd", str(tmp_path), "resume", session])
+    _adopt_session_directory(explicit, session)
+    assert explicit.cwd == tmp_path
+
+
+def test_hx_resume_says_so_when_the_recorded_directory_is_gone(
+    hx_home: Path, tmp_path: Path
+) -> None:
+    from hx.cli import _adopt_session_directory
+
+    recorded = tmp_path / "gone"
+    recorded.mkdir()
+    session = new_session_with_a_prompt(recorded)
+    recorded.rmdir()
+
+    parsed = parse_args(["resume", session])
+    notice = _adopt_session_directory(parsed, session)
+    assert parsed.cwd is None
+    assert notice is not None and "no longer exists" in notice
+
+
+def new_session_with_a_prompt(cwd: Path) -> str:
+    from hx.core.messages import user_message
+    from hx.core.session import new_session
+
+    session = new_session(cwd, "m")
+    session.append(user_message("hi"))
+    return session.meta.session_id
+
+
+def test_a_relaunch_runs_from_where_hx_was_started(
+    hx_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HX started by a relative path, with a prompt file named relative to the
+    directory it was typed in. Relaunched into a session recorded elsewhere,
+    both still have to resolve - the process used to change directory first.
+
+    The command handed to ``exec`` is run for real, as ``hx prompt`` in place
+    of the TUI, from wherever ``exec`` would have run it.
+    """
+    import subprocess
+
+    from hx import cli
+
+    started = tmp_path / "started"
+    (started / "bin").mkdir(parents=True)
+    (started / "bin" / "hx").write_text("import sys\nfrom hx.cli import main\nsys.exit(main())\n")
+    (started / "p.md").write_text("THE PROMPT FROM p.md")
+    recorded = tmp_path / "recorded"
+    recorded.mkdir()
+    session = new_session_with_a_prompt(recorded)
+
+    argv = ["./bin/hx", "--system-prompt", "@p.md"]
+    monkeypatch.chdir(started)
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(sys, "orig_argv", [sys.executable, *argv])
+    execs: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(os, "execv", lambda path, args: execs.append((os.getcwd(), args)))
+
+    cli._relaunch(session)
+
+    [(where, command)] = execs
+    assert command[-2:] == ["resume", session]
+    ran = subprocess.run(
+        [*command[:-2], "prompt"], cwd=where, capture_output=True, text=True, timeout=60
+    )
+    assert ran.returncode == 0, ran.stderr
+    assert "THE PROMPT FROM p.md" in ran.stdout

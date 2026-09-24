@@ -362,6 +362,18 @@ def new_session(cwd: Path, model: str, parent_id: str | None = None) -> Session:
     return session
 
 
+def read_meta(session_id: str) -> SessionMeta:
+    """A session's metadata, without replaying its transcript.
+
+    Raises:
+        SessionNotFound: if the id has no session.
+    """
+    meta_path = session_dir(session_id) / "meta.json"
+    if not meta_path.exists():
+        raise SessionNotFound(session_id)
+    return _meta_from_json(json.loads(meta_path.read_text()))
+
+
 def load_session(session_id: str) -> Session:
     """Rehydrate from JSONL.
 
@@ -369,12 +381,7 @@ def load_session(session_id: str) -> Session:
         SessionNotFound: if the id has no transcript.
     """
     path = session_transcript_file(session_id)
-    meta_path = session_dir(session_id) / "meta.json"
-    if not meta_path.exists():
-        raise SessionNotFound(session_id)
-
-    meta = _meta_from_json(json.loads(meta_path.read_text()))
-    session = Session(meta=meta)
+    session = Session(meta=read_meta(session_id))
     if not path.exists():
         return session
 
@@ -441,8 +448,13 @@ def _rewind(session: Session, to: int, compactions: list[tuple[int, list[int]]])
                 session.messages[index].compacted = False
 
 
-def list_sessions(cwd: Path | None = None, limit: int = 20) -> list[SessionMeta]:
-    """Most-recent-first. Filtered to ``cwd`` when given - powers ``/resume``.
+def list_sessions(
+    cwd: Path | None = None, limit: int | None = 20, backfill: int | None = None
+) -> list[SessionMeta]:
+    """Most-recent-first. Filtered to ``cwd`` when given.
+
+    ``limit`` of ``None`` returns every session. ``backfill`` caps how many of
+    the returned rows get their prompt count filled in; all of them by default.
 
     Sessions that never recorded a message are skipped: they are the residue of
     a launch that went nowhere, and resuming one is indistinguishable from
@@ -471,7 +483,9 @@ def list_sessions(cwd: Path | None = None, limit: int = 20) -> list[SessionMeta]
     # Backfilled after the cut, never before it: the backfill replays a
     # transcript, and doing that for every session on the machine to render a
     # list of five is a stall the user waits through.
-    return [_backfilled(meta) for meta in metas[:limit]]
+    kept = metas if limit is None else metas[:limit]
+    fill = len(kept) if backfill is None else backfill
+    return [_backfilled(meta) if index < fill else meta for index, meta in enumerate(kept)]
 
 
 BACKFILL_MAX_BYTES = 4_000_000
@@ -510,6 +524,42 @@ def _backfilled(meta: SessionMeta) -> SessionMeta:
     with contextlib.suppress(OSError):
         counted._write_meta()
     return meta
+
+
+RESUME_BACKFILL = 50
+"""How many rows of the ``/resume`` list get their prompt count filled in.
+
+The list is every session, but the backfill replays a transcript, and doing
+that for hundreds of them is a stall the user waits through. The rows past
+this keep the older ``N msgs`` shape until something resumes them.
+"""
+
+
+def resumable_sessions(cwd: Path, *, exclude: str | None = None) -> list[SessionMeta]:
+    """Everything ``/resume`` can offer: this directory's sessions first, then
+    the rest, each newest-first.
+
+    Not only this directory's: a fresh directory, or a session resumed from
+    somewhere else, would otherwise answer "no previous sessions" while the
+    user's history sits one ``cd`` away. ``exclude`` is the session already
+    open - switching to it is not a switch.
+
+    A session whose directory is gone is left out. It belongs to a place that
+    no longer exists, so there is nowhere to resume it that its tool calls and
+    paths would still make sense.
+    """
+    here = str(cwd.resolve())
+    candidates = [
+        meta
+        for meta in list_sessions(limit=None, backfill=0)
+        if meta.session_id != exclude and (meta.cwd == here or Path(meta.cwd).is_dir())
+    ]
+    # Stable sort over a newest-first list: each group keeps its recency.
+    candidates.sort(key=lambda meta: meta.cwd != here)
+    return [
+        _backfilled(meta) if index < RESUME_BACKFILL else meta
+        for index, meta in enumerate(candidates)
+    ]
 
 
 def latest_session(cwd: Path) -> SessionMeta | None:

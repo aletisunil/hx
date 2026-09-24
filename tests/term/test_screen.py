@@ -14,7 +14,14 @@ import pytest
 
 from hx.term.component import Container
 from hx.term.primitives import Rule, Spacer, Text
-from hx.term.screen import CLEAR_ALL, CURSOR_MARKER, ERASE_BELOW, LineTooWide, MainScreen
+from hx.term.screen import (
+    CLEAR_ALL,
+    CURSOR_MARKER,
+    ERASE_BELOW,
+    LineHasBreak,
+    LineTooWide,
+    MainScreen,
+)
 from hx.term.terminal import FakeTerminal
 from hx.term.width import cell_width
 
@@ -223,6 +230,25 @@ def test_an_over_wide_line_is_a_loud_failure() -> None:
     h.root.add(Overflowing())
     with pytest.raises(LineTooWide, match="cells wide at width"):
         h.render()
+
+
+@pytest.mark.parametrize("brk", ["\n", "\r", "\r\n"])
+def test_a_line_break_inside_a_line_is_a_loud_failure(brk: str) -> None:
+    """The terminal moves the cursor mid-row, so the row count every later
+    diff relies on is wrong and old frames stay on screen - the permission
+    prompt drawn three times over."""
+
+    class Broken(Text):
+        def draw(self, width: int) -> list[str]:
+            return [f"$ set -u{brk}uid=$(id -u)"]
+
+    reports: list[str] = []
+    h = Harness()
+    h.screen = MainScreen(h.terminal, h.root, on_error=reports.append)
+    h.root.add(Broken())
+    with pytest.raises(LineHasBreak, match="line break"):
+        h.render()
+    assert reports and "set -u" in reports[0]
 
 
 def test_the_failure_report_names_the_offending_line() -> None:
