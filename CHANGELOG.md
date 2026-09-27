@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.7] - 2026-09-27
+
 ### Added
 
 - `HX_OPENROUTER_BASE_URL` points the OpenRouter route at any OpenAI-compatible
@@ -695,7 +699,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/aletisunil/hx/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/aletisunil/hx/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/aletisunil/hx/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/aletisunil/hx/compare/v0.2.3...v0.2.4
