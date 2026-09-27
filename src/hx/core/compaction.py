@@ -105,6 +105,12 @@ class Compactor:
 
         return list(messages[:boundary]), list(messages[boundary:])
 
+    def can_compact(self, messages: list[Message]) -> bool:
+        """Whether :meth:`compact` would summarise anything - checked before a
+        compaction is announced, so one is never started only to do nothing."""
+        dropped, _ = self.split(messages)
+        return len(dropped) >= self.MIN_MESSAGES_TO_COMPACT
+
     async def compact(
         self,
         messages: list[Message],

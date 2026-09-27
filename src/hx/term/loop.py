@@ -25,7 +25,7 @@ import contextlib
 from collections.abc import Callable
 
 from hx.term.component import Component
-from hx.term.keydecode import Decoder, Key
+from hx.term.keydecode import REPORT_PREFIX, Decoder, Key
 from hx.term.screen import MainScreen
 from hx.term.terminal import ProcessTerminal, Terminal
 
@@ -235,6 +235,10 @@ class TuiRunner:
             self.request_immediate_render()
 
     def _dispatch(self, key: Key) -> None:
+        if key.name.startswith(REPORT_PREFIX):
+            # The terminal answering a question, not the user pressing a key.
+            self._terminal.report(key.name, key.data)
+            return
         if self._on_key is not None:
             self._on_key(key)
             return

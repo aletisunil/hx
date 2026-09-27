@@ -35,6 +35,45 @@ IMAGE_TOKEN = re.compile(r"\[Image #(\d+)\]")
 for the whole session, so a message recalled from history still means the
 picture it meant when it was sent."""
 
+PASTE_TOKEN = re.compile(r"\[Pasted text #(\d+) (?:\+\d+ lines|\d+ chars)\]")
+"""What a large paste looks like in the draft. It stands for the text, which
+goes out in its place on submit; like an image token, deleting it deletes the
+paste."""
+
+PASTE_COLLAPSE_LINES = 10
+PASTE_COLLAPSE_CHARS = 1000
+"""A paste over either limit is collapsed to a :data:`PASTE_TOKEN`. The draft
+is capped at a third of the screen, so forty lines of a log would leave the
+prompt showing a window onto the middle of it, with whatever the user typed
+around it scrolled out of sight."""
+
+_CSI_U_CONTROL = re.compile(r"\x1b\[(\d+);5u|\x1b\[27;5;(\d+)~")
+
+
+def clean_paste(data: str) -> str:
+    """Pasted text as the user copied it: real newlines, nothing that can act.
+
+    Terminals send a pasted line break as a carriage return - it is what the
+    Enter key sends, and a paste is typed as if by keyboard - so without
+    translating it back every multi-line paste lands as one long line. Inside
+    tmux with extended keys, control bytes can even arrive re-encoded as
+    ``ctrl+<letter>`` key sequences, so those are decoded back to the byte
+    first, before sanitizing would strip them to nothing.
+    """
+
+    def control(match: re.Match[str]) -> str:
+        code = int(match.group(1) or match.group(2))
+        if 0x61 <= code <= 0x7A:  # a-z
+            return chr(code - 0x60)
+        if 0x40 <= code <= 0x5F:  # @, A-Z and [\]^_
+            return chr(code - 0x40)
+        return match.group(0)
+
+    if "\x1b" in data:
+        data = _CSI_U_CONTROL.sub(control, data)
+    data = data.replace("\r\n", "\n").replace("\r", "\n")
+    return plain_text(data)
+
 
 @dataclass
 class Candidate:
@@ -143,6 +182,11 @@ class Prompt(Editor):
         :meth:`attach_image`."""
         self._images: dict[int, ImageBlock] = {}
         self._last_image = 0
+        self._pastes: dict[int, str] = {}
+        """Every collapsed paste this session. Kept after submit, so a draft
+        recalled from history, or yanked back from the kill ring, still
+        expands to what it stood for."""
+        self._last_paste = 0
 
         self.completion: Completion | None = None
         self._completion_dismissed = False
@@ -180,6 +224,33 @@ class Prompt(Editor):
         self.insert(token)
         self._sync_completion()
         return labelled
+
+    def expand_pastes(self, text: str) -> str:
+        """``text`` with every paste token replaced by the text it stands for.
+
+        One pass, so pasted text that happens to contain something shaped like
+        a token is sent as it was pasted rather than expanded again.
+        """
+        if "[Pasted text #" not in text:
+            return text
+        return PASTE_TOKEN.sub(lambda m: self._pastes.get(int(m.group(1)), m.group(0)), text)
+
+    def _paste(self, data: str) -> None:
+        """Insert a paste - collapsed to a token when it is large."""
+        text = clean_paste(data)
+        # splitlines, so the newline most copied text ends with is not
+        # counted as a line of its own.
+        lines = len(text.splitlines())
+        if lines <= PASTE_COLLAPSE_LINES and len(text) <= PASTE_COLLAPSE_CHARS:
+            self.insert(text)
+            return
+        self._last_paste += 1
+        number = self._last_paste
+        self._pastes[number] = text
+        size = f"+{lines} lines" if lines > PASTE_COLLAPSE_LINES else f"{len(text)} chars"
+        # Not padded with spaces as an image token is: the token expands to
+        # exactly what was pasted, and a space either side would change it.
+        self.insert(f"[Pasted text #{number} {size}]")
 
     def images_in(self, text: str) -> list[ImageBlock]:
         """The images whose tokens ``text`` holds, in the order it mentions them."""
@@ -226,6 +297,8 @@ class Prompt(Editor):
             return True
 
         if bound("tui.input.submit"):
+            if self._backslash_newline():
+                return True
             self._submit()
             return True
         if bound("tui.input.steer"):
@@ -253,6 +326,34 @@ class Prompt(Editor):
 
         return self._editing_key(key, data, bound)
 
+    def _backslash_newline(self) -> bool:
+        """``\\`` then Enter: a newline, for terminals that cannot send shift+enter.
+
+        Apple's Terminal, a tmux without extended keys, and anything over a
+        link that strips the modifier all send shift+enter as a bare Enter.
+        The backslash is the shell's own line continuation, so it is the
+        fallback people already reach for.
+
+        A backslash escapes itself, so a message can still end in one: ``\\\\``
+        then Enter sends a single trailing ``\\``. Returns whether the key was
+        taken as a newline.
+        """
+        cursor = self.buffer.cursor
+        before = self.text[:cursor]
+        backslashes = len(before) - len(before.rstrip("\\"))
+        if backslashes == 0:
+            return False
+        if backslashes % 2 == 0:
+            # Escaped: drop the escape, and let the Enter send.
+            self.buffer.delete_range(cursor - 1, cursor)
+            return False
+        self.undo_stack.record(self.text, cursor)
+        self.buffer.delete_range(cursor - 1, cursor)
+        self.buffer.insert("\n")
+        self.invalidate()
+        self._sync_completion()
+        return True
+
     def _editing_key(self, key: str, data: str, bound: Any) -> bool:
         buffer = self.buffer
 
@@ -263,16 +364,20 @@ class Prompt(Editor):
             if not data:
                 self._request_image(None)
                 return True
-            if paths := pasted_image_paths(data):
+            if paths := pasted_image_paths(clean_paste(data)):
                 self._request_image(paths)
                 return True
-        if key in ("text", "paste"):
-            # A paste is whatever was on the clipboard, and the decoder's
-            # "printable" run admits the C1 range, where a terminal reads 0x9b
-            # as CSI. Sanitized here rather than on submit: the draft is drawn
-            # to the terminal as it is typed, so an escape in it would act
-            # before anyone pressed enter.
-            self.insert(plain_text(data), coalesce=key == "text")
+        # Both sanitized here rather than on submit: a paste is whatever was on
+        # the clipboard, and the decoder's "printable" run admits the C1 range,
+        # where a terminal reads 0x9b as CSI. The draft is drawn to the
+        # terminal as it is typed, so an escape in it would act before anyone
+        # pressed enter.
+        if key == "paste":
+            self._paste(data)
+            self._sync_completion()
+            return True
+        if key == "text":
+            self.insert(plain_text(data), coalesce=True)
             self._sync_completion()
             return True
         if key == "backspace":
@@ -292,20 +397,26 @@ class Prompt(Editor):
 
         if key == "left" or bound("tui.editor.cursorLeft"):
             buffer.left()
+            self._snap_cursor(forward=False)
         elif key == "right" or bound("tui.editor.cursorRight"):
             buffer.right()
+            self._snap_cursor(forward=True)
         elif bound("tui.editor.cursorWordLeft"):
             buffer.cursor = buffer.word_left()
+            self._snap_cursor(forward=False)
         elif bound("tui.editor.cursorWordRight"):
             buffer.cursor = buffer.word_right()
+            self._snap_cursor(forward=True)
         elif key in ("home", "ctrl+a"):
             buffer.home()
         elif key in ("end", "ctrl+e"):
             buffer.end()
         elif key == "up":
             buffer.up()
+            self._snap_cursor(forward=False)
         elif key == "down":
             buffer.down()
+            self._snap_cursor(forward=True)
         elif key in ("ctrl+w", "alt+backspace"):
             self._kill_to(buffer.word_left())
         elif bound("tui.editor.deleteWordForward"):
@@ -332,14 +443,35 @@ class Prompt(Editor):
     def _widened(self, start: int, end: int) -> tuple[int, int]:
         """``[start, end)`` grown to swallow any image token it cuts into.
 
-        An image token goes as a whole, whichever key deletes it: half of one
-        is a stray bracket, and the image it named would be silently dropped.
+        An image or paste token goes as a whole, whichever key deletes it:
+        half of one is a stray bracket, and what it stood for would be
+        silently dropped.
         """
         start, end = sorted((start, end))
-        for match in IMAGE_TOKEN.finditer(self.text):
-            if match.start() < end and match.end() > start:
-                start, end = min(start, match.start()), max(end, match.end())
+        for token_start, token_end in self._token_spans():
+            if token_start < end and token_end > start:
+                start, end = min(start, token_start), max(end, token_end)
         return start, end
+
+    def _token_spans(self) -> list[tuple[int, int]]:
+        text = self.text
+        spans = [m.span() for m in IMAGE_TOKEN.finditer(text)]
+        spans += [m.span() for m in PASTE_TOKEN.finditer(text) if int(m.group(1)) in self._pastes]
+        return spans
+
+    def _snap_cursor(self, *, forward: bool) -> None:
+        """Keep the cursor out of the middle of a token.
+
+        A character typed inside one would leave a token that no longer
+        matches - an ordinary bracketed string, with the image or the paste it
+        stood for quietly gone. So the cursor steps over a token as if it were
+        one character, landing on the side it was heading for.
+        """
+        cursor = self.buffer.cursor
+        for start, end in self._token_spans():
+            if start < cursor < end:
+                self.buffer.cursor = end if forward else start
+                return
 
     def _request_image(self, paths: list[Path] | None) -> None:
         if self.on_image_request is not None:
@@ -400,9 +532,11 @@ class Prompt(Editor):
         text = self.text.strip()
         if not text:
             return
+        # History keeps the draft as it was seen, tokens and all; what goes out
+        # is the text the tokens stand for.
         self._remember(text)
         if self.on_submit is not None:
-            self.on_submit(text, self.images_in(text))
+            self.on_submit(self.expand_pastes(text).strip(), self.images_in(text))
 
     def _steer(self) -> None:
         """Steer the draft, or - with nothing typed - whatever is queued."""
@@ -411,7 +545,7 @@ class Prompt(Editor):
         if text:
             self._remember(text)
         if self.on_steer is not None:
-            self.on_steer(text, self.images_in(text))
+            self.on_steer(self.expand_pastes(text).strip(), self.images_in(text))
 
     def _remember(self, text: str) -> None:
         """File the sent text in history and clear the buffer for the next one."""

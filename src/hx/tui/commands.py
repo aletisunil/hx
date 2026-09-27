@@ -742,13 +742,14 @@ async def cmd_permissions(ctx: CommandContext, args: str) -> None:
         lines.append('No rules configured. Add them under "permissions" in .hx/settings.json.')
 
     from hx.paths import project_local_settings_file
+    from hx.tui.format import tilde
 
-    lines.append("")
-    lines.append(f'"Always allow" writes to {project_local_settings_file(ctx.settings.cwd)}')
     # Where, and why there: a grant is machine-local, so it is kept per project
     # under the user's home instead of being dropped into the checkout.
-    lines.append("  - per project, on this machine only; nothing is written into the repo")
-    lines.append("  (this machine only - .hx/settings.json stays yours to check in)")
+    lines.append("")
+    lines.append('"Always allow" writes, per project and on this machine only, to')
+    lines.append(f"  {tilde(project_local_settings_file(ctx.settings.cwd))}")
+    lines.append("Nothing is written into the repository.")
 
     ctx.app.notice("\n".join(lines), "info" if ctx.app.sandbox_active else "warning")
 
@@ -1001,24 +1002,36 @@ async def cmd_theme(ctx: CommandContext, args: str) -> None:
         ctx.app.notice(f"Unknown theme {wanted!r}. Try /theme with no argument.", "error")
         return
 
-    ctx.app.notice(f"Theme: {ctx.app.apply_theme(wanted)}", "success")
+    ctx.app.apply_theme(wanted)
+    ctx.app.notice(f"Theme: {wanted}", "success")
 
 
 async def cmd_help(ctx: CommandContext, args: str) -> None:
-    lines = ["Commands:"]
+    commands = ctx.registry.all()
+    # Columns sized to their longest entry: a fixed width let a long binding
+    # (`ctrl+down/ctrl+shift+down`) push its description out of line.
+    name_width = max(len(c.name) for c in commands) + 1
+    lines = ["Commands"]
     lines += [
-        f"  /{c.name:<12} {c.summary}" + (f" (also /{', /'.join(c.aliases)})" if c.aliases else "")
-        for c in ctx.registry.all()
+        f"  /{c.name:<{name_width}} {c.summary}"
+        + (f" (also /{', /'.join(c.aliases)})" if c.aliases else "")
+        for c in commands
     ]
-    lines.append("")
-    lines.append("Keys")
     # Generated from the registry rather than typed out: a hand-written key
     # list is a copy that drifts the first time a binding moves.
-    lines += [f"  {key:<16} {description}" for key, description in help_keys()]
+    keys = help_keys()
+    extras = [
+        ("@path", "completes a file"),
+        ("!command", "runs a shell command directly"),
+        ("\\ then enter", "inserts a newline in any terminal"),
+        ("drag an image", "attaches it"),
+    ]
+    key_width = max(len(key) for key, _ in [*keys, *extras])
     lines.append("")
-    lines.append("  @path            completes a file")
-    lines.append("  drag in an image attaches it")
-    lines.append("  !command         runs a shell command directly")
+    lines.append("Keys")
+    lines += [f"  {key:<{key_width}}  {description}" for key, description in keys]
+    lines.append("")
+    lines += [f"  {key:<{key_width}}  {description}" for key, description in extras]
     ctx.app.notice("\n".join(lines))
 
 
@@ -1059,11 +1072,16 @@ def help_keys() -> list[tuple[str, str]]:
 
 async def cmd_copy(ctx: CommandContext, args: str) -> None:
     """``/copy`` - put the last assistant message on the clipboard."""
-    text = ctx.app.last_message_text()
+    text = ctx.app.last_reply_text()
     if not text:
         ctx.app.notice("Nothing to copy yet.", "warning")
         return
-    await ctx.app.copy(text)
+    try:
+        used = await ctx.app.copy(text)
+    except Exception as error:
+        ctx.app.notice(f"Could not copy: {error}", "error")
+        return
+    ctx.app.notice(f"Copied the last reply to the clipboard ({used}).", "success")
 
 
 async def cmd_trace(ctx: CommandContext, args: str) -> None:

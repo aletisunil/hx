@@ -7,7 +7,7 @@ wheel, `hx changelog` prints it, and a session can answer "what's new?" or
 "which version added web search?" from it rather than from a guess. `hx docs`
 prints the manual next to it.
 
-The rules, enforced by `tests/test_docs.py` so a release cannot forget them:
+The rules, enforced by `tests/e2e/test_cli.py` so a release cannot forget them:
 
 - Every released version has a `## [x.y.z] - YYYY-MM-DD` section here, and the
   version in `src/hx/__init__.py` always has one. Bumping the version without
@@ -25,6 +25,62 @@ the project follows [semantic versioning](https://semver.org/).
 ---
 
 ## [Unreleased]
+
+### Added
+
+- `HX_OPENROUTER_BASE_URL` points the OpenRouter route at any OpenAI-compatible
+  endpoint - a gateway, a recording proxy.
+- Pressing `esc` on a running turn leaves an "Interrupted" line in the transcript,
+  so a reply cut off mid-sentence no longer reads as a finished one.
+- A paste over 10 lines or 1000 characters shows in the prompt as
+  `[Pasted text #1 +40 lines]` and is sent in full; the token moves and deletes
+  as one character, and survives history recall and `ctrl+k`/`ctrl+y`.
+- `\` then `enter` inserts a newline in any terminal, including Apple's Terminal
+  and tmux without extended keys, where `shift+enter` cannot be told from `enter`. `\\` then
+  `enter` sends a message that ends in a backslash.
+
+### Fixed
+
+- `shift+enter` inserts a newline instead of sending the message in kitty, Ghostty,
+  WezTerm, iTerm2 and tmux (with `extended-keys on`): HX now asks the terminal for
+  the kitty keyboard protocol, falling back to xterm's modifyOtherKeys, and hands
+  it back on exit, `ctrl+z` and `/fullscreen`. `ctrl+shift+z` (redo) works there too.
+- `shift+enter` also inserts a newline on macOS in terminals that send it as a
+  plain `enter` (VS Code's, Apple's Terminal) or as `option+enter` (the Claude
+  desktop app's terminal panel): HX asks macOS which modifiers are held when the
+  key arrives. A real `option+enter` still steers, an `enter` hard on the heels of
+  a shifted character (`?` then `enter`) still sends, and `HX_MODIFIER_PROBE=0`
+  turns the check off.
+- A multi-line paste keeps its line breaks. Terminals send them as carriage
+  returns, which HX was deleting, so a pasted table arrived as one long line.
+- Lines typed with `shift+enter` stay separate lines in the transcript instead of
+  being joined into one paragraph.
+- On macOS the sandbox now refuses *writes* to credential paths (`~/.ssh`,
+  `~/.aws`, `~/.hx/auth.json`, ...) as well as reads, so a session opened in your
+  home directory cannot plant an `authorized_keys` entry.
+- On Linux the same holds for a credential path that does not exist yet: a
+  session opened in your home directory with no `~/.ssh` could create one and
+  plant an `authorized_keys` on the host. HX now creates such a path, empty and
+  private (`0700` for a directory, `0600` for a file), and mounts a read-only
+  shadow over it. Existing credential directories are shadowed read-only too, so
+  a write fails with "Read-only file system" instead of vanishing.
+- Shell commands the model runs show their output in the transcript again - the
+  last lines, with `ctrl+o` for the rest - instead of only "Took 12ms".
+- `/context` no longer fails with "'UsageLedger' object has no attribute
+  'total_tokens'"; it lists what fills the window.
+- `/copy` copies the last reply and says how it was copied, instead of failing.
+- `/theme light` reports "Theme: light" rather than "Theme: None".
+- `/compact` on a short session says only that there is nothing to compact, no
+  longer followed by a "Compacting…" that never finishes; a compaction that
+  saves nothing still reports that it finished, and the context gauge keeps
+  counting the system prompt afterwards.
+- `/help` lines its key descriptions up however long a binding is, and a long
+  row in `/agents`, `/cost` or any other command output wraps under its own
+  column instead of at the left edge.
+- The "always allow" option on an approval names where the rule is really
+  saved (`~/.hx`), and the answered approval shows a file relative to the
+  project rather than as an absolute path.
+- `/permissions` no longer says the same thing twice.
 
 ---
 

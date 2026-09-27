@@ -17,3 +17,4 @@ htmlcov/
 # and the rest - lives under $HX_HOME/projects/<slug>, outside the checkout
 # entirely, so there is nothing here left to hide.
 snapshot_report.html
+e2e-report/

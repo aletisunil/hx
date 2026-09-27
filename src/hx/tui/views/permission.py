@@ -13,8 +13,8 @@ screen had the weight of the most routine one.
 
 Answering does not remove the block. It collapses in place into a one-line
 record of what was granted and how widely, because a session that quietly
-accumulates ``always`` rules in ``.hx/settings.local.json`` should be able to
-show its work.
+accumulates ``always`` rules in ``~/.hx/projects/<project>/settings.local.json``
+should be able to show its work.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from hx.tui.limits import PREVIEW_LINES, RECORD_WIDTH
 from hx.tui.paint import fg
 from hx.tui.renderers import (
     ToolCall,
+    display_path,
     expand_note,
     looks_like_diff,
     render_diff,
@@ -54,7 +55,7 @@ record of it should say so in the words the user would use to undo it.
 CHOICES: tuple[tuple[str, GrantScope | None, str, str], ...] = (
     ("y", GrantScope.ONCE, "allow once", ""),
     ("s", GrantScope.SESSION, "allow for this session", ""),
-    ("a", GrantScope.ALWAYS, "always allow", "writes a rule to .hx/settings.local.json"),
+    ("a", GrantScope.ALWAYS, "always allow", "saves a rule for this project in ~/.hx"),
     ("n", None, "deny", ""),
 )
 """The four answers, in the order they are offered.
@@ -208,8 +209,16 @@ class PermissionPrompt(Widget, Framed):
         return [fg("text", line) for line in detail.split("\n")]
 
     def _target(self) -> str:
-        """What the approval is about, as one safe string."""
-        return plain_text(str(self.request.specifier or self.request.description))
+        """What the approval is about, as one safe string.
+
+        A file is named the way the transcript names it, relative to the
+        project: the absolute path is forty characters of prefix the user
+        already knows, and the record is cut before the part they do not.
+        """
+        specifier = self.request.specifier
+        if specifier and specifier == (self.request.params or {}).get("file_path"):
+            return plain_text(display_path(specifier, self.cwd))
+        return plain_text(str(specifier or self.request.description))
 
     def _hints(self) -> list[Hint]:
         """Every key that does something, including the two the old prompt

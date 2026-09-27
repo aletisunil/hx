@@ -21,7 +21,7 @@ from hx.term.markdown import render_markdown
 from hx.term.primitives import Box, HangingText, Lines
 from hx.term.sanitize import plain_text
 from hx.tui.glyphs import IMAGE, NOTICE, SPINNER, TOOL_DONE, TOOL_FAILED
-from hx.tui.limits import PREVIEW_LINES
+from hx.tui.limits import PREVIEW_LINES, STREAM_TAIL
 from hx.tui.paint import ThemePainter, fg, tint
 from hx.tui.renderers import ToolCall, renderer_for, sanitized_call, sanitized_fields
 
@@ -52,7 +52,8 @@ class UserMessage(Widget):
 
     def draw(self, width: int) -> list[str]:
         inner = max(1, width - 2)
-        lines = [fg("user_text", line) for line in render_markdown(self._text, inner)]
+        rendered = render_markdown(self._text, inner, breaks=True)
+        lines = [fg("user_text", line) for line in rendered]
         # Named under the text rather than drawn: a terminal cannot show the
         # picture, but it can show which one went and how big it was.
         lines += [fg("muted", _clip(IMAGE + _described(image), inner)) for image in self._images]
@@ -139,6 +140,15 @@ class ThinkingMessage(Widget):
         return Lines([fg("thinking", "Thinking…", italic=True) + note]).render(width)
 
 
+def _stream_tail(text: str) -> str:
+    """The last :data:`STREAM_TAIL` characters, from a line start so the cut
+    cannot land inside an escape sequence."""
+    if len(text) <= STREAM_TAIL:
+        return text
+    tail = text[-STREAM_TAIL:]
+    return tail[tail.find("\n") + 1 :]
+
+
 class ToolBlock(Widget):
     """One tool call: a header, optionally some output, tinted by its state.
 
@@ -147,15 +157,20 @@ class ToolBlock(Widget):
     for the red one without reading any of it.
     """
 
-    __slots__ = ("_call", "_frame")
+    __slots__ = ("_call", "_frame", "_stream", "_stream_dirty", "_streamed")
 
     def __init__(self, call: ToolCall) -> None:
         super().__init__()
         self._call = sanitized_call(call)
         self._frame = 0
+        self._stream: list[str] = []
+        """What the tool has streamed, raw; the output is its sanitized form."""
+        self._streamed = 0
+        self._stream_dirty = False
 
     @property
     def call(self) -> ToolCall:
+        self._fold_stream()
         return self._call
 
     def update(self, **changes: Any) -> None:
@@ -172,15 +187,42 @@ class ToolBlock(Widget):
         """
         from dataclasses import replace
 
+        if "output" in changes:
+            self._stream, self._streamed, self._stream_dirty = [], 0, False
+        else:
+            self._fold_stream()
         self._call = replace(self._call, **sanitized_fields(changes))
         self.invalidate()
 
     def append_output(self, chunk: str) -> None:
-        """Add one streamed chunk, sanitized on its own."""
+        """Add one streamed chunk.
+
+        Held raw and folded into the output once per frame rather than once
+        per chunk, which kept copying the whole buffer and was quadratic in the
+        length of the output. Sanitized as a whole when folded, so an escape
+        split across two chunks goes as a whole instead of leaving ``[31m``
+        behind. Only the last :data:`STREAM_TAIL` characters are kept: the
+        block shows a tail, and a command that prints for an hour must not
+        keep every byte of it in the transcript.
+        """
+        if not self._stream:
+            self._stream, self._streamed = [self._call.output], len(self._call.output)
+        self._stream.append(chunk)
+        self._streamed += len(chunk)
+        if self._streamed > 2 * STREAM_TAIL:
+            tail = _stream_tail("".join(self._stream))
+            self._stream, self._streamed = [tail], len(tail)
+        self._stream_dirty = True
+        self.invalidate()
+
+    def _fold_stream(self) -> None:
+        if not self._stream_dirty:
+            return
         from dataclasses import replace
 
-        self._call = replace(self._call, output=self._call.output + plain_text(chunk))
-        self.invalidate()
+        raw = _stream_tail("".join(self._stream))
+        self._stream, self._streamed, self._stream_dirty = [raw], len(raw), False
+        self._call = replace(self._call, output=plain_text(raw))
 
     def tick(self) -> None:
         """Advance the spinner. Only meaningful while the call is running."""
@@ -198,6 +240,7 @@ class ToolBlock(Widget):
         return "error" if self._call.is_error else "done"
 
     def draw(self, width: int) -> list[str]:
+        self._fold_stream()
         state = self._state
         marker, marker_role, background = {
             "running": (SPINNER[self._frame], "accent", "tool_pending_bg"),

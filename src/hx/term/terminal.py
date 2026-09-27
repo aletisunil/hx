@@ -42,6 +42,8 @@ from collections.abc import Callable
 from types import FrameType, TracebackType
 from typing import IO, Any, Protocol
 
+from hx.term.keydecode import ATTRIBUTES_REPORT, KEYBOARD_REPORT
+
 DEFAULT_SIZE = (80, 24)
 """Used when the terminal will not say - a pipe, a CI log, a dead tty."""
 
@@ -66,6 +68,23 @@ terminal is already on the normal screen, which is the case every time HX
 starts after a session that exited properly."""
 _SGR_RESET = "\x1b[0m"
 
+_KITTY_KEYBOARD_FLAGS = 1 | 4
+"""Disambiguate escape codes (1), and report alternate keys (4).
+
+Disambiguation is the point: it is what gives shift+enter, alt+enter and
+ctrl+shift+z codes of their own, where the legacy encoding sends plain enter,
+ESC-enter and ctrl+z. Alternate keys add the key's position on a US layout, so
+ctrl+c still means ctrl+c to someone typing in Cyrillic, whose C key reports
+U+0441. Event types (2) are left off: key releases are only noise here."""
+_KITTY_KEYBOARD_PUSH = f"\x1b[>{_KITTY_KEYBOARD_FLAGS}u"
+_KITTY_KEYBOARD_POP = "\x1b[<u"
+_KITTY_KEYBOARD_QUERY = "\x1b[?u"
+_DEVICE_ATTRIBUTES_QUERY = "\x1b[c"
+_MODIFY_OTHER_KEYS_ON, _MODIFY_OTHER_KEYS_OFF = "\x1b[>4;2m", "\x1b[>4;0m"
+"""xterm's modifyOtherKeys, level 2: the fallback for a terminal that does not
+speak the kitty protocol. xterm has it, and tmux passes modified keys through
+it to an application that asks - which is how shift+enter survives tmux."""
+
 _RESIZE_SIGNALS = (signal.SIGWINCH, signal.SIGCONT)
 """SIGWINCH is not delivered while the process is stopped, so a resize during
 ``ctrl+z`` is only discoverable on the way back - which is what SIGCONT is
@@ -75,8 +94,8 @@ doing in a list of resize signals."""
 class Terminal(Protocol):
     """What the renderer needs from the outside world.
 
-    Small on purpose: the fake implementation used by the tests is the same
-    shape, so the differ can be driven and asserted on without a tty.
+    Small on purpose: this is everything the differ knows about the tty, so
+    anything that can do these five things can be drawn on.
     """
 
     @property
@@ -93,6 +112,10 @@ class Terminal(Protocol):
     def set_alt_screen(self, enabled: bool) -> None: ...
 
     def suspend(self) -> None: ...
+
+    def report(self, name: str, data: str) -> None:
+        """An answer to one of the terminal's own queries, from the decoder."""
+        ...
 
 
 class UnsupportedPlatform(RuntimeError):
@@ -126,6 +149,10 @@ class ProcessTerminal:
         self._mouse = False
         self._alt_screen = False
         self._on_input: Callable[[str], None] | None = None
+        self._keyboard: str | None = None
+        """How modified keys are being reported: ``"kitty"``,
+        ``"modifyOtherKeys"``, or ``None`` while the terminal has not answered
+        (and for good, if it never does - the legacy encoding)."""
 
     # -- geometry ----------------------------------------------------------
 
@@ -179,7 +206,7 @@ class ProcessTerminal:
         self._entered = True
         self._restored = False
 
-        self.write(_BRACKETED_PASTE_ON + _CURSOR_HIDE)
+        self.write(_BRACKETED_PASTE_ON + _CURSOR_HIDE + self._keyboard_negotiate())
         self._install_resize_handler()
         self._on_input = on_input
         self._attach_reader(on_input)
@@ -193,6 +220,10 @@ class ProcessTerminal:
 
         Costs one write at startup and is the only available remedy for a
         previous session that was killed outright.
+
+        The keyboard protocols are the exception. Their state is a stack the
+        shell may have pushed onto itself - fish does - and popping blind would
+        take the shell's entry, not a dead session's.
         """
         self.write(
             _ALT_SCREEN_LEAVE + _MOUSE_OFF + _BRACKETED_PASTE_OFF + _SGR_RESET + _CURSOR_SHOW
@@ -214,9 +245,12 @@ class ProcessTerminal:
         # Order matters: turn the modes off while still in raw mode, then hand
         # the line discipline back.
         parts = [
-            _ALT_SCREEN_OFF if self._alt_screen else "",
+            # The alternate screen has a keyboard stack of its own, so it is
+            # popped before leaving and the main screen's after.
+            self._screen_keyboard_pop() + _ALT_SCREEN_OFF if self._alt_screen else "",
             _MOUSE_OFF if self._mouse else "",
             _BRACKETED_PASTE_OFF,
+            self._keyboard_disable(),
             _SGR_RESET,
             _CURSOR_SHOW,
         ]
@@ -259,7 +293,13 @@ class ProcessTerminal:
         if enabled == self._alt_screen:
             return
         self._alt_screen = enabled
-        self.write(_ALT_SCREEN_ON if enabled else _ALT_SCREEN_OFF)
+        # Each screen keeps its own kitty keyboard stack, so the mode is pushed
+        # again on the way in and popped on the way out. Otherwise shift+enter
+        # would stop working the moment /fullscreen is turned on.
+        if enabled:
+            self.write(_ALT_SCREEN_ON + self._screen_keyboard_push())
+        else:
+            self.write(self._screen_keyboard_pop() + _ALT_SCREEN_OFF)
 
     @property
     def alt_screen(self) -> bool:
@@ -287,9 +327,10 @@ class ProcessTerminal:
         alt = self._alt_screen
         self._detach_reader()
         self.write(
-            (_ALT_SCREEN_OFF if alt else "")
+            (self._screen_keyboard_pop() + _ALT_SCREEN_OFF if alt else "")
             + (_MOUSE_OFF if self._mouse else "")
             + _BRACKETED_PASTE_OFF
+            + self._keyboard_disable()
             + _SGR_RESET
             + _CURSOR_SHOW
         )
@@ -304,13 +345,79 @@ class ProcessTerminal:
             with contextlib.suppress(Exception):
                 tty.setraw(self._fd)
         self.write(
-            (_ALT_SCREEN_ON if alt else "")
+            self._keyboard_enable()
+            + (_ALT_SCREEN_ON + self._screen_keyboard_push() if alt else "")
             + (_MOUSE_ON if self._mouse else "")
             + _BRACKETED_PASTE_ON
             + _CURSOR_HIDE
         )
         if self._on_input is not None:
             self._attach_reader(self._on_input)
+
+    # -- the keyboard protocol ------------------------------------------------
+
+    def _keyboard_negotiate(self) -> str:
+        """Ask for modified keys to be reported, and find out how they will be.
+
+        Push the kitty flags, ask which flags took, then ask for the device
+        attributes. Every terminal answers the last, and answers in order - so
+        an attributes answer with no keyboard answer ahead of it means the
+        push was ignored, and :meth:`report` falls back to modifyOtherKeys. No
+        timer is involved, which matters over a slow ssh link, where any
+        timeout would be a guess.
+        """
+        return _KITTY_KEYBOARD_PUSH + _KITTY_KEYBOARD_QUERY + _DEVICE_ATTRIBUTES_QUERY
+
+    def _keyboard_enable(self) -> str:
+        """Turn the negotiated mode back on, on the main screen (after ``ctrl+z``)."""
+        if self._keyboard == "modifyOtherKeys":
+            return _MODIFY_OTHER_KEYS_ON
+        return _KITTY_KEYBOARD_PUSH
+
+    def _keyboard_disable(self) -> str:
+        """Turn the mode off on the main screen.
+
+        Before the terminal has answered, the pop is sent anyway: the push has
+        already gone, and to a terminal that ignored it the pop is ignored too.
+        """
+        if self._keyboard == "modifyOtherKeys":
+            return _MODIFY_OTHER_KEYS_OFF
+        return _KITTY_KEYBOARD_POP
+
+    def _screen_keyboard_push(self) -> str:
+        """What entering the alternate screen owes the keyboard.
+
+        The kitty protocol keeps a separate stack per screen, so the flags are
+        pushed again there. modifyOtherKeys is one mode for the whole
+        terminal, and is left alone.
+        """
+        return "" if self._keyboard == "modifyOtherKeys" else _KITTY_KEYBOARD_PUSH
+
+    def _screen_keyboard_pop(self) -> str:
+        """The inverse of :meth:`_screen_keyboard_push`, before leaving."""
+        return "" if self._keyboard == "modifyOtherKeys" else _KITTY_KEYBOARD_POP
+
+    @property
+    def keyboard(self) -> str | None:
+        """``"kitty"``, ``"modifyOtherKeys"``, or ``None`` for the legacy encoding."""
+        return self._keyboard
+
+    def report(self, name: str, data: str) -> None:
+        """Take the terminal's answers to the keyboard negotiation."""
+        if self._keyboard is not None or self._restored:
+            return
+        if name == KEYBOARD_REPORT:
+            # The flags now in force. Without disambiguation (1) the push did
+            # not take - the terminal speaks the query, not the protocol - so
+            # the attributes answer behind this one decides instead.
+            flags = int(data) if data.isdigit() else 0
+            if flags & 1:
+                self._keyboard = "kitty"
+        elif name == ATTRIBUTES_REPORT:
+            self._keyboard = "modifyOtherKeys"
+            # The kitty push was ignored, so there is nothing to pop, and this
+            # one mode covers both screens.
+            self.write(_MODIFY_OTHER_KEYS_ON)
 
     def park_cursor_below(self, rows_down: int = 0) -> None:
         """Leave the cursor under the last line drawn, on its own row.
@@ -470,62 +577,3 @@ class ProcessTerminal:
             return
         with contextlib.suppress(Exception):
             loop.remove_reader(self._fd)
-
-
-class FakeTerminal:
-    """A terminal that records instead of drawing.
-
-    Everything the renderer emits lands in :attr:`written`, so a test can feed
-    it to a VT emulator and assert on what a real terminal would have shown -
-    rather than on the escape sequences, which is testing the implementation.
-    """
-
-    def __init__(self, columns: int = 80, rows: int = 24) -> None:
-        self._size = (columns, rows)
-        self.written: list[str] = []
-        self.restored = False
-        self.alt_screen = False
-        self.suspends = 0
-        self.on_input: Callable[[str], None] | None = None
-        self.on_resize: Callable[[], None] | None = None
-
-    @property
-    def size(self) -> tuple[int, int]:
-        return self._size
-
-    @property
-    def output(self) -> str:
-        return "".join(self.written)
-
-    def clear_output(self) -> None:
-        self.written.clear()
-
-    def write(self, data: str) -> None:
-        self.written.append(data)
-
-    def start(self, on_input: Callable[[str], None], on_resize: Callable[[], None]) -> None:
-        self.on_input = on_input
-        self.on_resize = on_resize
-
-    def stop(self) -> None:
-        self.restored = True
-        self.alt_screen = False
-
-    def set_alt_screen(self, enabled: bool) -> None:
-        if enabled == self.alt_screen:
-            return
-        self.alt_screen = enabled
-        self.write("\x1b[?1049h" if enabled else "\x1b[?1049l")
-
-    def suspend(self) -> None:
-        """Counted rather than performed: a test must not stop pytest."""
-        self.suspends += 1
-
-    def resize(self, columns: int, rows: int) -> None:
-        self._size = (columns, rows)
-        if self.on_resize is not None:
-            self.on_resize()
-
-    def feed(self, data: str) -> None:
-        if self.on_input is not None:
-            self.on_input(data)

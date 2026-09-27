@@ -27,6 +27,7 @@ from hx.core.messages import (
 from hx.core.usage import format_tokens
 from hx.git import BranchWatcher
 from hx.term.loop import TuiRunner
+from hx.term.modifiers import ShiftEnter
 from hx.term.terminal import Terminal
 from hx.tui.format import tilde
 from hx.tui.renderers import ToolCall
@@ -110,8 +111,8 @@ class HXSession:
             on_image_request=self._request_images,
         )
         self.view = Session(__version__, quiet=settings.quiet_startup, prompt=self.prompt)
-        # Injectable so a test can drive a whole session without a tty, and
-        # read back what a terminal would have shown.
+        # Anything with the Terminal protocol's shape; the process's own tty
+        # when none is given.
         self.runner = TuiRunner(
             self.view,
             terminal,
@@ -138,6 +139,8 @@ class HXSession:
         self._mouse = False
         self._clear_armed = False
         """Set by one ctrl+c on an empty, idle prompt; a second one exits."""
+        self._shift_enter = ShiftEnter()
+        """Tells a shift+enter the terminal sent as enter from a plain enter."""
         self.commands: Any = None
         """The slash-command registry, built on start."""
         self._silent: set[str] = set()
@@ -273,14 +276,18 @@ class HXSession:
     def queued(self) -> list[str]:
         return [turn.text for turn in self._queued]
 
-    @property
-    def last_message_text(self) -> str:
-        block = self.view.transcript.last()
-        return getattr(block, "text", "") or ""
+    def last_reply_text(self) -> str:
+        """The newest answer - not the newest block, which after ``/copy`` is
+        typed is the command's own echo."""
+        for block in reversed(self.view.transcript.blocks):
+            if isinstance(block, AssistantMessage) and block.text.strip():
+                return block.text
+        return ""
 
     @property
     def last_context(self) -> Any:
-        return getattr(self.loop.session, "usage", None)
+        """What the last model call was sent, section by section - ``/context``."""
+        return self.loop.last_context
 
     def notice(self, text: str, level: str = "info") -> None:
         self._notice(text, level)
@@ -712,11 +719,19 @@ class HXSession:
         cancelled so an in-flight tool does not carry on after the user said
         stop. A slash command or shell line running beside it goes too: the
         key means stop what is happening, not stop one of the things.
+
+        Said in the transcript: a reply cut off mid-sentence otherwise reads as
+        a reply that ended there, and nothing on screen says which it was.
         """
+        live = [task for task in (self._turn, self._side) if task is not None and not task.done()]
+        if live and all(task.cancelling() for task in live):
+            # Already told to stop and still winding down: pressing again
+            # changes nothing, and must not say it did.
+            return
+        self._notice("Interrupted")
         self.loop.cancel()
-        for task in (self._turn, self._side):
-            if task is not None and not task.done():
-                task.cancel()
+        for task in live:
+            task.cancel()
 
     def _page(self) -> int:
         """Rows a page key moves. Half a screen keeps a line of context."""
@@ -950,6 +965,13 @@ class HXSession:
         if name == "ctrl+l":
             asyncio.create_task(self._open_models())  # noqa: RUF006
             return
+        # Only here, on the way to the prompt: nothing else binds shift+enter,
+        # so an approval or a picker has to keep the enter it was sent. Not
+        # under the kitty protocol, which gives shift+enter a code of its own.
+        if key.name == "text":
+            self._shift_enter.typed(key.data)
+        elif getattr(self.runner.terminal, "keyboard", None) != "kitty" and self._shift_enter(name):
+            name = "shift+enter"
         self.view.handle_input(name, key.data)
 
     def _submit(self, text: str, images: Sequence[ImageBlock] = ()) -> None:
@@ -1243,16 +1265,22 @@ class HXSession:
                     else:
                         transcript.append(started)
                     self._assistant = None
+                case ev.ToolCallProgress():
+                    if (running := self._tools.get(event.tool_use_id)) is not None:
+                        running.append_output(event.chunk)
                 case ev.ToolCallFinished():
                     finished = self._tools.pop(event.tool_use_id, None)
                     held = event.tool_use_id in self._silent
                     self._silent.discard(event.tool_use_id)
                     if finished is not None:
+                        # A success carries no detail: what the tool streamed
+                        # is its output, and is kept. A failure's detail is the
+                        # reason, and replaces it.
                         finished.update(
                             finished=True,
                             is_error=event.is_error,
                             summary=event.summary or "",
-                            output=event.detail or "",
+                            output=event.detail or finished.call.output,
                             metadata=event.metadata,
                             duration_ms=event.duration_ms or 0.0,
                         )
@@ -1275,15 +1303,18 @@ class HXSession:
                 case ev.CompactionStarted():
                     self._notice(f"Compacting ({event.reason})…")
                 case ev.CompactionFinished():
-                    saved = event.tokens_before - event.tokens_after
-                    if saved > 0:
-                        self._notice(
-                            f"Compacted {format_tokens(event.tokens_before)} → "
-                            f"{format_tokens(event.tokens_after)} tokens. The cached "
-                            "conversation is discarded, so the next turn re-reads it "
-                            "at full price."
-                        )
-                    status.set_context(event.tokens_after, status.context_window)
+                    # Reported whatever it saved: "Compacting…" with nothing
+                    # after it reads as a compaction that never finished, and
+                    # the cache is discarded either way.
+                    self._notice(
+                        f"Compacted {format_tokens(event.tokens_before)} → "
+                        f"{format_tokens(event.tokens_after)} tokens. The cached "
+                        "conversation is discarded, so the next turn re-reads it "
+                        "at full price."
+                    )
+                    status.set_context(
+                        self.loop.session.usage.context_tokens, status.context_window
+                    )
                 case ev.ErrorRaised():
                     self._notice(event.message, "error")
                 case ev.TurnFinished():

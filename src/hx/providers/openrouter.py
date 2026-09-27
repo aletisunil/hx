@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import time
 from collections.abc import AsyncIterator
@@ -39,8 +40,17 @@ from hx.net import async_client
 from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, StreamEnd, StreamItem
 
 API_BASE = "https://openrouter.ai/api/v1"
-CHAT_COMPLETIONS = f"{API_BASE}/chat/completions"
-MODELS = f"{API_BASE}/models"
+
+BASE_URL_VAR = "HX_OPENROUTER_BASE_URL"
+"""Points the OpenRouter route at another OpenAI-compatible endpoint: a
+gateway, a recording proxy, or the local stand-in the end-to-end suite runs."""
+
+
+def api_base() -> str:
+    """The endpoint the OpenRouter route talks to: ``HX_OPENROUTER_BASE_URL``
+    when set, otherwise OpenRouter itself."""
+    return (os.environ.get(BASE_URL_VAR) or "").strip().rstrip("/") or API_BASE
+
 
 DEFAULT_HEADERS = {
     "HTTP-Referer": "https://github.com/aletisunil/hx",
@@ -68,12 +78,12 @@ class OpenRouterProvider:
         self,
         api_key: str,
         *,
-        base_url: str = API_BASE,
+        base_url: str | None = None,
         timeout: float = 600.0,
         max_retries: int = 3,
     ) -> None:
         self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
+        self.base_url = (base_url or api_base()).rstrip("/")
         self.max_retries = max_retries
         self._client = async_client(
             timeout=httpx.Timeout(timeout, connect=15.0),
@@ -437,11 +447,11 @@ def _error_message(status: int, body: str) -> str:
     return f"OpenRouter {status}: {message or body[:400]}"
 
 
-async def fetch_models(api_key: str, base_url: str = API_BASE) -> list[dict[str, Any]]:
+async def fetch_models(api_key: str, base_url: str | None = None) -> list[dict[str, Any]]:
     """GET ``/models``. Used by :class:`~hx.providers.models.ModelRegistry`."""
     async with async_client(timeout=30.0) as client:
         response = await client.get(
-            f"{base_url.rstrip('/')}/models",
+            f"{(base_url or api_base()).rstrip('/')}/models",
             headers={"Authorization": f"Bearer {api_key}", **DEFAULT_HEADERS},
         )
         if response.status_code >= 400:

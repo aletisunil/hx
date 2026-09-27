@@ -20,6 +20,10 @@ than a magic number at a call site.
 EXPANDED_MAX = 400
 """Ceiling on an expanded block, so ctrl+o cannot stall the renderer."""
 
+STREAM_TAIL = 256_000
+"""Characters of a running tool's streamed output kept for display - far more
+than :data:`EXPANDED_MAX` lines of it, and a bound on what an endless one holds."""
+
 LIST_VISIBLE = 8
 """Rows visible in a scrolling list that has no height to work with.
 

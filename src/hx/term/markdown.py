@@ -64,23 +64,33 @@ class Painter:
         return source.split("\n")
 
 
-def render_markdown(text: str, width: int, painter: Painter | None = None) -> list[str]:
-    """Render ``text`` into lines at most ``width`` cells wide."""
+def render_markdown(
+    text: str, width: int, painter: Painter | None = None, *, breaks: bool = False
+) -> list[str]:
+    """Render ``text`` into lines at most ``width`` cells wide.
+
+    ``breaks`` keeps a single newline inside a paragraph as a line break, the
+    way GitHub renders a comment, instead of joining the lines as CommonMark
+    does. Right for what a person typed - each shift+enter was meant - and
+    wrong for a model's prose, which is hard-wrapped at arbitrary columns
+    often enough that joining is the better reading.
+    """
     from markdown_it import MarkdownIt
     from markdown_it.tree import SyntaxTreeNode
 
     painter = painter or Painter()
     parser = MarkdownIt("commonmark", {"breaks": False}).enable("table").enable("strikethrough")
     tree = SyntaxTreeNode(parser.parse(text))
-    renderer = _Renderer(painter, width)
+    renderer = _Renderer(painter, width, breaks=breaks)
     renderer.block(tree, indent=0)
     return renderer.trim()
 
 
 class _Renderer:
-    def __init__(self, painter: Painter, width: int) -> None:
+    def __init__(self, painter: Painter, width: int, *, breaks: bool = False) -> None:
         self.painter = painter
         self.width = width
+        self.breaks = breaks
         self.lines: list[str] = []
 
     # -- assembly ----------------------------------------------------------
@@ -223,7 +233,9 @@ class _Renderer:
         self.blank()
 
     def _blockquote(self, node: object, indent: int) -> None:
-        inner = _Renderer(self.painter, self.width - indent - cell_width(QUOTE_RAIL))
+        inner = _Renderer(
+            self.painter, self.width - indent - cell_width(QUOTE_RAIL), breaks=self.breaks
+        )
         inner.block(node, 0)
         rail = self.painter.paint("md_quote_border", QUOTE_RAIL)
         self.blank()
@@ -252,7 +264,7 @@ class _Renderer:
         painted = self.painter.paint("md_bullet", marker)
         gutter = cell_width(marker) + 1
 
-        inner = _Renderer(self.painter, self.width - indent - gutter)
+        inner = _Renderer(self.painter, self.width - indent - gutter, breaks=self.breaks)
         inner.block(node, 0)
         body = inner.trim()
         if not body:
@@ -325,7 +337,7 @@ class _Renderer:
         if kind == "code_inline":
             return paint("md_code", str(node.content))  # type: ignore[attr-defined]
         if kind == "softbreak":
-            return " "
+            return "\n" if self.breaks else " "
         if kind == "hardbreak":
             return "\n"
         if kind == "strong":

@@ -5,7 +5,7 @@ Precedence, lowest to highest::
     defaults
       < ~/.hx/settings.json
       < <cwd>/.hx/settings.json          (shared, check it in)
-      < <cwd>/.hx/settings.local.json    (this machine only, never checked in)
+      < ~/.hx/projects/<project>/settings.local.json   (this machine only)
       < environment
       < CLI flags
 

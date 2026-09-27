@@ -27,27 +27,40 @@ class SandboxBackend(StrEnum):
 
 
 CREDENTIAL_PATHS = (
-    "~/.ssh",
-    "~/.aws",
-    "~/.gnupg",
-    "~/.kube",
+    "~/.ssh/",
+    "~/.aws/",
+    "~/.gnupg/",
+    "~/.kube/",
     "~/.docker/config.json",
-    "~/.config/gh",
+    "~/.config/gh/",
     "~/.netrc",
     "~/.npmrc",
     "~/.pypirc",
     "~/.hx/auth.json",
 )
-"""Denied even inside readable roots. A coding agent has no business reading
-these, and one prompt-injected `cat ~/.ssh/id_rsa` is all it takes."""
+"""Denied even inside readable and writable roots. A coding agent has no
+business reading these, and one prompt-injected `cat ~/.ssh/id_rsa` is all it
+takes - or writing them, where an `authorized_keys` line is a way back in.
+
+A trailing slash marks a directory. That matters only for one that does not
+exist yet: see :func:`build_bwrap_argv`."""
+
+
+@dataclass(frozen=True, slots=True)
+class DeniedPath:
+    path: Path
+    is_dir: bool
+    """What the path is meant to be, which is what it gets created as if it has
+    to be created - ``~/.ssh`` made as a file would break ssh as surely as
+    ``~/.netrc`` made as a directory would break curl."""
 
 
 @dataclass(slots=True)
 class SandboxPolicy:
     writable_paths: tuple[Path, ...] = ()
     readable_paths: tuple[Path, ...] = ()
-    deny_paths: tuple[Path, ...] = field(default_factory=tuple)
-    """Explicitly unreadable even inside readable roots - credential stores,
+    deny_paths: tuple[DeniedPath, ...] = field(default_factory=tuple)
+    """Unreadable and unwritable even inside allowed roots - credential stores,
     ``~/.ssh``, ``~/.aws``, and HX's own ``auth.json``."""
     allow_network: bool = False
     allow_subprocess: bool = True
@@ -127,7 +140,10 @@ def default_policy(cwd: Path, allow_network: bool = False) -> SandboxPolicy:
     return SandboxPolicy(
         writable_paths=tuple(dict.fromkeys(writable)),
         readable_paths=(Path("/"),),
-        deny_paths=tuple(_real(Path(p).expanduser()) for p in CREDENTIAL_PATHS),
+        deny_paths=tuple(
+            DeniedPath(_real(Path(p).expanduser()), is_dir=p.endswith("/"))
+            for p in CREDENTIAL_PATHS
+        ),
         allow_network=allow_network,
         cwd=cwd.resolve(),
     )
@@ -195,9 +211,13 @@ def build_seatbelt_profile(policy: SandboxPolicy) -> str:
     lines.append("(allow network*)" if policy.allow_network else "(deny network*)")
 
     if policy.deny_paths:
-        lines += ["", ";; Credentials - last match wins, so these override the read allowance"]
-        for path in policy.deny_paths:
-            lines.append(f"(deny file-read* (subpath {_sbpl_string(_real(path))}))")
+        # Writes too: a project opened in $HOME makes ~/.ssh writable, and a
+        # planted authorized_keys is worse than a leaked key.
+        lines += ["", ";; Credentials - last match wins, so these override both allowances"]
+        for denied in policy.deny_paths:
+            lines.append(
+                f"(deny file-read* file-write* (subpath {_sbpl_string(_real(denied.path))}))"
+            )
 
     return "\n".join(lines) + "\n"
 
@@ -229,7 +249,13 @@ def _sbpl_string(path: Path | str) -> str:
 
 def build_bwrap_argv(policy: SandboxPolicy, argv: list[str]) -> list[str]:
     """Generate the ``bwrap`` invocation: ``--ro-bind / /``, project bound
-    read-write, ``--unshare-net`` unless network is allowed."""
+    read-write, credential paths shadowed, ``--unshare-net`` unless network is
+    allowed.
+
+    Not quite side-effect free: a credential path that does not exist but sits
+    inside a writable root is created on the host first - see
+    :func:`_ensure_mountpoint`.
+    """
     command = [
         "bwrap",
         "--ro-bind",
@@ -241,20 +267,23 @@ def build_bwrap_argv(policy: SandboxPolicy, argv: list[str]) -> list[str]:
         "/proc",
         "--die-with-parent",
     ]
-    for path in policy.writable_paths:
-        command += ["--bind", str(_real(path)), str(_real(path))]
-    for path in policy.deny_paths:
-        if not path.exists():
+    writable = [_real(path) for path in policy.writable_paths]
+    for path in writable:
+        command += ["--bind", str(path), str(path)]
+    for denied in policy.deny_paths:
+        path = _real(denied.path)
+        if not path.exists() and not _ensure_mountpoint(denied, writable):
             continue
-        # There is no "deny read" in bwrap, so the path is shadowed instead -
-        # and what it is shadowed *with* has to match what is there. `--tmpfs`
+        # There is no "deny" in bwrap, so the path is shadowed instead - and
+        # what it is shadowed *with* has to match what is there. `--tmpfs`
         # mounts a directory, and aiming it at a regular file aborts bwrap
         # outright: the sandbox never starts, and the command it was wrapping
         # dies with it. Six of the credential paths are files, `~/.hx/auth.json`
         # among them - the one HX writes itself - so this was every Linux user
-        # who had ever logged in.
+        # who had ever logged in. Read-only either way, so a write fails the
+        # way it does under Seatbelt instead of vanishing into a tmpfs.
         if path.is_dir():
-            command += ["--tmpfs", str(path)]
+            command += ["--tmpfs", str(path), "--remount-ro", str(path)]
         else:
             command += ["--ro-bind", os.devnull, str(path)]
     if not policy.allow_network:
@@ -265,3 +294,36 @@ def build_bwrap_argv(policy: SandboxPolicy, argv: list[str]) -> list[str]:
     if policy.cwd is not None:
         command += ["--chdir", str(_real(policy.cwd))]
     return [*command, "--", *argv]
+
+
+def _ensure_mountpoint(denied: DeniedPath, writable: list[Path]) -> bool:
+    """Create a missing credential path on the host, so it can be shadowed.
+
+    bwrap can only deny a path by mounting over it, and a mount needs something
+    to mount on. Outside the writable roots, skipping a missing path is safe:
+    under ``--ro-bind / /`` the sandbox cannot create it either. Inside one it
+    is not - a session opened in ``$HOME`` with no ``~/.ssh`` yet could
+    ``mkdir ~/.ssh`` and plant an ``authorized_keys`` on the host.
+
+    So the path is created, empty and private, as what it is meant to be. It
+    stays: removing it after the command would race any other sandbox still
+    shadowing it, and an empty ``~/.ssh`` is what ssh itself would have made.
+    Left to bwrap, it would appear too - but a file as ``0444``, which the
+    user's own tools could not then write.
+
+    Returns whether the path now exists. A failure means the parent refuses
+    this user, and the sandbox runs as the same user, so it cannot create the
+    path either.
+    """
+    path = _real(denied.path)
+    if not any(path.is_relative_to(root) for root in writable):
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if denied.is_dir:
+            path.mkdir(mode=0o700, exist_ok=True)
+        else:
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
+    except OSError:
+        return False
+    return path.exists()

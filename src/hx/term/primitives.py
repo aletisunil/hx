@@ -13,11 +13,12 @@ two adjacent blocks cannot both contribute a blank line.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
-from hx.term.ansi import SEGMENT_RESET, fill_line, terminate, wrap
+from hx.term.ansi import SEGMENT_RESET, _tokenize, fill_line, terminate, wrap
 from hx.term.component import Component, Widget
-from hx.term.width import cell_width, truncate_to_width
+from hx.term.width import cell_width, strip_ansi, truncate_to_width
 
 Tint = Callable[[str], str]
 """Wraps a line in a background. :meth:`hx.tui.theme.Theme.tint` makes them."""
@@ -79,6 +80,56 @@ class Text(Widget):
         return terminate(self._tint(_pad_to(line, width)))
 
 
+_COLUMN = re.compile(r"^(\s*\S.*?[^\s.!?]\s{2,})\S")
+"""A row laid out in columns: a label, then two or more spaces, then its text.
+Not a sentence ending in ``.``, ``!`` or ``?`` and followed by two spaces -
+that is prose, and prose wraps at its own indent."""
+
+
+def _wrap_aligned(paragraph: str, width: int) -> list[str]:
+    """Wrap one line, continuing under its own text rather than at the margin.
+
+    Command output is built as rows - ``  deploy      Tag, build and ship`` -
+    and a row too long for the window used to wrap back to the left edge,
+    right through the column of labels. A wrapped row now continues under
+    where its last column starts, or under its own indent when it has none.
+
+    Only the text right of that column is wrapped, once, so a word too long
+    for a line is broken the way :func:`wrap` breaks it and never re-joined.
+    """
+    lines = wrap(paragraph, width)
+    if len(lines) < 2:
+        return lines
+    plain = strip_ansi(paragraph)
+    column = _COLUMN.match(plain)
+    lead = cell_width(column.group(1)) if column else len(plain) - len(plain.lstrip(" "))
+    if not 0 < lead <= width // 2:
+        return lines
+    head, body = _split_at_cell(paragraph, lead)
+    rest = wrap(body, width - lead)
+    return [head + rest[0], *(" " * lead + line for line in rest[1:])]
+
+
+def _split_at_cell(text: str, cells: int) -> tuple[str, str]:
+    """``text`` cut after its first ``cells`` visible cells.
+
+    The body starts with every escape the head held, so it is drawn - and
+    wrapped - in the style that was active where it was cut.
+    """
+    tokens = _tokenize(text)
+    seen = 0
+    for index, (is_escape, chunk) in enumerate(tokens):
+        if not is_escape:
+            if seen >= cells:
+                head = tokens[:index]
+                style = "".join(chunk for escape, chunk in head if escape)
+                return "".join(chunk for _, chunk in head), style + "".join(
+                    chunk for _, chunk in tokens[index:]
+                )
+            seen += cell_width(chunk)
+    return text, ""
+
+
 class HangingText(Widget):
     """A prefixed block whose continuation lines indent under the text.
 
@@ -125,7 +176,7 @@ class HangingText(Widget):
 
         out: list[str] = []
         for paragraph in self._body.split("\n"):
-            for index, line in enumerate(wrap(paragraph, inner)):
+            for index, line in enumerate(_wrap_aligned(paragraph, inner)):
                 marker = self._prefix if not out and index == 0 else hang
                 out.append(f"{pad}{marker}{line}")
 

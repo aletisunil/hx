@@ -310,7 +310,7 @@ allowlist it if you would rather not be asked:
 ```
 
 `CHANGELOG.md` lists what each version added, and a release cannot skip it:
-`tests/test_docs.py` fails when `__version__` has no section (see
+`tests/e2e/test_cli.py` fails when `__version__` has no section (see
 [Releasing](#releasing)).
 
 ### Keys
@@ -322,7 +322,7 @@ be rebound (see [Keybindings](#keybindings)).
 | Key | Does |
 |---|---|
 | `enter` | send |
-| `ctrl+j` | newline (also `shift+enter`) |
+| `shift+enter` | newline (also `ctrl+j`; in a terminal that cannot send `shift+enter`, end the line with `\` and press `enter`) |
 | `esc` | interrupt the current turn |
 | `ctrl+c` | copy the selected text; with nothing selected, clear the prompt (twice on an empty prompt exits) |
 | `ctrl+d` | exit, when the prompt is empty |
@@ -624,8 +624,11 @@ merge: it is read per layer, and only from your own settings. See
 Environment overrides: `HX_MODEL`, `HX_SUBAGENT_MODEL`, `HX_MAX_TOKENS`,
 `HX_PERMISSION_MODE`, `HX_SANDBOX`, `HX_COMPACT_AT`, `HX_GIT_NOTICES`,
 `HX_THEME`, `HX_QUIET_STARTUP`. Also `HX_HOME` to relocate user state, `HX_TAVILY_API_KEY`
-for web search, and `HX_CA_BUNDLE` / `HX_SSL_NO_VERIFY` for TLS (see
-[Credentials](#credentials)).
+for web search, `HX_CA_BUNDLE` / `HX_SSL_NO_VERIFY` for TLS (see
+[Credentials](#credentials)), and `HX_OPENROUTER_BASE_URL` to point the OpenRouter
+route at another OpenAI-compatible endpoint - a gateway, or a recording proxy.
+`HX_MODIFIER_PROBE=0` stops HX asking macOS whether shift is held when an
+`enter` arrives (see [Keys](#keys)).
 
 ### The system prompt
 
@@ -734,7 +737,8 @@ confidence prompts rather than passing.
 **An OS sandbox** wraps command execution: Seatbelt on macOS, bubblewrap on
 Linux. The filesystem is readable, writes are confined to the project and the
 temp dir, credential paths (`~/.ssh`, `~/.aws`, and HX's own `auth.json`) are
-unreadable, and outbound network is off. If neither backend is present the
+unreadable and unwritable - even inside the project, and even before they
+exist - and outbound network is off. If neither backend is present the
 status bar says `no-sandbox` rather than implying protection that is not there.
 
 Modes cycle with shift+tab: `plan` (read-only — mutating tools are not even
@@ -1077,6 +1081,23 @@ uv run mypy                  # strict
 uv run hx                    # run from the checkout
 ```
 
+The suite is end-to-end. Each test in `tests/e2e/` starts the installed `hx`
+binary - on a real pseudo-terminal for the TUI, or as a plain subprocess for
+print mode and the other commands - in a private `$HOME` and `$HX_HOME`, and
+points it at a local OpenRouter stand-in with `HX_OPENROUTER_BASE_URL`.
+Everything between the keyboard and the socket is the shipped code; only the
+model's replies are scripted. The screen is read back through a VT emulator,
+so assertions are on the cells a terminal shows, not on the bytes HX meant to
+write.
+
+Every run writes `e2e-report/`: `index.html` shows each test's outcome and
+every screen it checked, rendered in colour, and one text file per screen lets
+two runs be compared with `diff -r`. CI uploads it from every test job as an
+`e2e-report-*` artifact. Set `HX_E2E_REPORT` to write it somewhere else.
+
+Tests that need the OS sandbox are skipped where there is no backend
+(`sandbox-exec` on macOS, `bwrap` on Linux).
+
 Tests marked `live` hit a real API. The OpenRouter ones cost money:
 
 ```sh
@@ -1093,17 +1114,7 @@ uv run pytest -m live tests/test_live_devin.py
 
 They are the only place the wire formats, streaming, tool use and a genuine
 cache hit are proven against a real service; everything else runs against the
-scripted provider.
-
-Tests marked `sandbox` exercise the real OS sandbox and are skipped where no
-backend exists.
-
-The TUI has SVG layout snapshots. Read the diff before accepting a change to
-them - they exist to catch a frame that quietly lost a row:
-
-```sh
-uv run pytest tests/tui/test_snapshots.py --snapshot-update
-```
+stand-in.
 
 ### Layout
 
@@ -1112,7 +1123,7 @@ src/hx/
   cli.py config.py paths.py frontmatter.py git.py
   core/         loop, context assembly, compaction, late injection, sessions, usage
   auth/         credential store, OAuth flows, per-route resolution
-  providers/    OpenRouter, Codex, Devin, the model catalogue, a scripted provider for tests
+  providers/    OpenRouter, Codex, Devin, the model catalogue
   tools/        Bash, Read, Write, Edit, Glob, Grep, Symbols, TodoWrite, Task,
                 WebSearch, WebFetch, line anchors, output capping
   permissions/  rule engine, shell decomposition, Seatbelt/bubblewrap
@@ -1149,12 +1160,12 @@ Each release:
 # 1. move CHANGELOG.md's [Unreleased] entries under the new version, dated,
 #    and leave a fresh empty [Unreleased] behind
 # 2. bump __version__ in src/hx/__init__.py
-# 3. uv run pytest tests/test_docs.py     # the version must have a section
+# 3. uv run pytest tests/e2e/test_cli.py  # the version must have a section
 git commit -am "release: X.Y.Z"
 git tag v$(uv run hx --version | cut -d' ' -f2) && git push origin main --tags
 ```
 
-Step 1 is not optional and is not a convention: `tests/test_docs.py` fails the
+Step 1 is not optional and is not a convention: `tests/e2e/test_cli.py` fails the
 whole suite when `__version__` has no `CHANGELOG.md` section, so a release that
 skips it cannot get past CI to the `publish` job. The file ships inside the
 wheel and `hx changelog` prints it, so a version with no section there reaches

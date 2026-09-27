@@ -790,8 +790,7 @@ class AgentLoop:
         fraction = self.session.usage.context_fraction
         if not self.compactor.should_compact(fraction, self.settings.context.compact_at):
             return
-        dropped, _ = self.compactor.split(self.session.active_messages())
-        if len(dropped) < self.compactor.MIN_MESSAGES_TO_COMPACT:
+        if not self.compactor.can_compact(self.session.active_messages()):
             return
         await self.compact(reason=f"context at {fraction:.0%} of the window")
 
@@ -805,6 +804,11 @@ class AgentLoop:
         """
         if self.compactor is None:
             return False
+        # Decided before anything is announced: "Compacting…" followed by
+        # nothing, beside the caller's "nothing to compact", reads as a
+        # compaction that started and never finished.
+        if not self.compactor.can_compact(self.session.active_messages()):
+            return False
 
         self.bus.publish(CompactionStarted(reason=reason))
         try:
@@ -813,16 +817,16 @@ class AgentLoop:
             self.bus.publish(ErrorRaised(message=f"Compaction failed: {exc}", recoverable=True))
             return False
 
-        if not result.dropped:
-            self.bus.publish(
-                CompactionFinished(
-                    tokens_before=result.tokens_before, tokens_after=result.tokens_after
-                )
-            )
-            return False
-
         self.session.record_compaction(result.dropped, result.kept, result.summary)
-        self.session.usage.context_tokens = result.tokens_after
+        # The estimates cover the conversation only; the system prompt and tools
+        # ahead of it are still sent, so they stay in the gauge - estimated the
+        # same way, rather than subtracted out of the provider's real count.
+        prefix = sum(
+            section.tokens
+            for section in (self.last_context.sections if self.last_context else [])
+            if section.name != "history"
+        )
+        self.session.usage.context_tokens = prefix + result.tokens_after
         self.bus.publish(
             CompactionFinished(tokens_before=result.tokens_before, tokens_after=result.tokens_after)
         )

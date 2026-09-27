@@ -29,7 +29,7 @@ class GrantScope(StrEnum):
     ONCE = "once"
     SESSION = "session"
     ALWAYS = "always"
-    """Persisted to ``.hx/settings.local.json``."""
+    """Persisted to ``~/.hx/projects/<project>/settings.local.json``."""
 
 
 DEFAULT_MUTATING_TOOLS = frozenset({"Bash", "Write", "Edit", "Task"})
