@@ -54,11 +54,12 @@ class LayoutLine:
 
 
 def layout(text: str, width: int, cursor: int) -> list[LayoutLine]:
-    """Map the buffer onto visual rows, wrapping to ``width``.
+    """Map the buffer onto visual rows, wrapping to ``width`` between words.
 
-    Wrapping happens at the width, not at a word boundary: a prompt is being
-    typed into, and a line that reflows under the cursor as a word grows is
-    disorienting in a way it is not in rendered prose.
+    The rows of a line are exactly its text, cut up: nothing is added or
+    dropped at a break, so a buffer offset maps onto a row and a column by
+    counting alone. That is why the space a line breaks on stays at the end
+    of its row - see :func:`_wrap_words` - rather than being swallowed.
     """
     if width < 1:
         width = 1
@@ -66,42 +67,66 @@ def layout(text: str, width: int, cursor: int) -> list[LayoutLine]:
     rows: list[LayoutLine] = []
     offset = 0
     for logical in text.split("\n"):
-        chunks = _wrap_hard(logical, width)
-        for chunk in chunks:
+        chunks = _wrap_words(logical, width)
+        for index, chunk in enumerate(chunks):
             length = len(chunk)
             column: int | None = None
-            if offset <= cursor <= offset + length:
-                # A cursor exactly at a wrap point belongs to the row it
-                # continues onto, not the one it just left - except at the very
-                # end of the buffer, where there is no next row.
-                at_wrap = cursor == offset + length and length == _visible_len(chunk, width)
-                if not (at_wrap and chunk is not chunks[-1]):
-                    column = cell_width(chunk[: cursor - offset])
+            # A cursor at a break belongs to the row it continues onto: what
+            # is typed there lands at the start of that row, so the cursor is
+            # drawn there too. Past the last row there is nothing to continue.
+            last = index == len(chunks) - 1
+            if offset <= cursor < offset + length or (cursor == offset + length and last):
+                column = cell_width(chunk[: cursor - offset])
             rows.append(LayoutLine(chunk, column))
             offset += length
         offset += 1  # the newline itself
     return rows
 
 
-def _visible_len(chunk: str, width: int) -> int:
-    return len(chunk) if cell_width(chunk) >= width else -1
+def _wrap_words(line: str, width: int) -> list[str]:
+    """Break a logical line into rows of at most ``width`` cells, between words.
 
-
-def _wrap_hard(line: str, width: int) -> list[str]:
-    """Break a logical line into rows of at most ``width`` cells."""
+    A row ends after the last space that fits. The space the break falls on
+    may hang one cell past ``width`` - a word that exactly fills a row keeps
+    its space rather than pushing it to the front of the next one - which is
+    what the editor's right-hand padding is for. A word too long for any row
+    breaks where it hits the edge, as does a run that is nothing but spaces.
+    """
     if not line:
         return [""]
+    clusters = list(grapheme_clusters(line))
     rows: list[str] = []
-    current = ""
+    start = 0
     used = 0
-    for cluster in grapheme_clusters(line):
+    # Where the row may end: just past a space with a word before it.
+    fold: int | None = None
+    worded = False
+    index = 0
+    while index < len(clusters):
+        cluster = clusters[index]
         step = cell_width(cluster)
-        if used + step > width and current:
-            rows.append(current)
-            current, used = "", 0
-        current += cluster
+        if used + step > width and index > start:
+            if cluster == " " and worded and used == width:
+                end = index + 1  # hang it
+            elif fold is not None:
+                end = fold
+            else:
+                end = index
+            rows.append("".join(clusters[start:end]))
+            start, fold, worded = end, None, False
+            used = sum(cell_width(c) for c in clusters[start:index])
+            worded = any(c != " " for c in clusters[start:index])
+            if end > index:
+                index = end
+            continue
+        if cluster == " ":
+            if worded:
+                fold = index + 1
+        else:
+            worded = True
         used += step
-    rows.append(current)
+        index += 1
+    rows.append("".join(clusters[start:]))
     return rows
 
 
@@ -224,6 +249,10 @@ class Editor(Widget):
         placeholder = not self.buffer.text and self.placeholder
         if row.cursor_column is None:
             return truncate_to_width(row.text, inner)
+        # The cursor may sit one cell past the text column - on a space hanging
+        # off a full row, or after the last character of one - and it is drawn
+        # there, in the right-hand padding, rather than over the text.
+        room = inner + min(1, self._padding_x)
 
         clusters = list(grapheme_clusters(row.text))
         consumed = 0
@@ -247,12 +276,12 @@ class Editor(Widget):
 
         if under:
             painted = head + CURSOR_MARKER + inverse(under) + "".join(after)
-            return truncate_to_width(painted, inner)
+            return truncate_to_width(painted, room)
 
         # At end of line the cursor is an appended cell, which costs a column
         # the text did not need. Without trimming for it the line comes out one
         # cell too wide and the renderer refuses to draw the frame.
-        head = truncate_to_width(head, max(0, inner - 1))
+        head = truncate_to_width(head, max(0, room - 1))
         return head + CURSOR_MARKER + inverse(" ")
 
     # -- editing helpers ---------------------------------------------------

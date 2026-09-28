@@ -326,7 +326,6 @@ be rebound (see [Keybindings](#keybindings)).
 | `esc` | interrupt the current turn |
 | `ctrl+c` | copy the selected text; with nothing selected, clear the prompt (twice on an empty prompt exits) |
 | `ctrl+d` | exit, when the prompt is empty |
-| `ctrl+z` | suspend to the background |
 | `shift+tab` | cycle permission mode |
 | `ctrl+p` | command palette |
 | `ctrl+l` | model picker |
@@ -350,8 +349,13 @@ The prompt is a readline-style editor: `ctrl+a`/`ctrl+e` for line start and end,
 `ctrl+b`/`ctrl+f` by character, `alt+b`/`alt+f` by word, `ctrl+w` and `alt+d` to
 kill a word, `ctrl+u` and `ctrl+k` to kill to the start or end of a line, then
 `ctrl+y` to yank it back and `alt+y` to walk further down the kill ring.
-`ctrl+_` undoes, `ctrl+shift+z` redoes - `ctrl+z` belongs to the shell, and
-suspends HX.
+`ctrl+z` undoes and `ctrl+shift+z` redoes (`ctrl+_` undoes too). `cmd+z` and
+`cmd+shift+z` work in a terminal that passes cmd through to the program, such
+as kitty or WezTerm; Apple's Terminal, iTerm2 and Ghostty keep cmd+z for their
+own Edit menu. A terminal without the kitty protocol or modifyOtherKeys sends
+`ctrl+shift+z` as `ctrl+z`, so there it undoes. Suspending to the background
+has no key by default - bind `app.suspend` in `keybindings.json` (for example
+to `"ctrl+g"`) to get it back.
 
 Typing `/` or `@` opens a completion list above the prompt; `tab` cycles it,
 `enter` accepts, `esc` dismisses.
@@ -421,8 +425,10 @@ Any key can be rebound in `~/.hx/keybindings.json`, keyed by the action ids in
 }
 ```
 
-Conflicts and unknown action names are reported as a notice at startup rather
-than being silently resolved.
+Modifiers are `ctrl`, `alt` (or `option`), `shift` and `cmd` (or `super`);
+a `cmd` key only arrives from a terminal that passes cmd through. Conflicts and
+unknown action names are reported as a notice at startup rather than being
+silently resolved.
 
 ### Commands
 

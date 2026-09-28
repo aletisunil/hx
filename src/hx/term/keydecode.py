@@ -417,8 +417,13 @@ def _unicode_key(code: int, shifted: int | None, base: int | None, mods: list[st
             return Key(_with_modifiers(_CTRL_PUNCTUATION[char], rest))
         return Key(_with_modifiers("space" if char == " " else char.lower(), mods))
 
-    # alt without ctrl. The legacy encoding sends ESC then the shifted
-    # character, so alt+shift+b has always been alt+B.
+    # super, hyper and meta have no legacy encoding to agree with, so shift is
+    # named like ctrl's: cmd+shift+z is super+shift+z, as a user writes it.
+    if set(chording) - {"alt"}:
+        return Key(_with_modifiers("space" if char == " " else char.lower(), mods))
+
+    # alt alone. The legacy encoding sends ESC then the shifted character, so
+    # alt+shift+b has always been alt+B.
     if "shift" in mods:
         char = chr(shifted) if shifted else char.upper()
         mods = [mod for mod in mods if mod != "shift"]

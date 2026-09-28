@@ -26,6 +26,27 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `ctrl+z` undoes in the prompt and `ctrl+shift+z` redoes; `cmd+z` and
+  `cmd+shift+z` do the same in terminals that pass cmd through (kitty,
+  WezTerm). Suspend no longer has a default key: bind `app.suspend` in
+  `keybindings.json`, which now also accepts `cmd+` and `option+`.
+
+### Fixed
+
+- A markdown table wider than the terminal - pasted into the prompt or in a
+  reply - wraps its cells inside their columns instead of cutting them off,
+  so every word shows; in a terminal too narrow for its columns it is drawn as
+  `header: value` records. A bold phrase or link that wraps keeps its style
+  on the next line.
+- A long draft in the prompt wraps between words instead of splitting them
+  across rows; only a word longer than the row still breaks inside it. The
+  cursor after the last character of a full row no longer hides that
+  character.
+- The welcome lines wrap on a narrow terminal instead of being cut off
+  mid-word.
+
 ---
 
 ## [0.2.7] - 2026-09-27

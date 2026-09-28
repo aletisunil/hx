@@ -24,7 +24,7 @@ Two conventions worth naming, both taken from pi:
 
 from __future__ import annotations
 
-from hx.term.ansi import fill_line, hyperlink, wrap
+from hx.term.ansi import fill_line, hyperlink, open_styles, wrap
 from hx.term.component import Widget
 from hx.term.width import cell_width, truncate_to_width
 
@@ -37,6 +37,10 @@ QUOTE_RAIL = "│ "
 HR_MAX = 80
 """A rule spanning a very wide terminal reads as a divider in a book, not a
 paragraph break. Capping it keeps it proportionate to the text."""
+
+MIN_COLUMN = 3
+"""The narrowest a table column is squeezed to. Below this a table is drawn as
+records instead - see :meth:`_Renderer._stacked_table`."""
 
 
 class Painter:
@@ -294,30 +298,61 @@ class _Renderer:
             return
 
         count = max(len(row) for row in rows)
-        widths = [
-            max((cell_width(row[i]) for row in rows if i < len(row)), default=0)
-            for i in range(count)
-        ]
-        # Shrink to fit rather than overflowing the terminal.
+        rows = [row + [""] * (count - len(row)) for row in rows]
+        widths = [max(cell_width(row[i]) for row in rows) for i in range(count)]
+        # Narrowed to fit, widest column first, and the cells wrapped inside
+        # it. Truncating instead dropped the end of every long cell without a
+        # mark, so a pasted table echoed back missing text the model was sent.
         budget = self.width - indent - (3 * count + 1)
-        while sum(widths) > budget and max(widths) > 3:
+        if budget < MIN_COLUMN * count:
+            self._stacked_table(rows, header, indent)
+            return
+        while sum(widths) > budget:
             widths[widths.index(max(widths))] -= 1
 
-        def line(row: list[str]) -> str:
-            cells = []
-            for i in range(count):
-                cell = row[i] if i < len(row) else ""
-                cell = truncate_to_width(cell, widths[i])
-                cells.append(cell + " " * (widths[i] - cell_width(cell)))
-            return "│ " + " │ ".join(cells) + " │"
+        body = [
+            [_cell_lines(cell, width) for cell, width in zip(row, widths, strict=True)]
+            for row in rows
+        ]
+        # Once a row takes more than one line, only a rule says where the next
+        # one starts.
+        ruled = any(max(map(len, row)) > 1 for row in body[header:])
 
-        divider = "├─" + "─┼─".join("─" * w for w in widths) + "─┤"
+        def divider() -> str:
+            line = "├─" + "─┼─".join("─" * w for w in widths) + "─┤"
+            return self.painter.paint("md_code_block_border", line)
 
         self.blank()
-        for index, row in enumerate(rows):
-            if index == header and header:
-                self.emit(self.painter.paint("md_code_block_border", divider), indent)
-            self.emit(line(row), indent)
+        for index, row in enumerate(body):
+            if index and (index == header or (index > header and ruled)):
+                self.emit(divider(), indent)
+            for depth in range(max(map(len, row))):
+                cells = []
+                for lines, width in zip(row, widths, strict=True):
+                    piece = lines[depth] if depth < len(lines) else ""
+                    cells.append(piece + " " * (width - cell_width(piece)))
+                self.emit("│ " + " │ ".join(cells) + " │", indent)
+        self.blank()
+
+    def _stacked_table(self, rows: list[list[str]], header: int, indent: int) -> None:
+        """A table too wide for the terminal, one record at a time.
+
+        Every column at its narrowest would still overflow, and a grid of
+        three-cell slivers is not readable. Each row becomes ``header: value``
+        lines instead, the records a rule apart.
+        """
+        names = rows[header - 1] if header else [""] * len(rows[0])
+        self.blank()
+        for index, row in enumerate(rows[header:]):
+            if index:
+                span = min(self.width - indent, HR_MAX)
+                self.emit(self.painter.paint("md_code_block_border", "─" * span), indent)
+            for name, cell in zip(names, row, strict=True):
+                label = self.painter.paint("md_heading", name + ":", bold=True) if name else ""
+                lines = self.wrapped(f"{label} {cell}" if label else cell, indent, 2)
+                for position, line in enumerate(lines):
+                    # Continuation hangs under the value, clear of the name.
+                    self.emit(line, indent + (2 if position else 0))
         self.blank()
 
     # -- inline ------------------------------------------------------------
@@ -357,6 +392,18 @@ class _Renderer:
         if kind == "inline":
             return self.inline(node)
         return str(getattr(node, "content", "") or "") or self.inline(node)
+
+
+def _cell_lines(text: str, width: int) -> list[str]:
+    """One table cell wrapped to its column.
+
+    Wrapping reopens on each line whatever styling was open at the break; each
+    line here also closes it, so a link or a bold phrase broken across lines
+    stays inside its own cell instead of running on into the next.
+    """
+    # Truncated because wrap only overflows for a glyph wider than the column.
+    lines = [truncate_to_width(piece, width) for piece in wrap(text, width)]
+    return [line + open_styles(line)[1] for line in lines]
 
 
 class Markdown(Widget):

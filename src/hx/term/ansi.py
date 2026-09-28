@@ -270,6 +270,71 @@ def active_background(text: str) -> str:
     return current
 
 
+def open_styles(text: str) -> tuple[str, str]:
+    """``(reopen, close)`` for the styling still in force at the end of ``text``.
+
+    Foreground, bold, italic, underline and a hyperlink - everything but the
+    background, which :func:`active_background` carries. A table cell wrapped
+    onto a second line needs both halves: ``close`` at its column edge, or a
+    link or a bold word runs on into the next cell, and ``reopen`` at the start
+    of the next line, or the rest of it arrives unstyled. Each half only
+    touches what is actually open, so a caller's own colour around the cell
+    survives.
+    """
+    foreground = link = ""
+    bold = italic = underline = False
+    for match in _ANY_ESCAPE.finditer(text):
+        escape = match.group()
+        if escape.startswith("\x1b]8;"):
+            link = escape if escape.split(";", 2)[2].rstrip("\x07\x1b\\") else ""
+            continue
+        sgr = _SGR_PATTERN.fullmatch(escape)
+        if not sgr:
+            continue
+        codes = [int(code or 0) for code in (sgr.group(1) or "0").split(";")]
+        index = 0
+        while index < len(codes):
+            code = codes[index]
+            if code == 0:
+                foreground, bold, italic, underline = "", False, False, False
+            elif code == 1:
+                bold = True
+            elif code == 22:
+                bold = False
+            elif code == 3:
+                italic = True
+            elif code == 23:
+                italic = False
+            elif code == 4:
+                underline = True
+            elif code == 24:
+                underline = False
+            elif 30 <= code <= 37 or 90 <= code <= 97:
+                foreground = f"\x1b[{code}m"
+            elif code == 39:
+                foreground = ""
+            elif code in (38, 48) and index + 1 < len(codes):
+                # Skip a colour's parameters so they are not read as codes;
+                # a truncated one ends the escape, as in active_background.
+                span = 3 if codes[index + 1] == 5 else 5 if codes[index + 1] == 2 else 0
+                if not span or index + span > len(codes):
+                    break
+                if code == 38:
+                    foreground = "\x1b[" + ";".join(map(str, codes[index : index + span])) + "m"
+                index += span - 1
+            index += 1
+
+    reopen = close = ""
+    if foreground:
+        reopen, close = reopen + foreground, close + FG_RESET
+    for on, start, end in ((bold, "1", "22"), (italic, "3", "23"), (underline, "4", "24")):
+        if on:
+            reopen, close = reopen + f"\x1b[{start}m", close + f"\x1b[{end}m"
+    if link:
+        reopen, close = reopen + link, close + "\x1b]8;;\x07"
+    return reopen, close
+
+
 def fill_line(text: str, width: int, background: str = "") -> str:
     """One rendered line: padded to ``width``, tinted, and terminated.
 
@@ -360,7 +425,7 @@ def _wrap_one(text: str, width: int) -> list[str]:
             emitted = "".join(line[:upto])
             rest = line[upto + 1 :]  # drop the space itself
         lines.append(carry + emitted)
-        carry = active_background(carry + emitted)
+        carry = active_background(carry + emitted) + open_styles(carry + emitted)[0]
         line = rest
         used = sum(
             0 if is_escape else cell_width(chunk) for is_escape, chunk in _tokenize("".join(rest))

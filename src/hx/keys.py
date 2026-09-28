@@ -71,7 +71,10 @@ def _defaults() -> dict[str, KeyBinding]:
         ),
         KeyBinding("app.clear", ("ctrl+c",), "Clear the prompt (twice to exit)"),
         KeyBinding("app.exit", ("ctrl+d",), "Exit when the prompt is empty"),
-        KeyBinding("app.suspend", ("ctrl+z",), "Suspend to the background"),
+        # Unbound: ctrl+z is undo, as in every windowed editor. Raw mode means
+        # the terminal will not suspend for us, so a user who wants job
+        # control back binds this in keybindings.json.
+        KeyBinding("app.suspend", (), "Suspend to the background"),
         # Session and mode.
         KeyBinding("app.mode.cycle", ("shift+tab",), "Cycle permission mode"),
         KeyBinding("app.commands", ("ctrl+p",), "Open the command palette"),
@@ -102,21 +105,31 @@ def _defaults() -> dict[str, KeyBinding]:
         KeyBinding("tui.editor.deleteWordForward", ("alt+d",), "Delete the word ahead"),
         KeyBinding("tui.editor.yank", ("ctrl+y",), "Yank the last kill"),
         KeyBinding("tui.editor.yankPop", ("alt+y",), "Cycle back through kills"),
-        # ctrl+z is the app's suspend, as it is in every other terminal
-        # program, so undo takes readline's own key rather than the one a
-        # windowed editor would use. The editor had the operation and no
-        # binding at all, which made ctrl+z-undoes a documented fiction.
-        KeyBinding("tui.editor.undo", ("ctrl+underscore",), "Undo"),
-        KeyBinding("tui.editor.redo", ("ctrl+shift+z",), "Redo"),
+        # The windowed editor's keys, plus readline's own undo. cmd reaches
+        # HX as super, and only from a terminal that passes it through rather
+        # than keeping it for its own Edit menu - kitty and WezTerm do. A
+        # legacy terminal sends ctrl+shift+z as ctrl+z, so there it undoes.
+        KeyBinding("tui.editor.undo", ("ctrl+z", "super+z", "ctrl+underscore"), "Undo"),
+        KeyBinding("tui.editor.redo", ("ctrl+shift+z", "super+shift+z"), "Redo"),
     ]
     return {binding.id: binding for binding in bindings}
 
 
+_ALIASES = {"cmd": "super", "command": "super", "option": "alt"}
+"""Modifiers as a Mac user writes them - and as ``/help`` shows them there -
+spelled the way the decoder names them."""
+
+
+def _canonical(key: str) -> str:
+    """``cmd+z`` -> ``super+z``, so a keybindings file can say what it means."""
+    return "+".join(_ALIASES.get(part, part) for part in key.split("+"))
+
+
 def _normalize(value: object) -> tuple[str, ...] | None:
     if isinstance(value, str):
-        return (value,)
+        return (_canonical(value),)
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return tuple(value)
+        return tuple(_canonical(item) for item in value)
     return None
 
 
@@ -173,6 +186,8 @@ def display_key(key: str) -> str:
         part = _DISPLAY.get(part, part)
         if part == "alt" and sys.platform == "darwin":
             part = "option"
+        elif part == "super" and sys.platform == "darwin":
+            part = "cmd"
         parts.append(part)
     return "+".join(parts)
 

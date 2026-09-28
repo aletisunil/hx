@@ -69,6 +69,10 @@ _KITTY: dict[str, str] = {
     # character (flag 4, alternate keys), and ctrl+shift.
     "ctrl+_": "\x1b[45:95;6u",
     "ctrl+shift+z": "\x1b[122:90;6u",
+    # cmd is the protocol's super. Only a terminal that leaves cmd to the
+    # program sends these (kitty, WezTerm); the rest keep it for their menus.
+    "cmd+shift+z": "\x1b[122:90;10u",
+    **{f"cmd+{c}": f"\x1b[{ord(c)};9u" for c in "abcdefghijklmnopqrstuvwxyz"},
     **{f"alt+{c}": f"\x1b[{ord(c)};3u" for c in "bfdy"},
     **{f"ctrl+{c}": f"\x1b[{ord(c)};5u" for c in "abcdefghijklnopqrstuvwxyz"},
 }

@@ -758,7 +758,7 @@ class HXSession:
         self.runner.request_immediate_render()
 
     def _suspend(self) -> None:
-        """``ctrl+z``. Raw mode means the terminal will not do this for us."""
+        """``app.suspend``. Raw mode means the terminal will not do this for us."""
         self.runner.suspend()
 
     def _terminal_rows(self) -> int:

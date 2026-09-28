@@ -22,6 +22,7 @@ import pytest
 from tests.e2e.conftest import HX
 from tests.e2e.report import Step
 from tests.e2e.stub import Stub, say
+from tests.e2e.terminal import KEYBOARDS, Terminal
 
 TABLE_ROWS = 40
 TABLE = "\n".join(
@@ -151,9 +152,12 @@ def test_legacy_terminal_newline_fallbacks(hx: HX, stub: Stub) -> None:
 
 def test_shift_enter_survives_fullscreen_and_suspend(hx: HX, stub: Stub) -> None:
     """The alternate screen keeps its own kitty stack, so /fullscreen pushes the
-    flags there too; ctrl+z pops everything and resuming pushes it back. Shift+enter
-    works on both screens and after a suspend, and nothing is left on either stack."""
+    flags there too; suspending pops everything and resuming pushes it back.
+    Shift+enter works on both screens and after a suspend, and nothing is left on
+    either stack. Suspend has no key by default - ctrl+z is undo - so it is bound
+    the way a user would, in keybindings.json, spelled with cmd."""
     stub.script(say("Three lines received."))
+    (hx.hx_home / "keybindings.json").write_text('{"app.suspend": "cmd+s"}')
     term = hx.tui(keyboard="kitty")
     term.submit("/fullscreen on")
     term.wait_for(lambda _: term.alt_screen)
@@ -174,9 +178,9 @@ def test_shift_enter_survives_fullscreen_and_suspend(hx: HX, stub: Stub) -> None
     assert term.kitty_stacks == {"main": [5], "alt": []}
 
     popped_before = term.keyboard_log.count("ESC[<u")
-    term.press("ctrl+z")
+    term.press("cmd+s")
     # Under a pty with no job-control shell the stop is a no-op, so HX comes
-    # straight back - through the same pop, stop and push a real ctrl+z takes.
+    # straight back - through the same pop, stop and push a real suspend takes.
     term.wait_for(lambda _: term.keyboard_log.count("ESC[<u") > popped_before)
     term.settle()
     assert term.keyboard_log[-2:] == ["ESC[<u", "ESC[>5u"], "popped, then pushed on resume"
@@ -198,24 +202,119 @@ def test_shift_enter_survives_fullscreen_and_suspend(hx: HX, stub: Stub) -> None
     assert term.kitty_stacks == {"main": [], "alt": []}
 
 
-def test_kitty_only_keys(hx: HX, stub: Stub) -> None:
-    """Keys the legacy encoding cannot express work once the protocol is on:
-    ctrl+shift+z redoes (legacy sends it as ctrl+z, suspend), and ctrl+_ still
-    undoes though kitty reports it as ctrl+shift+minus."""
-    stub.script(say("Redo worked."))
-    term = hx.tui(keyboard="kitty")
+@pytest.mark.parametrize("keyboard", KEYBOARDS)
+def test_undo_and_redo_keys(hx: HX, stub: Stub, keyboard: str) -> None:
+    """ctrl+z undoes in every terminal and no longer suspends HX; ctrl+_ still
+    undoes too. ctrl+shift+z redoes where the terminal can tell it from ctrl+z,
+    and cmd+z / cmd+shift+z work in a kitty-protocol terminal, which passes cmd
+    through as super. A legacy terminal sends ctrl+shift+z as ctrl+z itself."""
+    stub.script(say("Undo worked."))
+    term = hx.tui(keyboard=keyboard)
+    # The key list says so, and has no row for suspend, which has no key.
+    term.press("ctrl+o")
+    term.wait_for("Undo")
+    listed = {line.split()[-1]: line.split()[0] for line in term.lines() if line.strip()}
+    assert listed["Undo"].startswith("ctrl+z/") and listed["Redo"].startswith("ctrl+shift+z/")
+    assert "Suspend" not in term.text()
+    pops = term.keyboard_log.count("ESC[<u")
     term.type("keep this")
     term.press("ctrl+w")
     term.wait_gone("keep this")
-    term.press("ctrl+_")
+    term.press("ctrl+z")
     term.wait_for(" keep this")
-    term.press("ctrl+shift+z")
-    term.wait_gone("keep this")
-    term.press("ctrl+_")
-    term.wait_for(" keep this")
+    assert term.alive and term.keyboard_log.count("ESC[<u") == pops, "undid, not suspended"
+
+    if keyboard != "legacy":
+        term.press("ctrl+shift+z")
+        term.wait_gone("keep this")
+        term.press("ctrl+_")
+        term.wait_for(" keep this")
+    if keyboard == "kitty":
+        term.press("cmd+shift+z")
+        term.wait_gone("keep this")
+        term.press("cmd+z")
+        term.wait_for(" keep this")
+    term.snapshot(f"undone in a {keyboard} terminal")
+
     term.press("enter")
-    term.wait_for("Redo worked.")
+    term.wait_for("Undo worked.")
     assert stub.requests[0].last_user_text().endswith("keep this")
+
+
+# -- soft wrap -----------------------------------------------------------------
+
+
+def _draft(term: Terminal) -> list[str]:
+    """The draft's rows: what lies between the prompt's two rules."""
+    lines = term.lines()
+    rules = [i for i, line in enumerate(lines) if line.startswith("────")]
+    top, bottom = rules[-2], rules[-1]
+    return [line[1:] for line in lines[top + 1 : bottom]]
+
+
+def test_draft_wraps_at_spaces(hx: HX, stub: Stub) -> None:
+    """A long draft wraps between words, not through them. A word that exactly
+    fills a row leaves its space hanging past the edge, with the cursor still
+    drawn on it; a word longer than a row still breaks; and editing mid-draft
+    reflows around the cursor and sends exactly what was typed."""
+    stub.script(say("Wrapped."))
+    term = hx.tui(columns=40)  # 38 cells of draft between the paddings
+    # The welcome above it wraps the same way rather than being cut off.
+    assert [line.strip() for line in term.lines()[1:3]] == [
+        "An agent harness. Ask a question, or",
+        "start with /help.",
+    ]
+    sentence = "Postgres is a relational store with strong consistency and mature tooling"
+    term.type(sentence)
+    term.wait_for("tooling")
+    term.snapshot("a sentence wrapped between words")
+    rows = _draft(term)
+    assert rows == [
+        "Postgres is a relational store with",
+        "strong consistency and mature tooling",
+    ]
+
+    # Clearing and typing a 38-letter word, then more: the space the break
+    # falls on hangs past the edge rather than starting the next row.
+    term.press("ctrl+c")
+    term.wait_gone("tooling")
+    full = "x" * 38
+    term.type(f"{full} next")
+    term.wait_for(" next")
+    assert _draft(term) == [full, "next"]
+    term.press("left", "left", "left", "left")
+    term.settle()
+    assert term.cursor() == (1, rows_at(term, "next")), "before 'next', start of its row"
+    term.press("left")
+    term.settle()
+    assert term.cursor() == (39, rows_at(term, full)), "on the hanging space, past the edge"
+    term.snapshot("the cursor on a hanging space")
+
+    # Typing there joins the word with no space left to break at: it breaks hard.
+    term.type("!")
+    term.wait_for("! next")
+    assert _draft(term) == [full, "! next"]
+
+    # A URL longer than a row breaks inside it, the only place it can.
+    term.press("ctrl+c")
+    term.wait_gone("next")
+    url = "see https://example.com/" + "a" * 40
+    term.type(url)
+    term.wait_for("aaaa")
+    assert _draft(term) == ["see", "https://example.com/" + "a" * 18, "a" * 22]
+
+    term.press("ctrl+a", "right", "right", "right")
+    term.type(" also")
+    term.wait_for("see also")
+    assert _draft(term)[0] == "see also"
+    term.press("enter")
+    term.wait_for("Wrapped.")
+    assert stub.requests[0].last_user_text().endswith("see also https://example.com/" + "a" * 40)
+
+
+def rows_at(term: Terminal, text: str) -> int:
+    """The screen row the draft line ``text`` is drawn on."""
+    return next(y for y, line in enumerate(term.lines()) if line[1:] == text)
 
 
 # -- pasting -------------------------------------------------------------------
@@ -279,6 +378,76 @@ def test_large_paste_collapses_and_is_sent_whole(hx: HX, stub: Stub) -> None:
     term.press("enter")
     term.wait_for("Same again.")
     assert stub.requests[1].last_user_text().endswith(sent)
+
+
+WIDE_TABLE = "\n".join(
+    [
+        "| Option | What it does | Trade-offs | Pick it |",
+        "|---|---|---|---|",
+        *(
+            f"| store-{n} | Relational store number {n} with strong consistency and mature"
+            f" tooling for migrations | Needs a running server; see"
+            f" [notes](https://example.com/store-{n}) before scaling | **Yes** for app {n} |"
+            for n in range(1, 11)
+        ),
+    ]
+)
+"""A 12-line table whose cells are far wider than any terminal column."""
+
+
+def test_wide_pasted_table_wraps_rather_than_losing_text(hx: HX, stub: Stub) -> None:
+    """A table too wide for the terminal keeps every word, in the echo of the
+    user's own paste and in the model's reply: cells wrap inside their columns,
+    a rule marks where each row starts, and a link or bold word stays in its
+    own cell. Truncating the cells instead echoed back a table missing the
+    text that was sent."""
+    reply = "\n".join(WIDE_TABLE.split("\n")[:4])
+    stub.script(say(f"Summary:\n\n{reply}"))
+    term = hx.tui(columns=90, rows=40)
+    term.type("compare these:")
+    term.press("shift+enter")
+    term.paste(WIDE_TABLE)
+    term.wait_for("[Pasted text #1 +12 lines]")
+    term.press("enter")
+    term.wait_for("Summary:")
+    term.settle()
+    term.snapshot("a wide table wrapped in its columns")
+    assert stub.requests[0].last_user_text().endswith(f"compare these:\n{WIDE_TABLE}")
+
+    lines = term.scrollback().split("\n")
+    assert all(len(line) <= term.columns for line in lines)
+    tables = _tables(lines)
+    assert len(tables) == 2, "the pasted table and the reply's, each drawn as a table"
+    pasted, replied = tables
+    # Every word of every cell is on screen, however the cells wrapped.
+    words = " ".join(" ".join(line.split("│")) for line in pasted + replied).split()
+    for n in range(1, 11):
+        for word in (f"store-{n}", "mature", "migrations", "scaling", "notes", f"{n}"):
+            assert word in words, f"{word!r} missing from the drawn tables"
+    assert words.count("migrations") == 10 + 2, "ten pasted rows and two in the reply"
+    # The header rule, then one between each pair of wrapped rows.
+    assert sum(line.lstrip().startswith("├") for line in pasted) == 10
+    assert sum(line.lstrip().startswith("├") for line in replied) == 2
+    for table in tables:
+        assert len({_bars(line) for line in table}) == 1, "columns misaligned"
+
+
+def _tables(lines: list[str]) -> list[list[str]]:
+    """Each run of consecutive grid lines on screen - one run per table."""
+    tables: list[list[str]] = []
+    run: list[str] = []
+    for line in [*lines, ""]:
+        if line.lstrip().startswith(("│", "├")):
+            run.append(line)
+        elif run:
+            tables.append(run)
+            run = []
+    return tables
+
+
+def _bars(line: str) -> tuple[int, ...]:
+    """Where the column rules fall on a grid line."""
+    return tuple(i for i, char in enumerate(line) if char in "│├┼┤")
 
 
 def test_paste_token_behaves_as_one_character(hx: HX, stub: Stub) -> None:

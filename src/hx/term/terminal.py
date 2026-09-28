@@ -87,7 +87,7 @@ it to an application that asks - which is how shift+enter survives tmux."""
 
 _RESIZE_SIGNALS = (signal.SIGWINCH, signal.SIGCONT)
 """SIGWINCH is not delivered while the process is stopped, so a resize during
-``ctrl+z`` is only discoverable on the way back - which is what SIGCONT is
+a suspend is only discoverable on the way back - which is what SIGCONT is
 doing in a list of resize signals."""
 
 

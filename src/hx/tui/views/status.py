@@ -310,12 +310,24 @@ class Header(Widget):
         lines = [title]
 
         if not self._expanded:
-            lines.append(fg("muted", "An agent harness. Ask a question, or start with /help."))
-            lines.append(fg("dim", f"{KEYMAP.primary('app.tools.expand')} shows every key."))
+            from hx.term.ansi import wrap
+
+            # Prose, so wrapped between words on a narrow terminal rather than
+            # cut off mid-word the way the key table's columns are.
+            inner = max(1, width - 2)
+            lines += wrap(
+                fg("muted", "An agent harness. Ask a question, or start with /help."), inner
+            )
+            lines += wrap(
+                fg("dim", f"{KEYMAP.primary('app.tools.expand')} shows every key."), inner
+            )
         else:
             rows = [
                 (fg("dim", KEYMAP.text(binding.id)), fg("muted", binding.description))
                 for binding in KEYMAP.bindings.values()
+                # An action with no key, like suspend by default, has nothing
+                # to show here but a blank where its key would be.
+                if KEYMAP.keys_for(binding.id)
             ]
             from hx.tui.format import columns
 
