@@ -713,6 +713,7 @@ files load here unchanged. `src/hx/tui/themes/dark.json` is the reference.
 | `~/.hx/keybindings.json` | your key overrides |
 | `~/.hx/system-prompt.md` | your system prompt, replacing the built-in one |
 | `~/.hx/system-prompt-append.md` | text appended to whichever prompt is in force |
+| `~/.hx/AGENTS.md` | your instructions, loaded into every session in every project; created empty |
 | `~/.hx/sessions/` | transcripts, spilled tool output, subagent sessions |
 | `~/.hx/sessions/<id>/trace.html` | where `/trace` writes, unless you name a path |
 | `~/.hx/skills/`, `~/.hx/agents/` | your skills and agents |
@@ -726,6 +727,12 @@ files load here unchanged. `src/hx/tui/themes/dark.json` is the reference.
 `AGENTS.md` is the place for things a newcomer would get wrong: how to run the
 tests, conventions, what not to touch. `/init` writes a first draft. It is
 loaded once per session and frozen, so it costs one prefix, not one per turn.
+
+`~/.hx/AGENTS.md` is the same thing for you rather than the project: how you
+like commits written, tools you always want used, in every repository. It is
+loaded first and the project's `AGENTS.md` after it, so where the two disagree
+the project has the last word. The first session creates it empty, ready to
+fill in; empty, it adds nothing. `hx prompt` and `/prompt` list each one in force.
 
 ---
 

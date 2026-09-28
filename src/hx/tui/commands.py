@@ -507,7 +507,7 @@ async def cmd_title(ctx: CommandContext, args: str) -> None:
 
 async def cmd_prompt(ctx: CommandContext, args: str) -> None:
     """``/prompt`` - the system prompt this session is actually running with."""
-    from hx.core.context import resolve_system_prompt
+    from hx.core.context import load_instructions, resolve_system_prompt
 
     in_use = ctx.app.loop.context.system_prompt
     lines = [in_use.rstrip()]
@@ -516,10 +516,15 @@ async def cmd_prompt(ctx: CommandContext, args: str) -> None:
     lines.append(f"\nSource: {resolved.source}")
     for append in resolved.appends:
         lines.append(f"Appended: {append}")
+    in_force = ctx.app.loop.instructions
+    for loaded in in_force:
+        lines.append(f"Instructions: {loaded.path}")
+    # The prompt and AGENTS.md are read once at startup to keep the cache prefix
+    # stable, so an edit since then is real but not yet in force.
     if resolved.text.strip() != in_use.strip():
-        # The prompt is read once at startup to keep the cache prefix stable, so
-        # an override edited since then is real but not yet in force.
         lines.append("An override has changed on disk since startup; it applies next run.")
+    if load_instructions(ctx.settings.cwd) != in_force:
+        lines.append("An AGENTS.md has changed on disk since startup; it applies next run.")
     ctx.app.notice("\n".join(lines))
 
 
@@ -741,8 +746,7 @@ async def cmd_permissions(ctx: CommandContext, args: str) -> None:
         lines.append("")
         lines.append('No rules configured. Add them under "permissions" in .hx/settings.json.')
 
-    from hx.paths import project_local_settings_file
-    from hx.tui.format import tilde
+    from hx.paths import project_local_settings_file, tilde
 
     # Where, and why there: a grant is machine-local, so it is kept per project
     # under the user's home instead of being dropped into the checkout.

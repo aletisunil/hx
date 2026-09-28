@@ -10,7 +10,7 @@ Layout, in order::
     [1] system prompt          static for the session
     [2] tool schemas           deterministic sort: builtins, then mcp__* alphabetical
     [3] skills index           name + description only (progressive disclosure)
-    [4] project context        AGENTS.md, cwd, git branch, top-level listing
+    [4] project context        cwd, git branch, top-level listing, ~/.hx/AGENTS.md, AGENTS.md
     --- breakpoint A (static) ---
     [5] conversation history
     --- breakpoint B (rolling, before the last few turns) ---
@@ -238,11 +238,46 @@ def _message_text(message: Message) -> str:
     return "\n".join(parts)
 
 
-def build_project_context(cwd: Path) -> str:
-    """Static per-session project preamble: AGENTS.md contents, cwd, git branch, listing.
+@dataclass(slots=True)
+class Instructions:
+    """One AGENTS.md in force: what it is, where it lives, what it says."""
+
+    heading: str
+    path: Path
+    text: str
+
+
+def load_instructions(cwd: Path) -> list[Instructions]:
+    """Every AGENTS.md in force, least specific first.
+
+    ``~/.hx/AGENTS.md`` follows the user into every project; the project's own
+    ``AGENTS.md`` comes after it, so where the two disagree the more specific
+    one has the last word. A blank or unreadable file is skipped, and running
+    from inside ``$HX_HOME`` - where both paths name the same file - loads it once.
+    """
+    from hx.paths import project_instructions_file, tilde, user_instructions_file
+
+    user = user_instructions_file()
+    found: list[Instructions] = []
+    seen: set[Path] = set()
+    for heading, path in (
+        (f"User instructions ({tilde(user)})", user),
+        ("Project instructions (AGENTS.md)", project_instructions_file(cwd)),
+    ):
+        body = _read_prompt_file(path)
+        if not body or path.resolve() in seen:
+            continue
+        seen.add(path.resolve())
+        found.append(Instructions(heading, path, body))
+    return found
+
+
+def build_project_context(cwd: Path, instructions: list[Instructions] | None = None) -> str:
+    """Static per-session project preamble: cwd, git branch, listing, AGENTS.md contents.
 
     Computed once at startup and then frozen - refreshing it mid-session would
-    invalidate the prefix.
+    invalidate the prefix. Pass ``instructions`` to fold in the AGENTS.md files
+    already loaded, so the caller can remember exactly which ones are in force.
     """
     lines = [f"Working directory: {cwd}"]
 
@@ -256,9 +291,8 @@ def build_project_context(cwd: Path) -> str:
     if entries:
         lines.append("Top level: " + ", ".join(entries[:60]))
 
-    agents_md = cwd / "AGENTS.md"
-    if agents_md.is_file():
-        lines.append(f"\n# Project instructions (AGENTS.md)\n\n{agents_md.read_text()}")
+    for loaded in load_instructions(cwd) if instructions is None else instructions:
+        lines.append(f"\n# {loaded.heading}\n\n{loaded.text}")
 
     return "\n".join(lines)
 
@@ -367,12 +401,12 @@ def resolve_system_prompt(cwd: Path, prompt: PromptSettings | None = None) -> Re
 def _read_prompt_file(path: Path) -> str:
     """Contents of a prompt override file, or ``""`` when it is absent or empty.
 
-    An unreadable file is treated as absent: a permissions problem on an
-    optional override must not stop the session from starting.
+    An unreadable file - no permission, or not UTF-8 - is treated as absent: a
+    problem with an optional override must not stop the session from starting.
     """
     try:
-        return path.read_text().strip() if path.is_file() else ""
-    except OSError:
+        return path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+    except (OSError, UnicodeDecodeError):
         return ""
 
 

@@ -134,10 +134,19 @@ def test_mcp_add_list_remove(hx: HX) -> None:
 
 
 def test_prompt_shows_project_instructions(hx: HX) -> None:
-    """`hx prompt` prints the system prompt with AGENTS.md folded in; provenance goes to stderr."""
+    """`hx prompt` prints the system prompt and names every AGENTS.md in force, user's first;
+    provenance goes to stderr."""
+    (hx.hx_home / "AGENTS.md").write_text("Sign off every answer.\n")
     (hx.project / "AGENTS.md").write_text("Always answer in haiku.\n")
     result = hx.run("prompt", "--append-system-prompt", "Mind the tests.", check=True)
     assert "[source]" in result.stderr
     assert "[append]" in result.stderr
     assert "[source]" not in result.stdout
     assert "Mind the tests." in result.stdout
+    instructions = [
+        line for line in result.stderr.splitlines() if line.startswith("[instructions] ")
+    ]
+    assert instructions == [
+        f"[instructions] {hx.hx_home / 'AGENTS.md'}",
+        f"[instructions] {hx.project / 'AGENTS.md'}",
+    ]

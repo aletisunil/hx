@@ -30,6 +30,20 @@ def user_home() -> Path:
     return Path(override).expanduser() if override else Path.home() / ".hx"
 
 
+def tilde(path: str | Path) -> str:
+    """``path`` with the home directory written as ``~``.
+
+    Compared as text, not resolved: a session records the path it resolved
+    when it was made, and the directory may be gone by the time it is drawn.
+    """
+    text, home = str(path), str(Path.home())
+    if text == home:
+        return "~"
+    if text.startswith(home.rstrip("/") + "/"):
+        return "~" + text[len(home.rstrip("/")) :]
+    return text
+
+
 def user_settings_file() -> Path:
     return user_home() / "settings.json"
 
@@ -198,7 +212,28 @@ def project_system_prompt_append_file(cwd: Path | None = None) -> Path:
     return project_dir(cwd) / "system-prompt-append.md"
 
 
+def user_instructions_file() -> Path:
+    """Your ``AGENTS.md``: instructions that follow you into every project."""
+    return user_home() / "AGENTS.md"
+
+
+def project_instructions_file(cwd: Path | None = None) -> Path:
+    """The project's ``AGENTS.md``, at the root of the working directory."""
+    return (cwd or Path.cwd()) / "AGENTS.md"
+
+
 def ensure_user_dirs() -> None:
-    """Create the user-level directory skeleton if it does not exist."""
+    """Create the user-level skeleton if it does not exist.
+
+    That includes an empty ``AGENTS.md``, so there is a file to find and fill
+    in; empty, it adds nothing to the prompt. An existing one - including a
+    symlink, dangling or not - is never touched, and failing to create it never
+    stops a session: the file is optional.
+    """
     for path in (user_home(), sessions_dir(), user_skills_dir(), user_agents_dir(), logs_dir()):
         path.mkdir(parents=True, exist_ok=True)
+    try:
+        with user_instructions_file().open("x"):
+            pass
+    except OSError:
+        pass

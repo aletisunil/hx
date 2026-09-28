@@ -26,10 +26,10 @@ from hx.core.messages import (
 )
 from hx.core.usage import format_tokens
 from hx.git import BranchWatcher
+from hx.paths import tilde
 from hx.term.loop import TuiRunner
 from hx.term.modifiers import ShiftEnter
 from hx.term.terminal import Terminal
-from hx.tui.format import tilde
 from hx.tui.renderers import ToolCall
 from hx.tui.views.blocks import (
     AssistantMessage,

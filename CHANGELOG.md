@@ -26,6 +26,19 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `~/.hx/AGENTS.md` holds your own instructions and is loaded into every
+  session in every project, ahead of the project's `AGENTS.md`. The first
+  session creates it empty, ready to fill in. `hx prompt` and `/prompt` now
+  name each `AGENTS.md` in force, and `/prompt` says when one has changed on
+  disk since the session started.
+
+### Fixed
+
+- An `AGENTS.md` or system-prompt override that is not valid UTF-8 is skipped
+  like an unreadable one, instead of stopping HX from starting.
+
 ---
 
 ## [0.2.8] - 2026-09-27

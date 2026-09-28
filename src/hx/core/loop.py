@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from hx.core.context import AssembledContext
+from hx.core.context import AssembledContext, Instructions
 from hx.core.events import (
     CompactionFinished,
     CompactionStarted,
@@ -103,6 +103,7 @@ class AgentLoop:
         active_skills: ActiveSkills | None = None,
         skills_index: str | None = None,
         project_context: str | None = None,
+        instructions: list[Instructions] | None = None,
         hooks: HookEngine | None = None,
     ) -> None:
         self.provider = provider
@@ -118,6 +119,8 @@ class AgentLoop:
         self.active_skills = active_skills
         self.skills_index = skills_index
         self.project_context = project_context
+        self.instructions = instructions or []
+        """The AGENTS.md files folded into ``project_context``, least specific first."""
         self.hooks = hooks
         self._cancelled = False
         self._turn_index = 0

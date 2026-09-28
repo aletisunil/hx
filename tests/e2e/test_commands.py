@@ -107,6 +107,34 @@ def test_mode_command(hx: HX) -> None:
     assert f"plan · {SANDBOX_STATUS}" in term.lines()[-2]
 
 
+def test_prompt_command_names_the_agents_md_files(hx: HX) -> None:
+    """/prompt shows the running system prompt, then every AGENTS.md in force, user's first."""
+    (hx.hx_home / "AGENTS.md").write_text("Sign off every answer.\n")
+    (hx.project / "AGENTS.md").write_text("Always answer in haiku.\n")
+    term = hx.tui(columns=250, rows=60)
+    term.submit("/prompt")
+    screen = term.wait_for("Instructions: " + str(hx.project / "AGENTS.md"))
+    term.snapshot("/prompt")
+    user = screen.index("Instructions: " + str(hx.hx_home / "AGENTS.md"))
+    assert screen.index("Source: built-in") < user < screen.index(str(hx.project / "AGENTS.md"))
+
+
+def test_prompt_command_names_the_agents_md_in_force_not_on_disk(hx: HX) -> None:
+    """/prompt lists the AGENTS.md files the session started with; one written, edited or
+    emptied since is flagged as applying next run rather than claimed to be in force."""
+    (hx.project / "AGENTS.md").write_text("Always answer in haiku.\n")
+    term = hx.tui(columns=250, rows=60)
+    user_md = hx.hx_home / "AGENTS.md"
+    user_md.write_text("Sign off every answer.\n")
+    (hx.project / "AGENTS.md").write_text("")
+    term.submit("/prompt")
+    screen = term.wait_for("applies next run")
+    term.snapshot("/prompt after AGENTS.md changed on disk")
+    assert "Instructions: " + str(hx.project / "AGENTS.md") in screen
+    assert "Instructions: " + str(user_md) not in screen
+    assert "An AGENTS.md has changed on disk since startup; it applies next run." in screen
+
+
 def test_title_command(hx: HX, stub: Stub) -> None:
     """/title shows the model's name for the session, and /title <text> renames it."""
     stub.title = "Greeting exchange"

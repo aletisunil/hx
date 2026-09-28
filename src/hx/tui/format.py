@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from pathlib import Path
 
 from hx.term.sanitize import plain_text
 from hx.term.width import cell_width, truncate_to_width
@@ -76,17 +75,3 @@ def one_line(text: str, width: int) -> str:
     if cell_width(flat) <= width:
         return flat
     return truncate_to_width(flat, max(0, width - cell_width(ELLIPSIS))) + ELLIPSIS
-
-
-def tilde(path: str | Path) -> str:
-    """``path`` with the home directory written as ``~``.
-
-    Compared as text, not resolved: a session records the path it resolved
-    when it was made, and the directory may be gone by the time it is drawn.
-    """
-    text, home = str(path), str(Path.home())
-    if text == home:
-        return "~"
-    if text.startswith(home.rstrip("/") + "/"):
-        return "~" + text[len(home.rstrip("/")) :]
-    return text

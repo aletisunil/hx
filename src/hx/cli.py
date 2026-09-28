@@ -346,7 +346,12 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     from hx.config import load_settings
     from hx.core.checkpoints import CheckpointStore
     from hx.core.compaction import Compactor
-    from hx.core.context import ContextBuilder, build_project_context, load_system_prompt
+    from hx.core.context import (
+        ContextBuilder,
+        build_project_context,
+        load_instructions,
+        load_system_prompt,
+    )
     from hx.core.events import EventBus
     from hx.core.lateinject import Injection, InjectionRegistry
     from hx.core.loop import AgentLoop
@@ -430,6 +435,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         settings.cwd,
         keep_recent_turns=settings.context.keep_recent_turns,
     )
+    instructions = load_instructions(settings.cwd)
 
     checkpoints = CheckpointStore(session, session_checkpoints_dir(session.meta.session_id))
     tools = build_default_registry(shell, jobs, tracker, todos, bus_holder, auth, checkpoints)
@@ -478,7 +484,8 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         settings=settings,
         model_info=model_info,
         skills_index=build_index(list(skills.values())) or None,
-        project_context=build_project_context(settings.cwd),
+        project_context=build_project_context(settings.cwd, instructions),
+        instructions=instructions,
         hooks=hooks,
     )
 
@@ -842,15 +849,17 @@ def run_print_command(parsed: ParsedArgs) -> int:
 def run_prompt_command(parsed: ParsedArgs) -> int:
     """``hx prompt`` - print the system prompt this directory resolves to.
 
-    The prompt goes to stdout so it can be piped or diffed; where it came from
-    goes to stderr so it never contaminates that output.
+    The prompt goes to stdout so it can be piped or diffed; where it came from,
+    and which AGENTS.md files ride alongside it, goes to stderr so it never
+    contaminates that output.
     """
     from hx.config import load_settings
-    from hx.core.context import resolve_system_prompt
+    from hx.core.context import load_instructions, resolve_system_prompt
 
     try:
         settings = load_settings(parsed.cwd, parsed.overrides)
         resolved = resolve_system_prompt(settings.cwd, settings.prompt)
+        instructions = load_instructions(settings.cwd)
     except Exception as exc:
         return _report(exc)
 
@@ -858,6 +867,8 @@ def run_prompt_command(parsed: ParsedArgs) -> int:
     print(f"[source] {resolved.source}", file=sys.stderr)
     for append in resolved.appends:
         print(f"[append] {append}", file=sys.stderr)
+    for loaded in instructions:
+        print(f"[instructions] {loaded.path}", file=sys.stderr)
     return 0
 
 

@@ -16,9 +16,10 @@ import time
 from typing import Any, ClassVar
 
 from hx.core.usage import format_tokens
+from hx.paths import tilde
 from hx.term.component import Widget
 from hx.term.primitives import Lines, Rule, Spacer, Text
-from hx.tui.format import columns, one_line, tilde
+from hx.tui.format import columns, one_line
 from hx.tui.fuzzy import filter_items
 from hx.tui.glyphs import CURRENT, CURSOR, GUTTER
 from hx.tui.limits import LIST_MINIMUM, LIST_VISIBLE, RECORD_WIDTH

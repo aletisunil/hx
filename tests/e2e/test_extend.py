@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -24,6 +25,84 @@ def test_agents_md_reaches_the_model(hx: HX, stub: Stub) -> None:
     stub.script(say("Noted."))
     hx.run("-p", "how do I test?", check=True)
     assert "Run tests with `make check`" in json.dumps(stub.requests[0].messages)
+
+
+def test_user_agents_md_reaches_the_model_before_the_projects(hx: HX, stub: Stub) -> None:
+    """~/.hx/AGENTS.md rides in every request, ahead of the project's AGENTS.md, byte-stable
+    across turns."""
+    write(hx.hx_home / "AGENTS.md", "USER-RULE: write commit subjects in the imperative.\n")
+    write(hx.project / "AGENTS.md", "PROJECT-RULE: run tests with `make check`.\n")
+    write(hx.project / "notes.txt", "hello\n")
+    stub.script(call("Read", file_path=str(hx.project / "notes.txt")), say("Read it."))
+    hx.run("-p", "read notes.txt", check=True)
+
+    first, second = stub.requests[0].system, stub.requests[1].system
+    assert first == second
+    user = first.index("USER-RULE: write commit subjects")
+    project = first.index("PROJECT-RULE: run tests")
+    assert user < project
+    assert first.index("# User instructions") < user < first.index("# Project instructions")
+
+
+def test_user_agents_md_is_created_empty_and_never_clobbered(hx: HX, stub: Stub) -> None:
+    """The first session leaves an empty ~/.hx/AGENTS.md to fill in, adding nothing to the
+    prompt; later sessions load what the user wrote and never rewrite it, even through a
+    symlink into a dotfiles repo."""
+    user_md = hx.hx_home / "AGENTS.md"
+    assert not user_md.exists()
+    stub.script(say("Fine."))
+    hx.run("-p", "hi", check=True)
+    assert user_md.is_file() and user_md.read_text() == ""
+    assert "# User instructions" not in stub.requests[0].system
+
+    user_md.write_text("USER-RULE: sign off every answer.\n")
+    stub.script(say("Fine."))
+    hx.run("-p", "hi", check=True)
+    assert user_md.read_text() == "USER-RULE: sign off every answer.\n"
+    assert "USER-RULE: sign off every answer." in stub.requests[1].system
+
+    dotfiles = write(hx.home / "dotfiles" / "AGENTS.md", "DOTFILES-RULE: tabs, not spaces.\n")
+    user_md.unlink()
+    user_md.symlink_to(dotfiles)
+    stub.script(say("Fine."))
+    hx.run("-p", "hi", check=True)
+    assert user_md.is_symlink()
+    assert dotfiles.read_text() == "DOTFILES-RULE: tabs, not spaces.\n"
+    assert "DOTFILES-RULE: tabs, not spaces." in stub.requests[2].system
+
+
+def test_blank_unreadable_and_shared_agents_md_are_harmless(hx: HX, stub: Stub) -> None:
+    """A blank AGENTS.md adds no empty heading, one that is not UTF-8 or not readable does not
+    stop the session, and running from inside $HX_HOME does not load the same file twice."""
+    write(hx.project / "AGENTS.md", "  \n\n")
+    user_md = hx.hx_home / "AGENTS.md"
+    # Saved from a Latin-1 editor: "café" is not valid UTF-8.
+    user_md.write_bytes(b"NEVER-SEEN caf\xe9\n")
+    stub.script(say("Fine."))
+    hx.run("-p", "hi", check=True)
+    system = stub.requests[-1].system
+    assert "# User instructions" not in system
+    assert "# Project instructions" not in system
+    assert "NEVER-SEEN" not in system
+
+    # Root reads through any mode bits, so there is nothing to test there.
+    if os.geteuid() != 0:
+        user_md.write_text("NEVER-SEEN\n")
+        user_md.chmod(0o000)
+        try:
+            stub.script(say("Fine."))
+            hx.run("-p", "hi", check=True)
+            assert "NEVER-SEEN" not in stub.requests[-1].system
+        finally:
+            user_md.chmod(0o644)
+
+    user_md.write_text("SHARED-RULE: once only.\n")
+    stub.script(say("Fine."))
+    hx.run("-p", "hi", cwd=hx.hx_home, check=True)
+    system = stub.requests[-1].system
+    assert system.count("SHARED-RULE: once only.") == 1
+    assert "# User instructions" in system
+    assert "# Project instructions" not in system
 
 
 def test_skill_is_indexed_then_loaded(hx: HX, stub: Stub) -> None:
