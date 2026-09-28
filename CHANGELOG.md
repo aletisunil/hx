@@ -26,11 +26,16 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.8] - 2026-09-27
+
 ### Changed
 
 - `ctrl+z` undoes in the prompt and `ctrl+shift+z` redoes; `cmd+z` and
   `cmd+shift+z` do the same in terminals that pass cmd through (kitty,
-  WezTerm). Suspend no longer has a default key: bind `app.suspend` in
+  WezTerm). Apple's Terminal sends `ctrl+shift+z` as `ctrl+z`, so there it
+  undoes. Suspend no longer has a default key: bind `app.suspend` in
   `keybindings.json`, which now also accepts `cmd+` and `option+`.
 
 ### Fixed
@@ -720,7 +725,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.7...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/aletisunil/hx/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/aletisunil/hx/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/aletisunil/hx/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/aletisunil/hx/compare/v0.2.4...v0.2.5
