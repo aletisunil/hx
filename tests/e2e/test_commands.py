@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import time
 
 from tests.e2e.conftest import HX, SANDBOX, SANDBOX_STATUS
 from tests.e2e.stub import GPT5, Stub, call, say
@@ -84,6 +86,77 @@ def test_model_picker_switches_the_model(hx: HX, stub: Stub) -> None:
     term.submit("who are you?")
     term.wait_for("Answered by GPT-5.")
     assert stub.requests[0].model == GPT5
+
+
+def test_ctrl_l_switches_the_model_and_remembers_it(hx: HX, stub: Stub) -> None:
+    """ctrl+l opens the model picker on the model in force; choosing another routes the next
+    turn to it and saves it for the next session, exactly as /model does."""
+    stub.script(say("Answered by GPT-5."))
+    term = hx.tui()
+    term.press("ctrl+l")
+    screen = term.wait_for("Select model")
+    term.snapshot("ctrl+l model picker")
+    assert re.search(r"→ ✓ anthropic/claude-sonnet-4\.5\s", screen), "opens on the current model"
+
+    term.type("gpt")
+    term.wait_for(lambda s: "deepseek" not in s)
+    term.press("enter")
+    term.wait_for("Model set to openai/gpt-5")
+    term.submit("who are you?")
+    term.wait_for("Answered by GPT-5.")
+    assert stub.requests[0].model == GPT5
+    saved = json.loads((hx.hx_home / "settings.json").read_text())
+    assert saved["models"]["model"] == GPT5
+
+
+def test_effort_carries_into_every_new_session(hx: HX) -> None:
+    """A saved reasoning effort is in force - and on the status bar - from the first screen of
+    a new session, through /clear and a restart; the picker opens on it, and a new pick
+    replaces it for the sessions after."""
+    codex = "openai-codex/gpt-5.6-terra"
+    (hx.hx_home / "auth.json").write_text(
+        json.dumps(
+            {
+                "openai-codex": {
+                    "type": "oauth",
+                    "access": "e2e-access",
+                    "refresh": "e2e-refresh",
+                    "expires": time.time() + 30 * 86_400,
+                    "account_id": "acct-e2e",
+                }
+            }
+        )
+    )
+    (hx.hx_home / "auth.json").chmod(0o600)
+    # Fresh, so nothing reaches for the real Codex catalogue at startup.
+    (hx.hx_home / "models.json").write_text(json.dumps({"fetched_at": time.time(), "models": []}))
+    (hx.hx_home / "settings.json").write_text(json.dumps({"models": {"reasoning_effort": "high"}}))
+    env = {"HX_MODEL": codex}
+
+    term = hx.tui(env=env)
+    term.wait_for(lambda s: s.splitlines()[-1].rstrip().endswith("gpt-5.6-terra (sub) · high"))
+    term.snapshot("a new session starts at the saved effort")
+
+    term.submit("/effort")
+    screen = term.wait_for("Reasoning effort for gpt-5.6-terra")
+    term.snapshot("/effort opens on the level in force")
+    assert re.search(r"→ ✓ high\s*$", screen, re.MULTILINE)
+    term.press("down")
+    term.press("enter")
+    term.wait_for("Reasoning effort set to xhigh.")
+    assert term.lines()[-1].rstrip().endswith("gpt-5.6-terra (sub) · xhigh")
+    saved = json.loads((hx.hx_home / "settings.json").read_text())
+    assert saved["models"]["reasoning_effort"] == "xhigh"
+
+    term.submit("/clear")
+    term.wait_for(lambda s: "Reasoning effort set" not in s)
+    assert term.lines()[-1].rstrip().endswith("gpt-5.6-terra (sub) · xhigh")
+    term.press("ctrl+d")
+    term.wait_exit()
+
+    again = hx.tui(env=env)
+    again.wait_for(lambda s: s.splitlines()[-1].rstrip().endswith("gpt-5.6-terra (sub) · xhigh"))
+    again.snapshot("the next session starts at the new effort")
 
 
 def test_ctrl_p_palette_runs_a_command(hx: HX) -> None:

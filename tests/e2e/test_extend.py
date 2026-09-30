@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from tests.e2e.conftest import HX
+from tests.e2e.conftest import HX, git
 from tests.e2e.stub import GPT5, SONNET, Stub, call, say
 
 ECHO_SERVER = Path(__file__).parent / "fixtures" / "echo_server.py"
@@ -103,6 +103,55 @@ def test_blank_unreadable_and_shared_agents_md_are_harmless(hx: HX, stub: Stub) 
     assert system.count("SHARED-RULE: once only.") == 1
     assert "# User instructions" in system
     assert "# Project instructions" not in system
+
+
+def test_agents_md_governs_a_session_started_deep_in_the_repo_and_its_subagents(
+    hx: HX, stub: Stub
+) -> None:
+    """Started in a package two levels below the repository root, HX still loads the root's
+    AGENTS.md, then the package's own after it, and nothing from outside the repository; a
+    subagent the model delegates the work to is held to the same rules."""
+    git(hx.project, "init", "-q")
+    write(hx.project.parent / "AGENTS.md", "OUTSIDE-RULE: not this repository's.\n")
+    write(hx.project / "AGENTS.md", "ROOT-RULE: never create unit tests; verify end to end.\n")
+    write(hx.project / "services" / "AGENTS.md", "")
+    write(hx.project / "services" / "billing" / "AGENTS.md", "PKG-RULE: money is integer cents.\n")
+    pricing = write(
+        hx.project / "services" / "billing" / "pricing.py",
+        "def subtotal(items):\n    return sum(i['cents'] * i['qty'] for i in items)\n",
+    )
+    stub.script(
+        call(
+            "Task",
+            subagent_type="general",
+            prompt="Add apply_discount(total, percent) to pricing.py.",
+            description="add discount",
+        ),
+        call("Read", file_path=str(pricing)),
+        say("REPORT: added apply_discount; no test files, per AGENTS.md."),
+        say("Done, no test files added."),
+    )
+    result = hx.run(
+        "-p", "add a discount helper", "--mode", "bypass", cwd=pricing.parent, check=True
+    )
+    assert result.stdout.strip() == "Done, no test files added."
+
+    parent, child, child_after_read, _parent_after = stub.requests
+    for request in (parent, child, child_after_read):
+        system = request.system
+        assert "OUTSIDE-RULE" not in system
+        root = system.index("# Project instructions (AGENTS.md)")
+        package = system.index("# Project instructions (services/billing/AGENTS.md)")
+        assert root < system.index("ROOT-RULE: never create unit tests") < package
+        assert package < system.index("PKG-RULE: money is integer cents.")
+        assert "Project instructions (services/AGENTS.md)" not in system, "blank is skipped"
+        assert system.count("Follow them over your own defaults") == 1
+    assert child.system.startswith("Carry out the task"), "the subagent keeps its own prompt"
+
+    listed = hx.run("prompt", cwd=pricing.parent, check=True).stderr
+    assert f"[instructions] {hx.project / 'AGENTS.md'}\n" in listed
+    assert f"[instructions] {pricing.parent / 'AGENTS.md'}\n" in listed
+    assert str(hx.project.parent / "AGENTS.md") not in listed
 
 
 def test_skill_is_indexed_then_loaded(hx: HX, stub: Stub) -> None:

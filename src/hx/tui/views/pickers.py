@@ -61,6 +61,13 @@ class Picker(Widget, Framed):
         two-hundred model catalogue, with two thirds of a tall window empty
         underneath."""
         self._refresh()
+        # Open on what is already in force, so enter alone keeps it and the
+        # arrow and the ✓ do not point at different rows.
+        current = self.current_value()
+        self.selected = next(
+            (index for index, (value, _cells) in enumerate(self._rows) if value == current),
+            0,
+        )
 
     # -- the room this has to work with ------------------------------------
 
@@ -260,7 +267,11 @@ class ModelPicker(Picker):
         # The same matcher `/model <query>` uses, so typing here narrows
         # exactly the way typing there does.
         matches = match_models(self.models, query)
-        return [(model.id, self._cells(model)) for model in matches[: self.LIMIT]]
+        shown = matches[: self.LIMIT]
+        # The model in force stays listed however far down it sorts, or the
+        # picker opens on some other row with no ✓ anywhere.
+        shown += [model for model in matches[self.LIMIT :] if model.id == self.current]
+        return [(model.id, self._cells(model)) for model in shown]
 
     def _cells(self, model: Any) -> list[str]:
         mode = str(model.cache_mode)
@@ -310,7 +321,15 @@ class EffortPicker(Picker):
         super().__init__()
 
     def current_value(self) -> str | None:
-        return self.current or DEFAULT_EFFORT_ROW
+        if self.current is None:
+            return DEFAULT_EFFORT_ROW
+        if self.current in self.info.reasoning_levels:
+            return self.current
+        # Clamped for this model: the level it actually runs at is the one in
+        # force, and a row that matches nothing would open on "default".
+        from hx.providers.codex_catalogue import resolve_effort
+
+        return resolve_effort(self.current, self.info)
 
     def rows(self, query: str) -> list[tuple[str, list[str]]]:
         default_level = self.info.default_reasoning_level or "the model's default"

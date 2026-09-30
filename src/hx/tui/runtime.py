@@ -785,17 +785,9 @@ class HXSession:
             await self._run_command(f"/{chosen}")
 
     async def _open_models(self) -> None:
-        from hx.tui.views.pickers import ModelPicker
-
-        registry = self.extra.get("models")
-        if registry is None:
-            self._notice("no model registry is loaded", "warning")
-            return
-        current = getattr(getattr(self.loop, "model_info", None), "id", "") or ""
-        chosen = await self.ask(ModelPicker(list(registry.all()), current))
-        if chosen:
-            self.view.dock.status.set_model(chosen)
-            self._notice(f"model set to {chosen}")
+        # The same path as `/model`: a picker that only relabelled the status
+        # bar left the session on the old model and the choice unsaved.
+        await self._run_command("/model")
 
     def _commands(self) -> list[Any]:
         return list(self.commands.all()) if self.commands is not None else []
@@ -963,7 +955,8 @@ class HXSession:
             asyncio.create_task(self._open_commands())  # noqa: RUF006
             return
         if name == "ctrl+l":
-            asyncio.create_task(self._open_models())  # noqa: RUF006
+            # Tracked like a typed `/model`, so an interrupt cancels it too.
+            self._side = asyncio.create_task(self._open_models())
             return
         # Only here, on the way to the prompt: nothing else binds shift+enter,
         # so an approval or a picker has to keep the enter it was sent. Not
@@ -1334,8 +1327,13 @@ class HXSession:
         )
         model = getattr(self.loop, "model_info", None)
         if model is not None:
-            status.set_model(getattr(model, "id", "") or "")
+            model_id = getattr(model, "id", "") or ""
+            status.set_model(model_id, subscription=bool(getattr(model, "is_subscription", False)))
             status.set_context(0, getattr(model, "context_window", 0) or 0)
+            # The saved effort is in force from the first turn; a bar that only
+            # shows it once /effort is run again reads as the choice not sticking.
+            if self.models is not None:
+                status.set_effort(self.models.displayed_effort(model_id))
 
 
 async def run_session(

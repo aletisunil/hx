@@ -722,7 +722,7 @@ files load here unchanged. `src/hx/tui/themes/dark.json` is the reference.
 | `./.hx/mcp.json` | project MCP servers |
 | `./.hx/system-prompt.md`, `./.hx/system-prompt-append.md` | project prompt overrides |
 | `./.hx/skills/`, `./.hx/agents/` | project skills and agents |
-| `./AGENTS.md` | project instructions, loaded into every session |
+| `AGENTS.md` | project instructions: the repository root's, then each one down to where HX started |
 
 `AGENTS.md` is the place for things a newcomer would get wrong: how to run the
 tests, conventions, what not to touch. `/init` writes a first draft. It is
@@ -733,6 +733,13 @@ like commits written, tools you always want used, in every repository. It is
 loaded first and the project's `AGENTS.md` after it, so where the two disagree
 the project has the last word. The first session creates it empty, ready to
 fill in; empty, it adds nothing. `hx prompt` and `/prompt` list each one in force.
+
+Started below the repository root - in `services/billing`, say - HX still loads
+the root's `AGENTS.md`, then every `AGENTS.md` on the way down to that directory,
+the nearest last, so a package can refine the repository's rules. A submodule
+counts as part of the repository around it. Nothing above the repository root is
+read; outside a repository only the current directory is.
+Subagents run under the same files as the session that started them.
 
 ---
 

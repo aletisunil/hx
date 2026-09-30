@@ -217,9 +217,50 @@ def user_instructions_file() -> Path:
     return user_home() / "AGENTS.md"
 
 
-def project_instructions_file(cwd: Path | None = None) -> Path:
-    """The project's ``AGENTS.md``, at the root of the working directory."""
-    return (cwd or Path.cwd()) / "AGENTS.md"
+def project_root(cwd: Path | None = None) -> Path | None:
+    """The repository ``cwd`` sits in: the nearest directory holding ``.git``.
+
+    ``.git`` is a directory in a clone and a file in a worktree or submodule.
+    A submodule is part of the repository around it, so the walk carries on
+    past one to the superproject. ``None`` outside a repository.
+    """
+    start = (cwd or Path.cwd()).resolve()
+    submodule: Path | None = None
+    for directory in (start, *start.parents):
+        marker = directory / ".git"
+        if marker.is_dir() or (marker.is_file() and not _is_submodule(marker)):
+            return directory
+        if marker.is_file() and submodule is None:
+            submodule = directory
+    return submodule
+
+
+def _is_submodule(marker: Path) -> bool:
+    """Whether a ``.git`` file points into a superproject's ``.git/modules``."""
+    try:
+        text = marker.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return text.startswith("gitdir:") and "/modules/" in text.replace("\\", "/")
+
+
+def project_instructions_files(cwd: Path, root: Path | None) -> list[Path]:
+    """Every ``AGENTS.md`` that governs ``cwd``, least specific first.
+
+    From the repository root down to ``cwd``, one candidate per directory, so
+    starting HX in ``src/app`` still finds the root's file - and ``src/app``'s
+    own, which comes last and so has the last word. Outside a repository only
+    ``cwd`` itself is looked at: walking up from an arbitrary directory would
+    pick up whatever happens to sit in its parents.
+
+    ``root`` is :func:`project_root` of ``cwd``, passed in because the caller
+    needs it too and finding it walks the file system.
+    """
+    here = cwd.resolve()
+    if root is None:
+        return [here / "AGENTS.md"]
+    chain = [here, *here.parents]
+    return [directory / "AGENTS.md" for directory in reversed(chain[: chain.index(root) + 1])]
 
 
 def ensure_user_dirs() -> None:

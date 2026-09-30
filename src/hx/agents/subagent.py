@@ -59,6 +59,7 @@ class SubagentRunner:
         parent_session_id: str | None = None,
         parent_usage: object | None = None,
         hooks: HookEngine | None = None,
+        project_context: str | None = None,
     ) -> None:
         self.definitions = definitions
         self.provider = provider
@@ -72,6 +73,10 @@ class SubagentRunner:
         self.hooks = hooks
         """Shared with the parent: a hook that guards Bash must guard a subagent's
         Bash too, or the guard is one delegation away from being bypassed."""
+        self.project_context = project_context
+        """The parent's project preamble, AGENTS.md included. A subagent edits the
+        same project under the same rules; without it "never add unit tests" is
+        one delegation away from being ignored."""
         self._active: dict[str, str] = {}
 
     async def run(self, agent_type: str, prompt: str, description: str) -> SubagentResult:
@@ -160,6 +165,7 @@ class SubagentRunner:
             bus=self.bus,
             settings=self.settings,
             model_info=self.models.get_or_default(model) if self.models else None,
+            project_context=self.project_context,
             hooks=self.hooks,
         )
         loop.origin = f"{definition.name} subagent"

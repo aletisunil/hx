@@ -10,7 +10,8 @@ Layout, in order::
     [1] system prompt          static for the session
     [2] tool schemas           deterministic sort: builtins, then mcp__* alphabetical
     [3] skills index           name + description only (progressive disclosure)
-    [4] project context        cwd, git branch, top-level listing, ~/.hx/AGENTS.md, AGENTS.md
+    [4] project context        cwd, git branch, top-level listing, ~/.hx/AGENTS.md,
+                               each AGENTS.md from the repository root down to cwd
     --- breakpoint A (static) ---
     [5] conversation history
     --- breakpoint B (rolling, before the last few turns) ---
@@ -250,26 +251,43 @@ class Instructions:
 def load_instructions(cwd: Path) -> list[Instructions]:
     """Every AGENTS.md in force, least specific first.
 
-    ``~/.hx/AGENTS.md`` follows the user into every project; the project's own
-    ``AGENTS.md`` comes after it, so where the two disagree the more specific
-    one has the last word. A blank or unreadable file is skipped, and running
-    from inside ``$HX_HOME`` - where both paths name the same file - loads it once.
+    ``~/.hx/AGENTS.md`` follows the user into every project; then each
+    ``AGENTS.md`` from the repository root down to ``cwd``. Where two disagree
+    the more specific one comes later and has the last word. A blank or
+    unreadable file is skipped, and a path reached twice - running from inside
+    ``$HX_HOME``, say - is loaded once.
     """
-    from hx.paths import project_instructions_file, tilde, user_instructions_file
+    from hx.paths import project_instructions_files, project_root, tilde, user_instructions_file
 
     user = user_instructions_file()
+    here = cwd.resolve()
+    root = project_root(here)
+    base = root or here
+    candidates = [(f"User instructions ({tilde(user)})", user)]
+    for path in project_instructions_files(here, root):
+        where = path.relative_to(base).as_posix()
+        candidates.append((f"Project instructions ({where})", path))
+
     found: list[Instructions] = []
     seen: set[Path] = set()
-    for heading, path in (
-        (f"User instructions ({tilde(user)})", user),
-        ("Project instructions (AGENTS.md)", project_instructions_file(cwd)),
-    ):
+    for heading, path in candidates:
         body = _read_prompt_file(path)
         if not body or path.resolve() in seen:
             continue
         seen.add(path.resolve())
         found.append(Instructions(heading, path, body))
     return found
+
+
+INSTRUCTIONS_PREAMBLE = (
+    "The sections below are AGENTS.md files: standing instructions from the user "
+    "and this project, already loaded in full - there is no need to read them "
+    "again. Follow them over your own defaults and habits. Where two disagree, "
+    "the later, more specific one wins."
+)
+"""Said once, ahead of the files. Without it a rule like "no unit tests" reads
+as background next to a request to make something "well covered", and the
+model re-reads the file it was already given to find out whether it counts."""
 
 
 def build_project_context(cwd: Path, instructions: list[Instructions] | None = None) -> str:
@@ -291,8 +309,11 @@ def build_project_context(cwd: Path, instructions: list[Instructions] | None = N
     if entries:
         lines.append("Top level: " + ", ".join(entries[:60]))
 
-    for loaded in load_instructions(cwd) if instructions is None else instructions:
-        lines.append(f"\n# {loaded.heading}\n\n{loaded.text}")
+    loaded = load_instructions(cwd) if instructions is None else instructions
+    if loaded:
+        lines.append(f"\n{INSTRUCTIONS_PREAMBLE}")
+    for entry in loaded:
+        lines.append(f"\n# {entry.heading}\n\n{entry.text}")
 
     return "\n".join(lines)
 

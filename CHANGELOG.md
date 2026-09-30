@@ -26,6 +26,18 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `AGENTS.md` at the repository root now applies when HX is started in a
+  subdirectory, followed by each `AGENTS.md` down to that directory.
+- Subagents started with `Task` now follow `~/.hx/AGENTS.md` and the project's
+  `AGENTS.md`, as the main session does.
+- A saved `/effort` level shows on the status bar from the first screen of every
+  new session, not only after `/effort` is run again.
+- `ctrl+l` switches the model and saves it for later sessions, as `/model` does;
+  it used to relabel the status bar only.
+- `/model`, `ctrl+l` and `/effort` open with the cursor on the choice in force.
+
 ---
 
 ## [0.2.9] - 2026-09-27

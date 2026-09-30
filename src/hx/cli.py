@@ -436,6 +436,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         keep_recent_turns=settings.context.keep_recent_turns,
     )
     instructions = load_instructions(settings.cwd)
+    project_context = build_project_context(settings.cwd, instructions)
 
     checkpoints = CheckpointStore(session, session_checkpoints_dir(session.meta.session_id))
     tools = build_default_registry(shell, jobs, tracker, todos, bus_holder, auth, checkpoints)
@@ -464,6 +465,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         parent_session_id=session.meta.session_id,
         parent_usage=session.usage,
         hooks=hooks,
+        project_context=project_context,
     )
     tools.register(TaskTool(subagents))
 
@@ -484,7 +486,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         settings=settings,
         model_info=model_info,
         skills_index=build_index(list(skills.values())) or None,
-        project_context=build_project_context(settings.cwd, instructions),
+        project_context=project_context,
         instructions=instructions,
         hooks=hooks,
     )

@@ -107,7 +107,10 @@ async def cmd_model(ctx: CommandContext, args: str) -> None:
     from hx.providers.models import ModelRegistry
     from hx.tui.views.pickers import ModelPicker
 
-    registry: ModelRegistry = ctx.app.models
+    registry: ModelRegistry | None = ctx.app.models
+    if registry is None:
+        ctx.app.notice("No model registry is loaded.", "warning")
+        return
     models = _reachable(ctx, registry.all())
     if not models:
         # A recorded failure replaces the remedy rather than trailing it:
@@ -780,7 +783,9 @@ async def cmd_mode(ctx: CommandContext, args: str) -> None:
 
 
 INIT_PROMPT = """\
-Write an AGENTS.md for this project, at its root.
+Write an AGENTS.md in {directory}, the directory HX was started in. Any AGENTS.md
+between the repository root and there is loaded before it, so leave out what
+those already say.
 
 Read enough of the codebase to be accurate. Cover: what the project is, how to
 build, test and lint it, the layout of the source tree, and any conventions a
@@ -792,7 +797,7 @@ If AGENTS.md already exists, improve it rather than replacing it wholesale."""
 
 async def cmd_init(ctx: CommandContext, args: str) -> None:
     """``/init`` - generate an AGENTS.md describing this project."""
-    await ctx.app.submit_to_model(INIT_PROMPT)
+    await ctx.app.submit_to_model(INIT_PROMPT.format(directory=ctx.settings.cwd))
 
 
 async def cmd_configure(ctx: CommandContext, args: str) -> None:
