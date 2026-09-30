@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.10] - 2026-09-29
+
 ### Fixed
 
 - `AGENTS.md` at the repository root now applies when HX is started in a
@@ -754,7 +758,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.10...HEAD
+[0.2.10]: https://github.com/aletisunil/hx/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/aletisunil/hx/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/aletisunil/hx/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/aletisunil/hx/compare/v0.2.6...v0.2.7
