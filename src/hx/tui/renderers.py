@@ -69,6 +69,7 @@ class ToolCall:
     finished: bool = False
     expanded: bool = False
     duration_ms: float = 0.0
+    interrupted: bool = False
 
 
 #: Fields of a :class:`ToolCall` carrying text somebody else wrote.
@@ -525,9 +526,10 @@ class BashRenderer(ToolRenderer):
             lines, hidden = _tail(output, self.preview_lines, call.expanded)
             if hidden:
                 out.append(expand_note(hidden))
-            role = "error" if call.is_error else "tool_output"
+            # Cut off, it printed what it printed: that is output, not an error.
+            role = "error" if call.is_error and not call.interrupted else "tool_output"
             out.extend(fg(role, line) for line in lines)
-        if call.finished and call.duration_ms:
+        if call.finished and call.duration_ms and not call.interrupted:
             out.append(fg("dim", f"Took {format_duration(call.duration_ms)}"))
         return out
 
@@ -703,7 +705,7 @@ def _plain_output(call: ToolCall, limit: int) -> list[str]:
     if not call.output.strip():
         return []
     lines, hidden = _head(call.output, limit, call.expanded)
-    role = "error" if call.is_error else "tool_output"
+    role = "error" if call.is_error and not call.interrupted else "tool_output"
     out = [fg(role, line) for line in lines]
     return [*out, expand_note(hidden)] if hidden else out
 

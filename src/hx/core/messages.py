@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -238,3 +238,60 @@ def assistant_message(blocks: list[ContentBlock], model: str | None = None) -> M
 def tool_result_message(results: list[ToolResultBlock]) -> Message:
     """Tool results are carried on a ``user``-role message, matching the provider wire format."""
     return Message(role="user", content=list(results))
+
+
+INTERRUPTED = "Interrupted by the user before this call finished."
+_OUTPUT_SO_FAR = "\n\nOutput before the interrupt:\n"
+
+
+def interrupted_result(tool_use_id: str, output: str = "") -> ToolResultBlock:
+    """The answer for a call the user cut off, before it started or while it ran.
+
+    What it printed before then goes with it: how far a command got is what
+    the model needs to decide whether to run it again.
+    """
+    content = f"{INTERRUPTED}{_OUTPUT_SO_FAR}{output}" if output.strip() else INTERRUPTED
+    return ToolResultBlock(tool_use_id=tool_use_id, content=content, is_error=True)
+
+
+def interrupted_output(result: ToolResultBlock) -> str | None:
+    """What an interrupted call printed, or ``None`` when ``result`` is not one."""
+    if not (result.is_error and result.content.startswith(INTERRUPTED)):
+        return None
+    return result.content.removeprefix(INTERRUPTED).removeprefix(_OUTPUT_SO_FAR)
+
+
+def answer_unanswered_calls(messages: Sequence[Message]) -> list[Message]:
+    """``messages`` with every tool call answered by the message after it.
+
+    The loop answers every call it starts, interrupted or not, so a request is
+    never built while a call waits. A transcript can still hold a call with no
+    result: written before the loop did that, or by a process killed mid-tool.
+    Every route rejects such a call - on every request after it, since it never
+    leaves the history - so the missing results are filled in as interrupted.
+    Only the request is repaired; the transcript on disk keeps what happened.
+    """
+    repaired: list[Message] = []
+    waiting: list[ToolUseBlock] = []
+    for message in [*messages, None]:
+        if waiting:
+            results = {r.tool_use_id: r for r in message.tool_results()} if message else {}
+            if any(call.id not in results for call in waiting):
+                answers = [results.get(c.id) or interrupted_result(c.id) for c in waiting]
+                ids = {call.id for call in waiting}
+                if message is not None and results:
+                    # Into the results already there: the calls stay answered
+                    # by one message, in the order they were made.
+                    rest = [
+                        b
+                        for b in message.content
+                        if not (isinstance(b, ToolResultBlock) and b.tool_use_id in ids)
+                    ]
+                    message = replace(message, content=[*answers, *rest])
+                else:
+                    repaired.append(tool_result_message(answers))
+        if message is None:
+            break
+        repaired.append(message)
+        waiting = message.tool_uses() if message.role == "assistant" else []
+    return repaired

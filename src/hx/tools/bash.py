@@ -143,6 +143,13 @@ class PersistentShell:
                 if not interrupted or not await self._drain_stale_sentinel():
                     await self.restart()
                     yield "[hx] shell did not recover from the interrupt; restarted\n"
+            except asyncio.CancelledError:
+                # The user stopped the turn. The command must stop with it, and
+                # its sentinel must not be left for the next command to read -
+                # the same recovery as a timeout, without the output to report.
+                if not await self.interrupt() or not await self._drain_stale_sentinel():
+                    await self.restart()
+                raise
 
             self._duration_ms = (time.monotonic() - started) * 1000
 
@@ -178,11 +185,14 @@ class PersistentShell:
                     yield head
                 return
 
-            # Hold back a partial sentinel so it is never emitted as output.
-            safe = len(buffer) - len(self._sentinel)
-            if safe > 0:
-                yield buffer[:safe]
-                buffer = buffer[safe:]
+            # Hold back only what could be the start of the sentinel, so it is
+            # never emitted as output. Holding back a sentinel's length of
+            # anything hid a short line - "Starting..." before a long build -
+            # until the command ended.
+            held = _sentinel_prefix_at_end(buffer, self._sentinel)
+            if len(buffer) > held:
+                yield buffer[: len(buffer) - held]
+                buffer = buffer[len(buffer) - held :]
 
     async def _drain_stale_sentinel(self, timeout_seconds: float = 5.0) -> bool:
         """Consume output up to the sentinel owed by an interrupted command."""
@@ -562,6 +572,14 @@ class KillShellTool(Tool):
         job_id = str(params["job_id"])
         self.jobs.kill(job_id)
         return ToolResult(content=f"Killed {job_id}.", summary=f"killed {job_id}")
+
+
+def _sentinel_prefix_at_end(buffer: str, sentinel: str) -> int:
+    """Length of the longest end of ``buffer`` that ``sentinel`` starts with."""
+    for size in range(min(len(buffer), len(sentinel) - 1), 0, -1):
+        if sentinel.startswith(buffer[-size:]):
+            return size
+    return 0
 
 
 def _parse_trailer(tail: str, previous: Path) -> tuple[int, Path]:

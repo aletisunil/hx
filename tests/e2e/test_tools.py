@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from tests.e2e.conftest import HX
-from tests.e2e.stub import Stub, call, say
+from tests.e2e.stub import Stub, ToolCall, call, calls, say
 
 
 def test_write_asks_and_allow_once(hx: HX, stub: Stub) -> None:
@@ -128,6 +128,96 @@ def test_bash_output_in_the_transcript(hx: HX, stub: Stub) -> None:
     term.snapshot("expanded shell output")
     expanded = term.scrollback()
     assert "\n   1\n" in expanded and "\n   40\n" in expanded
+
+
+def test_escape_during_a_tool_answers_every_call(hx: HX, stub: Stub) -> None:
+    """esc while a shell command runs stops it; the next question still gets an answer.
+
+    The model asked for two tools at once. The read finished before the
+    interrupt and keeps its real result; the command that was cut off is
+    answered as interrupted with what it printed, which stays on screen - and
+    on a resumed one. The next command runs in the same shell and gets its own
+    output, not what was left of the one stopped. A call left
+    with no answer at all is a 400 from every upstream - Codex says "No tool
+    output found for function call" - and every later turn would fail the same way.
+    """
+    (hx.project / "notes.txt").write_text("remember the milk\n")
+    stub.script(
+        calls(
+            ToolCall("Read", {"file_path": str(hx.project / "notes.txt")}, id="call_read"),
+            ToolCall("Bash", {"command": "printf 'warm%s\\n' up && sleep 30"}, id="call_sleep"),
+            text="Reading, then waiting.",
+        ),
+        call("Bash", "Trying again.", command="echo after"),
+        say("Here is the other answer."),
+    )
+    term = hx.tui()
+    term.submit("read and wait")
+    term.wait_for("warmup")
+    term.press("esc")
+    screen = term.wait_for("Interrupted after")
+    term.settle()
+    term.snapshot("interrupted while the command runs")
+    assert "⠋" not in term.text() and "Took" not in screen, "the call is shown stopped"
+    assert "warmup" in term.text(), "what it printed before the interrupt stays"
+
+    term.submit("another question")
+    term.wait_for("Here is the other answer.")
+    term.settle()
+    term.snapshot("the next question is answered")
+
+    request = stub.requests[1]
+    results = {
+        m["tool_call_id"]: str(m["content"]) for m in request.messages if m["role"] == "tool"
+    }
+    assert "remember the milk" in results["call_read"]
+    assert "interrupted" in results["call_sleep"].lower()
+    assert "warmup" in results["call_sleep"], "the model hears how far it got"
+    assert request.last_user_text().endswith("another question")
+    after = stub.requests[2].tool_results()[-1]
+    assert "after" in after and "warmup" not in after
+
+    term.close()
+    (meta,) = hx.sessions()
+    again = hx.tui("resume", meta["session_id"])
+    again.wait_for("Here is the other answer.")
+    again.settle()
+    again.snapshot("resumed: the cut-off call still shows what it printed")
+    assert "warmup" in again.text() and "Interrupted" in again.text()
+
+
+def test_resuming_a_session_killed_mid_tool(hx: HX, stub: Stub) -> None:
+    """A session whose process died while a tool ran resumes and carries on.
+
+    Nothing was there to answer the call, so the transcript on disk ends in a
+    call without a result - as does every session interrupted before HX
+    answered interrupted calls. Resumed, the call reads as interrupted and the
+    next question is answered rather than rejected.
+    """
+    stub.script(
+        call("Bash", "Waiting a while.", command="printf 'warm%s\\n' up && sleep 30"),
+        say("Picked up where we left off."),
+    )
+    term = hx.tui()
+    term.submit("wait a while")
+    term.wait_for("warmup")
+    term.kill()
+    (meta,) = hx.sessions()
+
+    again = hx.tui("resume", meta["session_id"])
+    again.wait_for("Waiting a while.")
+    again.settle()
+    again.snapshot("resumed: the cut-off call reads as interrupted")
+    assert "Interrupted" in again.text()
+    assert "⠋" not in again.text()
+
+    again.submit("are you still there?")
+    again.wait_for("Picked up where we left off.")
+    again.snapshot("the next question is answered")
+
+    (result,) = stub.requests[1].tool_results()
+    assert "interrupted" in result.lower()
+    assert stub.requests[1].last_user_text().endswith("are you still there?")
 
 
 def test_read_only_commands_do_not_ask(hx: HX, stub: Stub) -> None:

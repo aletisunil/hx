@@ -160,6 +160,22 @@ def _text(content: Any) -> str:
     return ""
 
 
+def _unanswered_tool_calls(messages: list[dict[str, Any]]) -> list[str]:
+    """Tool call ids not answered by the ``tool`` messages that follow their call."""
+    unanswered: list[str] = []
+    for index, message in enumerate(messages):
+        ids = [c.get("id", "") for c in message.get("tool_calls") or []]
+        if not ids:
+            continue
+        answered: set[str] = set()
+        for reply in messages[index + 1 :]:
+            if reply.get("role") != "tool":
+                break
+            answered.add(str(reply.get("tool_call_id")))
+        unanswered.extend(i for i in ids if i not in answered)
+    return unanswered
+
+
 class Stub:
     """The server, and the script it plays."""
 
@@ -262,6 +278,23 @@ class Stub:
                     with stub._lock:
                         stub.title_requests.append(request)
                     self._stream(Reply(text=stub.title, prompt_tokens=300, completion_tokens=5))
+                    return
+                if unanswered := _unanswered_tool_calls(request.messages):
+                    # Every upstream rejects a tool call left without its
+                    # result - OpenAI, Anthropic and the Codex Responses
+                    # backend alike - so the stub does too, in OpenAI's words.
+                    stub.unexpected.append(f"tool calls without results: {unanswered}")
+                    self._json(
+                        400,
+                        {
+                            "error": {
+                                "message": "An assistant message with 'tool_calls' must be "
+                                "followed by tool messages responding to each "
+                                "'tool_call_id'. The following tool_call_ids did not have "
+                                f"response messages: {', '.join(unanswered)}"
+                            }
+                        },
+                    )
                     return
                 with stub._arrived:
                     stub.requests.append(request)

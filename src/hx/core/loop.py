@@ -42,7 +42,9 @@ from hx.core.messages import (
     ToolResultBlock,
     ToolUseBlock,
     UserTurn,
+    answer_unanswered_calls,
     assistant_message,
+    interrupted_result,
     tool_result_message,
     user_message,
 )
@@ -50,7 +52,7 @@ from hx.core.session import Environment
 from hx.core.usage import TurnUsage, compute_cost
 from hx.hooks.spec import HookOutcome
 from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, StreamEnd
-from hx.tools.base import ToolContext
+from hx.tools.base import ToolContext, ToolResult
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -225,6 +227,27 @@ class AgentLoop:
                 self.bus.publish(TurnFinished(self._turn_index, stop_reason))
 
             calls = message.tool_uses()
+            if calls and self._cancelled:
+                # Stopped between the answer and its tools: none of them ran,
+                # and the transcript has to say so before the turn ends - as
+                # does the screen, which a resumed session draws them on too.
+                for call in calls:
+                    self.bus.publish(
+                        ToolCallStarted(
+                            tool_use_id=call.id,
+                            name=self._display_name(call.name),
+                            input=call.input,
+                        )
+                    )
+                    self.bus.publish(
+                        ToolCallFinished(
+                            tool_use_id=call.id,
+                            is_error=True,
+                            summary="interrupted",
+                            interrupted=True,
+                        )
+                    )
+                produced.append(self._answer_calls(calls, {}))
             if not calls or self._cancelled:
                 # A steer that arrived during the last stretch is the next thing
                 # the user said, so the conversation continues rather than
@@ -234,10 +257,15 @@ class AgentLoop:
                 await self._name_session()
                 return TurnResult(stop_reason, produced)
 
-            results = await self._execute_tools(calls)
-            result_message = tool_result_message(results)
-            self.session.append(result_message)
-            produced.append(result_message)
+            results: dict[str, ToolResultBlock] = {}
+            try:
+                await self._execute_tools(calls, results)
+            finally:
+                # Also on interrupt. The calls are already in the transcript,
+                # and a call left without a result is rejected by every route on
+                # the next request - so every later turn in the session would
+                # fail the same way. What finished keeps its real result.
+                produced.append(self._answer_calls(calls, results))
 
         self.bus.publish(
             ErrorRaised(message=f"Stopped after {self.MAX_TURNS} turns", recoverable=True)
@@ -459,7 +487,9 @@ class AgentLoop:
         )
 
     async def _build_request(self) -> ProviderRequest:
-        messages = await self.injections.apply(self.session.active_messages())
+        messages = answer_unanswered_calls(
+            await self.injections.apply(self.session.active_messages())
+        )
         if self.model_info is None or not self.model_info.supports_images:
             from hx.core.images import without_images
 
@@ -570,31 +600,48 @@ class AgentLoop:
             )
         )
 
-    async def _execute_tools(self, calls: list[ToolUseBlock]) -> list[ToolResultBlock]:
+    async def _execute_tools(
+        self, calls: list[ToolUseBlock], results: dict[str, ToolResultBlock]
+    ) -> None:
         """Permission-check, then run. Read-only calls are gathered concurrently;
         mutating calls run in emission order.
+
+        Each result lands in ``results`` the moment its call finishes, so an
+        interrupt keeps what had already run.
 
         A denied call becomes an ``is_error`` result rather than an exception, so
         the model can react instead of the turn dying.
         """
-        results: dict[str, ToolResultBlock] = {}
         concurrent: list[ToolUseBlock] = []
+
+        async def run(call: ToolUseBlock) -> None:
+            results[call.id] = await self._run_one(call, results)
 
         for call in calls:
             if self._runs_serially(call):
                 for pending in concurrent:
-                    results[pending.id] = await self._run_one(pending)
+                    await run(pending)
                 concurrent.clear()
-                results[call.id] = await self._run_one(call)
+                await run(call)
             else:
                 concurrent.append(call)
 
         if concurrent:
-            gathered = await asyncio.gather(*(self._run_one(c) for c in concurrent))
-            for call, result in zip(concurrent, gathered, strict=True):
-                results[call.id] = result
+            await asyncio.gather(*(run(c) for c in concurrent))
 
-        return [results[c.id] for c in calls]
+    def _answer_calls(
+        self, calls: list[ToolUseBlock], results: dict[str, ToolResultBlock]
+    ) -> Message:
+        """Append the results for ``calls``, in the order the model asked for them.
+
+        A call with no result was cut off by the user, before it started or
+        while it ran, and is answered as exactly that.
+        """
+        message = tool_result_message(
+            [results.get(call.id) or interrupted_result(call.id) for call in calls]
+        )
+        self.session.append(message)
+        return message
 
     def _runs_serially(self, call: ToolUseBlock) -> bool:
         try:
@@ -609,7 +656,10 @@ class AgentLoop:
         """Attribute a subagent's tool calls so they do not read as the parent's."""
         return name if self.origin is None else f"{self.origin} > {name}"
 
-    async def _run_one(self, call: ToolUseBlock) -> ToolResultBlock:
+    async def _run_one(
+        self, call: ToolUseBlock, results: dict[str, ToolResultBlock]
+    ) -> ToolResultBlock:
+        """Run one call. Interrupted, it leaves its answer in ``results``."""
         started = time.monotonic()
 
         # PreToolUse runs before the call is announced. A hook that rewrites the
@@ -626,7 +676,40 @@ class AgentLoop:
                 tool_use_id=call.id, name=self._display_name(call.name), input=call.input
             )
         )
+        streamed: list[str] = []
+        try:
+            return await self._run_announced(call, pre, started, streamed, results)
+        except asyncio.CancelledError:
+            if call.id in results:
+                # The tool had finished and only its hooks were cut off.
+                raise
+            cap = self.settings.context.tool_output_char_cap
+            results[call.id] = interrupted_result(call.id, "".join(streamed)[-cap:])
+            # The call is on screen as running; left alone it would spin on
+            # under the "Interrupted" notice for the rest of the session.
+            self.bus.publish(
+                ToolCallFinished(
+                    tool_use_id=call.id,
+                    is_error=True,
+                    duration_ms=(time.monotonic() - started) * 1000,
+                    summary="interrupted",
+                    interrupted=True,
+                )
+            )
+            raise
 
+    async def _run_announced(
+        self,
+        call: ToolUseBlock,
+        pre: HookOutcome,
+        started: float,
+        streamed: list[str],
+        results: dict[str, ToolResultBlock],
+    ) -> ToolResultBlock:
+        """The part of :meth:`_run_one` after the call is on screen.
+
+        What the tool prints is kept in ``streamed`` for an interrupt to report.
+        """
         if pre.blocked:
             refusal = ToolResultBlock(
                 tool_use_id=call.id,
@@ -657,18 +740,34 @@ class AgentLoop:
             )
             return denied
 
+        def progress(chunk: str) -> None:
+            streamed.append(chunk)
+            self._emit_progress(call.id, chunk)
+
         ctx = ToolContext(
             cwd=self.settings.cwd,
             session_id=self.session.meta.session_id,
             tool_use_id=call.id,
             settings=self.settings,
-            emit_progress=lambda chunk: self._emit_progress(call.id, chunk),
+            emit_progress=progress,
         )
         result = await self.tools.call(call.name, call.input, ctx)
 
-        post = await self._fire_hooks(
-            lambda h: h.post_tool_use(call.name, call.input, result.content, result.is_error)
-        )
+        try:
+            post = await self._fire_hooks(
+                lambda h: h.post_tool_use(call.name, call.input, result.content, result.is_error)
+            )
+        except asyncio.CancelledError:
+            # The tool finished and its effects are real: its own result stands,
+            # rather than telling the model a write that happened never did.
+            results[call.id] = self._finish(call, result, HookOutcome(), started)
+            raise
+        return self._finish(call, result, post, started)
+
+    def _finish(
+        self, call: ToolUseBlock, result: ToolResult, post: HookOutcome, started: float
+    ) -> ToolResultBlock:
+        """Announce a call the tool finished, and its result for the model."""
         content = result.content
         if post.blocked:
             content = f"{content}\n\nA hook rejected this result: {post.reason}"

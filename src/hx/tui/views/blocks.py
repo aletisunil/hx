@@ -23,7 +23,13 @@ from hx.term.sanitize import plain_text
 from hx.tui.glyphs import IMAGE, NOTICE, SPINNER, TOOL_DONE, TOOL_FAILED
 from hx.tui.limits import PREVIEW_LINES, STREAM_TAIL
 from hx.tui.paint import ThemePainter, fg, tint
-from hx.tui.renderers import ToolCall, renderer_for, sanitized_call, sanitized_fields
+from hx.tui.renderers import (
+    ToolCall,
+    format_duration,
+    renderer_for,
+    sanitized_call,
+    sanitized_fields,
+)
 
 if TYPE_CHECKING:
     from hx.core.messages import ImageBlock
@@ -237,6 +243,8 @@ class ToolBlock(Widget):
     def _state(self) -> str:
         if not self._call.finished:
             return "running"
+        if self._call.interrupted:
+            return "interrupted"
         return "error" if self._call.is_error else "done"
 
     def draw(self, width: int) -> list[str]:
@@ -246,6 +254,8 @@ class ToolBlock(Widget):
             "running": (SPINNER[self._frame], "accent", "tool_pending_bg"),
             "done": (TOOL_DONE, "success", "tool_success_bg"),
             "error": (TOOL_FAILED, "error", "tool_error_bg"),
+            # Stopped, not failed: the warning the "Interrupted" line is drawn in.
+            "interrupted": (TOOL_FAILED, "warning", "tool_pending_bg"),
         }[state]
 
         renderer = renderer_for(self._call.name)
@@ -253,6 +263,12 @@ class ToolBlock(Widget):
         # The body is indented to sit under the header's text rather than under
         # its marker, so the block has one left edge instead of two.
         lines += [f"  {line}" for line in renderer.body(self._call)]
+        if self._call.interrupted:
+            took = self._call.duration_ms
+            lines.append(
+                "  "
+                + fg("warning", f"Interrupted{f' after {format_duration(took)}' if took else ''}")
+            )
 
         return Box(1, 1, tint(background), Lines(lines, padding_x=0)).render(width)
 

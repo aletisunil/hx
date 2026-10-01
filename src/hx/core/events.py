@@ -67,6 +67,9 @@ class ToolCallFinished(Event):
     metadata: dict[str, Any] = field(default_factory=dict)
     """Structured detail the renderer draws with - an edit's diff, a command's
     exit code. Presentation only: the model never sees it."""
+    interrupted: bool = False
+    """The user stopped the turn while this call ran. Whatever it streamed is
+    kept: how far a command got is what the user wants to see."""
 
 
 @dataclass(slots=True)

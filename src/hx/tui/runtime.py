@@ -23,6 +23,7 @@ from hx.core.messages import (
     ToolResultBlock,
     ToolUseBlock,
     UserTurn,
+    interrupted_output,
 )
 from hx.core.usage import format_tokens
 from hx.git import BranchWatcher
@@ -628,7 +629,11 @@ class HXSession:
         is the part the reader came back for.
         """
         params = dict(call.input or {})
-        failed = result is not None and result.is_error
+        # No result at all is a call cut off by a version of HX that did not
+        # answer interrupted calls - the same thing, said the old way.
+        printed = "" if result is None else interrupted_output(result)
+        interrupted = printed is not None
+        failed = interrupted or (result is not None and result.is_error)
         if call.name.lower() in SILENT_TOOLS and not failed:
             return TodoBlock(params.get("todos") or [])
         return ToolBlock(
@@ -636,11 +641,10 @@ class HXSession:
                 name=call.name,
                 params=params,
                 cwd=Path(self.settings.cwd),
-                output=result.content if result is not None else "",
+                output=result.content if result is not None and printed is None else printed or "",
                 is_error=failed,
-                # No result means the turn was interrupted mid-call, and the
-                # block says so rather than claiming a finish that never came.
-                finished=result is not None,
+                finished=True,
+                interrupted=interrupted,
             )
         )
 
@@ -1276,6 +1280,7 @@ class HXSession:
                             output=event.detail or finished.call.output,
                             metadata=event.metadata,
                             duration_ms=event.duration_ms or 0.0,
+                            interrupted=event.interrupted,
                         )
                         if held and event.is_error:
                             transcript.append(finished)

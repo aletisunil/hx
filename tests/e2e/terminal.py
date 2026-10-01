@@ -368,6 +368,11 @@ class Terminal:
         assert self.exit_code is not None
         return self.exit_code
 
+    def kill(self) -> None:
+        """SIGKILL: the process dies with no chance to tidy up, as in a crash."""
+        os.kill(self.pid, signal.SIGKILL)
+        self.wait_exit(3)
+
     def close(self) -> None:
         if self.alive:
             with contextlib.suppress(ProcessLookupError):
@@ -378,8 +383,12 @@ class Terminal:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(self.pid, signal.SIGKILL)
             self.wait_exit(3)
-        with contextlib.suppress(OSError):
-            os.close(self.fd)
+        # Once only: a closed descriptor's number goes to the next terminal
+        # opened, and closing it again would close that one's pty under it.
+        if self.fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(self.fd)
+            self.fd = -1
 
     # -- the report ------------------------------------------------------
 
