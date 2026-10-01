@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 
 from tests.e2e.conftest import HX, SANDBOX, SANDBOX_STATUS
@@ -222,6 +223,177 @@ def test_title_command(hx: HX, stub: Stub) -> None:
     term.press("ctrl+d")
     term.wait_exit()
     assert hx.sessions()[-1]["title"] == "Release planning"
+
+
+def test_session_is_named_once_and_exit_does_not_wait(hx: HX, stub: Stub) -> None:
+    """The session is named once, after its first exchange, and never renamed while it
+    runs. /exit returns the shell at once, even with a rename of a left session still out."""
+    parser = hx.project / "parser.py"
+    parser.write_text(
+        "".join(f"def rule_{n}(tokens):\n    return tokens[{n}:]\n\n" for n in range(80))
+    )
+    stub.title = "Parser rules overview"
+    stub.script(
+        call("Read", file_path=str(parser)),
+        say("It is a table of slicing rules."),
+        say("rule_3 drops the first three tokens."),
+        say("Yes, every rule slices."),
+        say("Added --verbose."),
+        say("Tests pass."),
+    )
+    term = hx.tui()
+    term.submit("what does parser.py do")
+    term.wait_for("It is a table of slicing rules.")
+    asked = stub.wait_for_title_requests(1)[0].last_user_text()
+    assert "what does parser.py do" in asked, "the opening is shown"
+    assert "It is a table of slicing rules." in asked, "so is how the exchange ended"
+    assert "earlier conversation omitted" in asked, "the long middle is cut, and says so"
+    assert hx.sessions()[-1]["title"] == "Parser rules overview"
+
+    stub.title = "Never asked for"
+    for prompt, reply in (
+        ("what does rule_3 do", "rule_3 drops the first three tokens."),
+        ("do they all slice", "Yes, every rule slices."),
+        ("now add a --verbose flag to the CLI", "Added --verbose."),
+        ("run the tests", "Tests pass."),
+    ):
+        term.submit(prompt)
+        term.wait_for(reply)
+    term.settle(0.5)
+    assert len(stub.title_requests) == 1, "the live session is not renamed while it runs"
+    assert hx.sessions()[-1]["title"] == "Parser rules overview"
+
+    # Leaving it with /clear renames it for what it became, in the background.
+    # A slow title model holds that call; /exit must not wait on it.
+    stub.title_hold = threading.Event()
+    term.submit("/clear")
+    term.wait_for("New session started.")
+    stub.wait_for_title_requests(2)
+    term.type("/exit")
+    started = time.monotonic()
+    term.press("enter")
+    assert term.wait_exit(timeout=5) == 0
+    took = time.monotonic() - started
+    hx.note(f"/exit with a rename in flight returned in {took:.2f}s")
+    assert took < 1.0, f"/exit took {took:.2f}s"
+    term.snapshot("shell prompt back")
+    assert "Traceback" not in term.scrollback()
+    (left,) = [meta for meta in hx.sessions() if meta["prompt_count"] == 5]
+    assert left["title"] == "Parser rules overview", "the abandoned rename wrote nothing"
+
+
+def test_exit_while_the_session_is_being_named_still_names_it(hx: HX, stub: Stub) -> None:
+    """Leaving with the naming call still out names the session from the first prompt,
+    rather than leaving /resume a row with no name at all."""
+    stub.title_hold = threading.Event()
+    stub.title = "Never arrives"
+    stub.script(say("The retry wraps the request, not the session."))
+    term = hx.tui()
+    term.submit("why does the login test flake on CI")
+    term.wait_for("The retry wraps the request, not the session.")
+    stub.wait_for_title_requests(1)
+    term.type("/exit")
+    started = time.monotonic()
+    term.press("enter")
+    assert term.wait_exit(timeout=5) == 0
+    took = time.monotonic() - started
+    hx.note(f"/exit with the first naming call in flight returned in {took:.2f}s")
+    assert took < 1.0, f"/exit took {took:.2f}s"
+    assert "Traceback" not in term.scrollback()
+    (meta,) = hx.sessions()
+    assert meta["title"] == "why does the login test flake on CI"
+    assert meta["title_pinned"] is False
+
+    # Not a name the user chose: leaving it again, having moved on, renames it.
+    stub.title_hold = None
+    stub.title = "Login test flake on CI"
+    stub.script(say("Pinned the session cookie."))
+    term = hx.tui("resume")
+    term.wait_for("The retry wraps the request, not the session.")
+    term.submit("fix it")
+    term.wait_for("Pinned the session cookie.")
+    term.submit("/clear")
+    term.wait_for("New session started.")
+    stub.wait_for_title_requests(2)
+    term.settle(0.5)
+    (meta,) = [meta for meta in hx.sessions() if meta["prompt_count"] == 2]
+    assert meta["title"] == "Login test flake on CI"
+    term.press("ctrl+d")
+    assert term.wait_exit() == 0
+
+
+def test_resume_into_another_directory_renames_the_session_left(hx: HX, stub: Stub) -> None:
+    """/resume of a session from another directory relaunches HX there. The session left
+    behind is still renamed for what it became - by the new process, in the background."""
+    elsewhere = hx.root / "elsewhere"
+    elsewhere.mkdir()
+    stub.title = "Owl facts"
+    stub.script(say("Owls are nocturnal."))
+    hx.run("-p", "tell me about owls", cwd=elsewhere, check=True)
+
+    stub.title = "Parser question"
+    stub.script(say("It parses rules."), say("Added --verbose."), say("Tests pass."))
+    term = hx.tui()
+    for prompt, reply in (
+        ("what does parser.py do", "It parses rules."),
+        ("now add a --verbose flag to the CLI", "Added --verbose."),
+        ("run the tests", "Tests pass."),
+    ):
+        term.submit(prompt)
+        term.wait_for(reply)
+    stub.wait_for_title_requests(2)
+
+    stub.title = "Verbose flag for the CLI"
+    term.submit("/resume")
+    screen = term.wait_for("Resume session")
+    assert "Owl facts" in screen
+    term.press("enter")
+    term.wait_for("Owls are nocturnal.")
+    term.snapshot("relaunched into the other directory")
+    stub.wait_for_title_requests(3)
+    term.settle(0.5)
+    (left,) = [meta for meta in hx.sessions() if meta["prompt_count"] == 3]
+    assert left["title"] == "Verbose flag for the CLI"
+    (resumed,) = [meta for meta in hx.sessions() if meta["cwd"] == str(elsewhere)]
+    assert resumed["title"] == "Owl facts", "the live session is not renamed"
+
+    # The handoff stops at HX: nothing it starts inherits it, so a nested hx
+    # cannot rename the session a second time.
+    term.submit("!echo left=${HX_RENAME_LEFT_SESSION:-none}")
+    term.wait_for("left=none")
+    term.press("ctrl+d")
+    assert term.wait_exit() == 0
+    assert "Traceback" not in term.scrollback()
+
+
+def test_a_title_the_user_chose_is_never_replaced(hx: HX, stub: Stub) -> None:
+    """/title pins the name: neither the first naming, still out when it is set, nor the
+    rename on /clear replaces it."""
+    stub.title_hold = threading.Event()
+    stub.title = "Generated name"
+    stub.script(say("Hello."), say("A."), say("B."))
+    term = hx.tui()
+    term.submit("hi")
+    term.wait_for("Hello.")
+    stub.wait_for_title_requests(1)
+    # The model is still naming the session when the user names it themselves.
+    term.submit("/title Release planning")
+    term.wait_for("✓ Session title: Release planning")
+    stub.title_hold.set()
+    stub.title_hold = None
+
+    for prompt, reply in (("a", "A."), ("b", "B.")):
+        term.submit(prompt)
+        term.wait_for(reply)
+    term.submit("/clear")
+    term.wait_for("New session started.")
+    term.settle(0.5)
+    assert len(stub.title_requests) == 1, "a pinned name is not asked for again"
+    term.press("ctrl+d")
+    assert term.wait_exit() == 0
+    (meta,) = [meta for meta in hx.sessions() if meta["prompt_count"] == 3]
+    assert meta["title"] == "Release planning"
+    assert meta["title_pinned"] is True
 
 
 def test_copy_puts_the_last_reply_on_the_clipboard(hx: HX, stub: Stub) -> None:

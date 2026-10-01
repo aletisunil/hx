@@ -27,6 +27,10 @@ TITLE_MAX_TOKENS = 32
 MAX_TITLE_CHARS = 50
 """A session row is read at a glance, in a list. Longer names stop being names."""
 TRANSCRIPT_CHARS = 2_000
+"""How much of the conversation the naming call sees."""
+OPENING_CHARS = 500
+"""Of that, how much is the opening. The rest is the latest stretch: a session
+renamed for what it turned into has to be shown what it turned into."""
 
 TITLE_PROMPT = """\
 Name this coding session so it can be recognised in a list of sessions.
@@ -49,7 +53,7 @@ def build_title_request(messages: list[Message], model: str) -> ProviderRequest:
     from hx.core.context import AssembledContext, PromptSection
     from hx.providers.base import ProviderRequest
 
-    transcript = render_transcript(messages)[:TRANSCRIPT_CHARS]
+    transcript = _excerpt(render_transcript(messages))
     context = AssembledContext(
         system=[PromptSection("system", "You name things briefly and precisely.")],
         messages=[
@@ -81,6 +85,15 @@ async def generate_title(
             parts.append(item.text)
 
     return clean_title("".join(parts)) or None, usage
+
+
+def _excerpt(transcript: str) -> str:
+    """The opening and the latest stretch of a transcript too long to send whole."""
+    if len(transcript) <= TRANSCRIPT_CHARS:
+        return transcript
+    opening = transcript[:OPENING_CHARS]
+    latest = transcript[-(TRANSCRIPT_CHARS - OPENING_CHARS) :]
+    return f"{opening}\n[... earlier conversation omitted ...]\n{latest}"
 
 
 def clean_title(raw: str) -> str:

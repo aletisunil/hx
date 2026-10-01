@@ -39,9 +39,12 @@ class SessionMeta:
     updated_at: float
     model: str
     title: str | None = None
-    title_message_count: int = 0
-    """How long the transcript was when the title was written, so closing the
-    session can tell whether the name still describes it."""
+    title_prompt_count: int = 0
+    """How many prompts the session held when the title was written, so the
+    session can tell when the conversation has moved on from its name."""
+    title_pinned: bool = False
+    """The user named the session with ``/title``. Their name is never replaced
+    by a generated one."""
     message_count: int = 0
     """Every message record: the user's prompts, the assistant's replies, and
     the tool-result messages that ride the user role to match the provider wire
@@ -166,14 +169,24 @@ class Session:
         self._pending.append({"kind": "environment", "data": asdict(environment)})
         self.flush()
 
-    def set_title(self, title: str) -> None:
+    def set_title(
+        self, title: str, *, pinned: bool = False, prompt_count: int | None = None
+    ) -> None:
         """Name the session for ``/resume``.
+
+        ``pinned`` marks a name the user chose, which generated names never
+        replace. ``prompt_count`` is how much of the conversation the name
+        describes, when that is less than the whole of it - a name generated in
+        the background describes the transcript as it was when it was asked for.
 
         ``updated_at`` is deliberately left alone: it orders the picker and must
         keep reflecting real activity, not the moment a name was written.
         """
         self.meta.title = title.strip() or None
-        self.meta.title_message_count = len(self.messages)
+        self.meta.title_pinned = pinned and self.meta.title is not None
+        self.meta.title_prompt_count = (
+            self.meta.prompt_count if prompt_count is None else prompt_count
+        )
         self._write_meta()
 
     def record_usage(self, usage: TurnUsage) -> None:

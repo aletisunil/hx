@@ -669,8 +669,14 @@ After the first exchange, HX asks the model for a short name for the session and
 writes it to `~/.hx/sessions/<id>/meta.json`, so `/resume` lists work rather
 than timestamps. It is one small call — cap 32 output tokens, `models.title_model`
 if you want a cheaper model for it — and it is counted in `/cost` like any other.
-If the call fails the session is still named, from your first message. `/title
-<text>` renames it.
+If the call fails, or you leave before it is back, the session is still named,
+from your first message.
+
+The live session is never renamed while it runs, and nothing is renamed on
+`/exit`, which returns your shell at once. A session you leave with `/clear` or
+`/resume` - including a `/resume` into another directory - is renamed in the
+background for what it became. `/title <text>` renames it yourself, and a name
+you chose is never replaced.
 
 `/resume` lists every session except the one you are in: this directory's
 first, then other directories', each row naming where it lives. A session from

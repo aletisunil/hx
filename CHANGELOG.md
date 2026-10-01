@@ -26,6 +26,20 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `/exit` and `ctrl+d` return the shell at once. They used to wait up to 10
+  seconds on a model call renaming the session; sessions are no longer renamed
+  on the way out, in the TUI or with `hx -p`.
+- A name set with `/title` is no longer replaced by a generated one, including
+  one that was still being generated when you set it.
+- The session name is generated from the opening and the latest stretch of the
+  conversation, not only its first 2000 characters.
+- A session left before its first name came back is named from your first
+  message, instead of being listed by `/resume` with no name.
+- A session left with `/resume` into another directory is renamed for what it
+  became, by the HX that starts there, in the background.
+
 ---
 
 ## [0.2.11] - 2026-10-01

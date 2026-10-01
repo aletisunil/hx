@@ -609,6 +609,8 @@ def run_tui_command(parsed: ParsedArgs) -> int:
     from hx.auth.resolve import MissingCredential
     from hx.tui.app import run_tui
 
+    # Taken before anything starts, so no tool, MCP server or nested hx inherits it.
+    rename_left = os.environ.pop(RENAME_LEFT_ENV, None)
     try:
         resume = _resume_target(parsed)
         moved = _adopt_session_directory(parsed, resume)
@@ -648,10 +650,8 @@ def run_tui_command(parsed: ParsedArgs) -> int:
                 notices=runtime.notices,
                 checkpoints=runtime.checkpoints,
                 tracker=runtime.tracker,
+                rename_left=rename_left,
             )
-            # The TUI is down but the provider is not, which is the one moment
-            # the whole session exists and nothing is competing for the screen.
-            await _rename_closed_session(runtime.loop)
         finally:
             runtime.bus.close()
             # Everything, not only the provider: a relaunch replaces this
@@ -661,7 +661,8 @@ def run_tui_command(parsed: ParsedArgs) -> int:
 
     asyncio.run(main_async())
     if relaunch is not None:
-        _relaunch(relaunch)
+        left = runtime.loop.session
+        _relaunch(relaunch, left=left.meta.session_id if left.messages else None)
     return 0
 
 
@@ -724,8 +725,18 @@ def relaunch_argv(argv: list[str], session_id: str) -> list[str]:
     return [*kept, "resume", session_id]
 
 
-def _relaunch(session_id: str) -> None:
+RENAME_LEFT_ENV = "HX_RENAME_LEFT_SESSION"
+"""The session a relaunch left behind, handed to the HX that replaces it.
+
+``/clear`` and ``/resume`` rename the session the user leaves, in the
+background. A relaunch cannot: ``exec`` ends this process before the call is
+back. So the new process does it, as detached as it is everywhere else."""
+
+
+def _relaunch(session_id: str, *, left: str | None = None) -> None:
     """Replace this process with HX resumed on ``session_id``.
+
+    ``left`` is the session being left, for the new process to rename.
 
     ``exec`` rather than a child: the terminal, the pid and the shell's job
     control stay exactly as they were, and there is no parent left waiting.
@@ -738,28 +749,11 @@ def _relaunch(session_id: str) -> None:
     """
     prefix = sys.orig_argv[: len(sys.orig_argv) - len(sys.argv) + 1]
     command = [sys.executable, *prefix[1:], *relaunch_argv(sys.argv[1:], session_id)]
+    if left is not None:
+        os.environ[RENAME_LEFT_ENV] = left
     sys.stdout.flush()
     sys.stderr.flush()
     os.execv(sys.executable, command)
-
-
-RENAME_TIMEOUT_SECONDS = 10.0
-"""A session name is not worth making the user wait for. Exit wins the tie."""
-
-
-async def _rename_closed_session(loop: Any) -> None:
-    """Re-name the session now that it is over, if the work moved on.
-
-    The first name is written after one exchange and never revisited, so
-    ``/resume`` ends up listing opening questions. Bounded and swallowed: this
-    runs while the user is waiting for their shell prompt back.
-    """
-    try:
-        await asyncio.wait_for(loop.retitle_session(), timeout=RENAME_TIMEOUT_SECONDS)
-    except Exception:
-        # Including the timeout. A rename that cannot happen is not an error the
-        # user needs at the moment they are leaving; the old name still stands.
-        return
 
 
 def run_print_command(parsed: ParsedArgs) -> int:
@@ -828,7 +822,6 @@ def run_print_command(parsed: ParsedArgs) -> int:
                     print(f"[mcp] {status.name} unavailable: {status.error}", file=sys.stderr)
         try:
             result = await runtime.loop.run(parsed.prompt, images)
-            await _rename_closed_session(runtime.loop)
         finally:
             await asyncio.sleep(0.05)
             runtime.bus.close()

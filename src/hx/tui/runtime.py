@@ -45,7 +45,7 @@ from hx.tui.views.prompt import Prompt
 from hx.tui.views.transcript import Session
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Coroutine, Sequence
 
     from hx.config import Settings
     from hx.core.events import EventBus
@@ -136,7 +136,7 @@ class HXSession:
         self._queued: list[UserTurn] = []
         self._background: set[asyncio.Task[Any]] = set()
         """Detached work - session renaming - held so it is not garbage
-        collected mid-flight."""
+        collected mid-flight, and cancelled on the way out."""
         self._mouse = False
         self._clear_armed = False
         """Set by one ctrl+c on an empty, idle prompt; a second one exits."""
@@ -185,10 +185,14 @@ class HXSession:
         events = asyncio.create_task(self._consume_events())
         spinner = asyncio.create_task(self._spin())
         branch = asyncio.create_task(self._watch_branch())
+        if left := self.extra.get("rename_left"):
+            self._detach(self._rename_left_behind(left))
         try:
             await self.runner.run()
         finally:
-            for task in (events, spinner, branch, self._turn, self._side):
+            # Detached work included: renaming a session left with /clear is not
+            # worth the user waiting for their shell prompt. Its old name stands.
+            for task in (events, spinner, branch, self._turn, self._side, *self._background):
                 if task is not None and not task.done():
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
@@ -489,9 +493,29 @@ class HXSession:
         """
         if not session.messages:
             return
-        task = asyncio.create_task(self.loop.retitle_session(session))
+        self._detach(self.loop.retitle_session(session))
+
+    async def _rename_left_behind(self, session_id: str) -> None:
+        """Rename the session a ``/resume`` into another directory left behind.
+
+        The process that left it was replaced before it could; see
+        :data:`hx.cli.RENAME_LEFT_ENV`. A session that cannot be read is simply
+        not renamed - its old name still stands.
+        """
+        from hx.core.session import load_session
+
+        try:
+            session = await asyncio.to_thread(load_session, session_id)
+        except Exception:
+            return
+        if session.messages:
+            await self.loop.retitle_session(session)
+
+    def _detach(self, work: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        task = asyncio.create_task(work)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+        return task
 
     def start_new_session(self) -> None:
         """Fresh transcript, same directory. The old session stays on disk."""
@@ -1139,9 +1163,7 @@ class HXSession:
                 self._notice(f"Could not attach the image: {error}", "error")
                 self.runner.request_immediate_render()
 
-        task = asyncio.create_task(attach())
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
+        self._detach(attach())
 
     async def _attach_images(self, paths: list[Path] | None) -> None:
         """Read, normalise and attach, off the event loop.

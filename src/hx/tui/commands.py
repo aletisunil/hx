@@ -504,7 +504,7 @@ async def cmd_title(ctx: CommandContext, args: str) -> None:
             "info" if current else "warning",
         )
         return
-    session.set_title(args.strip())
+    session.set_title(args.strip(), pinned=True)
     ctx.app.notice(f"Session title: {session.meta.title}", "success")
 
 

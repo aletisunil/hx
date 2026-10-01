@@ -352,7 +352,8 @@ class AgentLoop:
         moment ``run`` returns - a background task would simply be killed.
 
         Naming must never cost the user a turn, so every failure falls back to
-        the first thing they said.
+        the first thing they said - including leaving before the call is back,
+        which would otherwise list the session in ``/resume`` with no name.
         """
         if self.origin is not None or self.session.meta.title or self._cancelled:
             return
@@ -361,37 +362,50 @@ class AgentLoop:
         if messages is None:
             return
 
-        title = await self._ask_for_title(messages, self.session)
         from hx.core.title import fallback_title
+
+        try:
+            title = await self._ask_for_title(messages, self.session)
+        except asyncio.CancelledError:
+            if not self.session.meta.title:
+                self.session.set_title(fallback_title(messages))
+            raise
+        # The user may have named it with /title while the call was out; the
+        # turn is over by then, and their name stands.
+        if self.session.meta.title:
+            return
 
         self.session.set_title(title or fallback_title(messages))
 
-    async def retitle_session(self, session: Session | None = None) -> None:
-        """Rename a session for what it turned into, as it closes.
+    async def retitle_session(self, target: Session) -> None:
+        """Rename a session for what it turned into, as the user leaves it.
 
         The first name is written after one exchange, so it describes an opening
-        question. Two hours later it is the wrong label on the row the user has
-        to recognise in ``/resume``, and the list gives them no way to know that.
+        question. ``/clear`` and ``/resume`` both leave a session behind, and
+        that is the moment to name it for what it became - detached, so nobody
+        waits on it. The live session is never renamed while it runs.
 
-        ``session`` names the one to rename, for the cases where it is no longer
-        the live one - ``/clear`` and ``/resume`` both leave a session behind.
-
-        Only when the transcript grew since the name was written, and never at
-        the cost of the name already there: a rename that fails leaves the old
-        title alone rather than replacing something specific with a guess.
+        Only when the conversation changed since the name was written, never
+        over a name the user chose, and never at the cost of the name already
+        there: a rename that fails leaves the old title alone rather than
+        replacing something specific with a guess.
         """
         if self.origin is not None:
             return
 
-        target = session if session is not None else self.session
+        if target.meta.title_pinned:
+            return
         messages = self._nameable_messages(target)
         if messages is None:
             return
-        if len(target.messages) <= target.meta.title_message_count:
+        prompt_count = target.meta.prompt_count
+        if prompt_count == target.meta.title_prompt_count:
             return
 
-        if title := await self._ask_for_title(messages, target):
-            target.set_title(title)
+        title = await self._ask_for_title(messages, target)
+        # The user may have named it while the call was out; their name stands.
+        if title and not target.meta.title_pinned:
+            target.set_title(title, prompt_count=prompt_count)
 
     def _nameable_messages(self, session: Session) -> list[Message] | None:
         """The transcript a name is derived from, or ``None`` if there is none."""

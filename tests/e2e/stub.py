@@ -188,6 +188,9 @@ class Stub:
         self.title_requests: list[Request] = []
         self.unexpected: list[str] = []
         self.title = "E2E session"
+        self.title_hold: threading.Event | None = None
+        """When set, a naming call is answered only once this event is - a slow
+        title model, caught with the call still out."""
         self.models = list(CATALOGUE)
         self.model_fetches = 0
         self._closing = threading.Event()
@@ -237,6 +240,19 @@ class Stub:
                 self._arrived.wait(remaining)
             return list(self.requests)
 
+    def wait_for_title_requests(self, count: int, timeout: float = 15.0) -> list[Request]:
+        """Block until ``count`` session-naming requests have arrived."""
+        deadline = time.monotonic() + timeout
+        with self._arrived:
+            while len(self.title_requests) < count:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(
+                        f"expected {count} title request(s), got {len(self.title_requests)}"
+                    )
+                self._arrived.wait(remaining)
+            return list(self.title_requests)
+
     def log(self) -> list[dict[str, Any]]:
         """What the report records: each request's model, last user text and tools."""
         return [
@@ -275,9 +291,17 @@ class Stub:
                     return
                 request = Request(body=body, headers=dict(self.headers.items()))
                 if request.system == TITLE_SYSTEM:
-                    with stub._lock:
+                    with stub._arrived:
                         stub.title_requests.append(request)
-                    self._stream(Reply(text=stub.title, prompt_tokens=300, completion_tokens=5))
+                        stub._arrived.notify_all()
+                    self._stream(
+                        Reply(
+                            text=stub.title,
+                            prompt_tokens=300,
+                            completion_tokens=5,
+                            hold=stub.title_hold,
+                        )
+                    )
                     return
                 if unanswered := _unanswered_tool_calls(request.messages):
                     # Every upstream rejects a tool call left without its
