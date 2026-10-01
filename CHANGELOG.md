@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.12] - 2026-10-01
+
 ### Fixed
 
 - `/exit` and `ctrl+d` return the shell at once. They used to wait up to 10
@@ -790,7 +794,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.11...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.12...HEAD
+[0.2.12]: https://github.com/aletisunil/hx/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/aletisunil/hx/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/aletisunil/hx/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/aletisunil/hx/compare/v0.2.8...v0.2.9
