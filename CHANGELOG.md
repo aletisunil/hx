@@ -28,6 +28,24 @@ the project follows [semantic versioning](https://semver.org/).
 
 ---
 
+## [0.2.11] - 2026-10-01
+
+### Fixed
+
+- `esc` while a tool runs no longer breaks the session: the next question is
+  answered instead of every later turn failing. A session that was interrupted
+  or killed mid-tool before this release also carries on after `hx resume`.
+- `esc` during a `Bash` command stops the command. The next `Bash` call gets its
+  own output and exit code, not what was left of the one stopped.
+- An interrupted call keeps what it printed, on screen and for the model, and
+  reads "Interrupted after <time>" instead of looking like a failure.
+- A tool that finished keeps its result when `esc` lands while its
+  `PostToolUse` hook runs.
+- `Bash` shows a short line such as "Starting..." as soon as it is printed,
+  rather than only when more output follows.
+
+---
+
 ## [0.2.10] - 2026-09-29
 
 ### Fixed
@@ -758,7 +776,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.10...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.11...HEAD
+[0.2.11]: https://github.com/aletisunil/hx/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/aletisunil/hx/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/aletisunil/hx/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/aletisunil/hx/compare/v0.2.7...v0.2.8
