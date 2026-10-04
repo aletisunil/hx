@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.15] - 2026-10-04
+
 ### Changed
 
 - `/login` and `hx auth login` list the accounts as OpenAI, Claude, OpenRouter, Devin. At the
@@ -897,7 +901,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.14...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.15...HEAD
+[0.2.15]: https://github.com/aletisunil/hx/compare/v0.2.14...v0.2.15
 [0.2.14]: https://github.com/aletisunil/hx/compare/v0.2.13...v0.2.14
 [0.2.13]: https://github.com/aletisunil/hx/compare/v0.2.12...v0.2.13
 [0.2.12]: https://github.com/aletisunil/hx/compare/v0.2.11...v0.2.12
