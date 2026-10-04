@@ -657,3 +657,33 @@ def test_unknown_command(hx: HX) -> None:
     term.settle()
     term.snapshot("unknown command")
     assert "Unknown command" in term.text() or "unknown command" in term.text()
+
+
+SIGN_IN_ORDER = (
+    "OpenAI (ChatGPT Plus/Pro)",
+    "Claude (Pro/Max, via Claude Code)",
+    "OpenRouter API key",
+    "Devin (personal or Enterprise)",
+)
+
+
+def test_sign_in_offers_openai_claude_openrouter_devin(hx: HX) -> None:
+    """/login and `hx auth login` list the accounts in one order: OpenAI, Claude, OpenRouter,
+    Devin. Enter at the terminal's menu still picks OpenRouter, as it did when it came first."""
+    term = hx.tui()
+    term.submit("/login")
+    screen = term.wait_for("Devin (personal or Enterprise)")
+    rows = [row for row in screen.split("\n") if any(label in row for label in SIGN_IN_ORDER)]
+    assert [label for row in rows for label in SIGN_IN_ORDER if label in row] == list(SIGN_IN_ORDER)
+    assert "OpenAI" in rows[0] and "→" in rows[0], "the first account is the one selected"
+    term.snapshot("sign-in accounts")
+    term.press("esc")
+
+    menu = hx.tui("auth", "login", ready="Choice")
+    screen = menu.text()
+    numbered = [f"{index}  {label}" for index, label in enumerate(SIGN_IN_ORDER, start=1)]
+    assert all(line in screen for line in numbered), screen
+    assert "Choice [3]:" in screen
+    menu.snapshot("hx auth login menu")
+    menu.press("enter")
+    menu.wait_for("OpenRouter API key")

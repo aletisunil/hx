@@ -77,10 +77,9 @@ def test_every_tag_has_a_changelog_section(hx: HX) -> None:
 def test_auth_reports_where_the_key_comes_from(hx: HX) -> None:
     """`hx auth` masks the key and says the environment overrides the saved file."""
     result = hx.run("auth", check=True)
-    first = result.stdout.splitlines()[0]
-    assert first.startswith("openrouter")
-    assert "sk-or-…cafe" in first
-    assert "environment (HX_OPENROUTER_API_KEY)" in first
+    (line,) = [line for line in result.stdout.splitlines() if line.startswith("openrouter")]
+    assert "sk-or-…cafe" in line
+    assert "environment (HX_OPENROUTER_API_KEY)" in line
     assert "e2e0000" not in result.stdout, "the key must never be printed whole"
     assert "tavily" in result.stdout
 

@@ -1432,8 +1432,10 @@ def _choose_provider() -> str:
     print("Sign in to:")
     for index, spec in enumerate(registry.SPECS, start=1):
         print(f"  {index}  {spec.label}")
+    # Enter still means OpenRouter, wherever it sits in the list.
+    default = str(next(i for i, s in enumerate(registry.SPECS, start=1) if s.id == OPENROUTER))
     try:
-        choice = input("Choice [1]: ").strip() or "1"
+        choice = input(f"Choice [{default}]: ").strip() or default
     except (EOFError, KeyboardInterrupt):
         print()
         return OPENROUTER

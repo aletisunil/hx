@@ -145,13 +145,7 @@ def _build_claude_code(
 
 
 SPECS: tuple[ProviderSpec, ...] = (
-    ProviderSpec(
-        id=OPENROUTER,
-        label="OpenRouter API key",
-        kind=AuthKind.API_KEY,
-        namespace=None,
-        build=_build_openrouter,
-    ),
+    # In the order /login and `hx auth login` offer them.
     ProviderSpec(
         id=CODEX,
         label="OpenAI (ChatGPT Plus/Pro)",
@@ -160,18 +154,25 @@ SPECS: tuple[ProviderSpec, ...] = (
         build=_build_codex,
     ),
     ProviderSpec(
-        id=DEVIN,
-        label="Devin (personal or Enterprise)",
-        kind=AuthKind.SUBSCRIPTION,
-        namespace=f"{DEVIN}/",
-        build=_build_devin,
-    ),
-    ProviderSpec(
         id=CLAUDE_CODE,
         label="Claude (Pro/Max, via Claude Code)",
         kind=AuthKind.SUBSCRIPTION,
         namespace=f"{CLAUDE_CODE}/",
         build=_build_claude_code,
+    ),
+    ProviderSpec(
+        id=OPENROUTER,
+        label="OpenRouter API key",
+        kind=AuthKind.API_KEY,
+        namespace=None,
+        build=_build_openrouter,
+    ),
+    ProviderSpec(
+        id=DEVIN,
+        label="Devin (personal or Enterprise)",
+        kind=AuthKind.SUBSCRIPTION,
+        namespace=f"{DEVIN}/",
+        build=_build_devin,
     ),
 )
 

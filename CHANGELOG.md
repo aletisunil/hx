@@ -26,6 +26,11 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `/login` and `hx auth login` list the accounts as OpenAI, Claude, OpenRouter, Devin. At the
+  `hx auth login` menu, Enter still picks OpenRouter.
+
 ### Fixed
 
 - `/login claude-code` behind a network whose TLS inspection signs with a certificate not
