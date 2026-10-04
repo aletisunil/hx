@@ -579,8 +579,9 @@ def test_a_certificate_failure_says_how_to_fix_it(hx: HX, claude: FakeClaude) ->
     claude.script({"error": CERT_FAILURE}, say("Through the proxy now."))
     term = hx.tui(env={"HX_CA_BUNDLE": str(bundle)})
     term.submit("hello")
-    term.wait_for("holds the CA")
-    # The path is wider than the screen and wraps mid-name: compare without the breaks.
+    # The path is wider than the screen and wraps mid-name, and where the words after it
+    # break depends on how long the temp dir is: wait and compare without the breaks.
+    term.wait_for(lambda screen: "holdstheCA" in "".join(screen.split()))
     solid = "".join(term.text().split())
     assert f"HXisverifyingTLSagainst{bundle};checkthatitholdstheCAyournetwork" in solid
     assert "setHX_CA_BUNDLE" not in solid

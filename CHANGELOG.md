@@ -56,8 +56,9 @@ the project follows [semantic versioning](https://semver.org/).
 - A subagent that fails - a provider error, a refused prompt, the turn limit -
   reports why to the parent model, instead of "(the subagent returned no
   text)".
-- `Glob` with a pattern of `.` returns an error saying to use `*` or `**/*`,
-  instead of a Python `IndexError`.
+- `Glob` with a pattern of `.` or `./` returns an error saying to use `*` or
+  `**/*`, and an absolute pattern one naming the `path` and relative pattern
+  to send instead, on every Python version, instead of a Python exception.
 - With `tui.enterWhileBusy` set to `"steer"`, `alt+enter` queues a message
   behind the running turn, as the prompt says. It used to steer like `enter`,
   leaving no way to queue in that mode.

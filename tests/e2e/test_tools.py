@@ -300,14 +300,27 @@ def test_todo_list_is_shown(hx: HX, stub: Stub) -> None:
 
 
 def test_glob_on_a_bare_directory_pattern_is_a_usable_error(hx: HX, stub: Stub) -> None:
-    """A pattern that names only a directory (".") is answered with what to use instead,
-    rather than a Python traceback, and the model recovers with a real pattern."""
+    """A pattern that names only a directory (".", "./") or an absolute path is answered
+    with what to use instead, the same on every Python, rather than a traceback or
+    pathlib's own wording; the model recovers with a real pattern."""
     (hx.project / "main.py").write_text("print(1)\n")
-    stub.script(call("Glob", pattern="."), call("Glob", pattern="*"), say("One file: main.py."))
+    stub.script(
+        call("Glob", pattern="."),
+        call("Glob", pattern="./"),
+        call("Glob", pattern=f"{hx.project}/*.py"),
+        call("Glob", pattern="*"),
+        say("One file: main.py."),
+    )
     result = hx.run("-p", "what files are here?", check=True)
 
     assert result.stdout == "One file: main.py.\n"
-    first, second = stub.requests[1].tool_results()[-1], stub.requests[2].tool_results()[-1]
-    assert "it names a directory, not files. Use '*' or '**/*'." in first
-    assert "IndexError" not in first
-    assert "main.py" in second
+    dot, dot_slash, absolute, real = (stub.requests[i].tool_results()[-1] for i in (1, 2, 3, 4))
+    for answer in (dot, dot_slash):
+        assert "it names a directory, not files. Use '*' or '**/*'." in answer
+    assert (
+        f"bad pattern '{hx.project}/*.py': it is an absolute path. Pass the directory as "
+        f"'path' and a relative pattern, such as path='{hx.project}', pattern='*.py'."
+    ) in absolute
+    for answer in (dot, dot_slash, absolute):
+        assert "Error" not in answer and "Unacceptable" not in answer
+    assert "main.py" in real

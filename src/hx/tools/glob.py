@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
@@ -47,21 +47,12 @@ class GlobTool(Tool):
             raise ToolError(f"{root}: not a directory")
 
         limit = int(params.get("limit") or DEFAULT_LIMIT)
+        pattern = str(params["pattern"])
+        _check_pattern(pattern)
         try:
-            matches = [
-                path
-                for path in root.glob(str(params["pattern"]))
-                if path.is_file() and not _ignored(path)
-            ]
+            matches = [path for path in root.glob(pattern) if path.is_file() and not _ignored(path)]
         except (ValueError, OSError) as exc:
             raise ToolError(f"bad pattern: {exc}") from exc
-        except IndexError as exc:
-            # Python 3.12's pathlib crashes on a pattern with no parts left once
-            # normalised - ".", "./" - instead of matching nothing.
-            raise ToolError(
-                f"bad pattern {params['pattern']!r}: it names a directory, not files. "
-                "Use '*' or '**/*'."
-            ) from exc
 
         matches.sort(key=_mtime, reverse=True)
         shown = matches[:limit]
@@ -69,6 +60,27 @@ class GlobTool(Tool):
         if len(matches) > limit:
             body += f"\n\n... {len(matches) - limit} more matches (raise limit to see them)"
         return ToolResult(content=body, summary=f"{len(matches)} matches")
+
+
+def _check_pattern(pattern: str) -> None:
+    """Refuse what pathlib cannot glob, before it does: each Python version fails
+    differently on these - IndexError, AttributeError, ValueError - none of which
+    tells the model what to send instead."""
+    parts = PurePath(pattern).parts
+    if not parts:
+        # ".", "./", "": no parts left once normalised.
+        raise ToolError(
+            f"bad pattern {pattern!r}: it names a directory, not files. Use '*' or '**/*'."
+        )
+    if PurePath(pattern).is_absolute():
+        literal = 0
+        while literal < len(parts) - 1 and not any(c in parts[literal] for c in "*?["):
+            literal += 1
+        directory, rest = PurePath(*parts[:literal]), PurePath(*parts[literal:])
+        raise ToolError(
+            f"bad pattern {pattern!r}: it is an absolute path. Pass the directory as 'path' "
+            f"and a relative pattern, such as path={str(directory)!r}, pattern={str(rest)!r}."
+        )
 
 
 def _ignored(path: Path) -> bool:
