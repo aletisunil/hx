@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.13] - 2026-10-04
+
 ### Added
 
 - Claude Pro/Max route: `hx auth login claude-code`, then
@@ -52,7 +56,6 @@ the project follows [semantic versioning](https://semver.org/).
 - A subagent that fails - a provider error, a refused prompt, the turn limit -
   reports why to the parent model, instead of "(the subagent returned no
   text)".
-
 - `Glob` with a pattern of `.` returns an error saying to use `*` or `**/*`,
   instead of a Python `IndexError`.
 - With `tui.enterWhileBusy` set to `"steer"`, `alt+enter` queues a message
@@ -829,7 +832,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.12...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.13...HEAD
+[0.2.13]: https://github.com/aletisunil/hx/compare/v0.2.12...v0.2.13
 [0.2.12]: https://github.com/aletisunil/hx/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/aletisunil/hx/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/aletisunil/hx/compare/v0.2.9...v0.2.10
