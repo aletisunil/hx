@@ -294,7 +294,13 @@ export HX_CA_BUNDLE=/path/to/corp-ca.pem   # SSL_CERT_FILE and REQUESTS_CA_BUNDL
 `HX_SSL_NO_VERIFY=1` turns verification off entirely; it prints a warning at
 startup every session, because it is not a fix. A TLS failure is reported in
 one line - `/model` and the startup notice both name the certificate problem
-rather than reporting an empty catalogue with no cause.
+rather than reporting an empty catalogue with no cause. A file that holds no
+certificates is ignored, with a startup notice that says so.
+
+"Unsupported certificate purpose" (or "unsuitable") is different: the CA is
+trusted, but the proxy signs with a certificate that is not valid for servers,
+so no CA setting fixes it. The network has to fix that certificate or exempt
+the service from inspection; until then only `HX_SSL_NO_VERIFY=1` gets through.
 
 The same settings cover the `claude-code` route, whose requests Claude Code
 makes with its own TLS stack: HX passes `HX_CA_BUNDLE` on to it as

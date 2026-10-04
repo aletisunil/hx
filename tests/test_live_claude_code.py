@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -348,3 +349,76 @@ async def test_a_device_certificate_reaches_the_cli(
     assert "4417" in reply
     assert "api.anthropic.com" in mitm.intercepted
     assert "api.anthropic.com" not in mitm.rejected
+
+
+WRONG_PURPOSE_HINT = "Your network intercepts TLS with a certificate that is not valid for servers."
+
+
+async def test_an_interception_ca_of_the_wrong_purpose_names_the_fix(
+    hx_home: Path, tmp_path: Path, mitm: InterceptingProxy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Trusted, yet refused: the proxy signs through a CA that may not vouch for servers.
+    Adding the CA again changes nothing, so the hint must not say to."""
+    mitm.wrong_purpose = True
+    monkeypatch.setenv("HX_CA_BUNDLE", str(mitm.ca_file))
+    error, _ = await _tool_turn(tmp_path)
+    assert error is not None
+    assert "INVALID_PURPOSE" in error
+    assert WRONG_PURPOSE_HINT in error
+    assert "holds the CA" not in error
+    assert "api.anthropic.com" in mitm.rejected
+    assert "api.anthropic.com" not in mitm.intercepted
+
+
+class _PastedCode:
+    """The sign-in dialog, with a code that gets as far as the token exchange: the
+    state is the one the CLI asked for, the code itself is made up."""
+
+    def __init__(self) -> None:
+        self.url = ""
+
+    def show_url(self, url: str, message: str) -> None:
+        self.url = url
+
+    async def prompt_paste(self, prompt: str) -> str:
+        state = re.search(r"state=([^&\s]+)", self.url)
+        assert state is not None, self.url
+        return f"made-up-code#{state.group(1)}"
+
+
+@pytest.mark.parametrize("wrong_purpose", [True, False], ids=["wrong-purpose", "control"])
+async def test_signing_in_behind_an_interception_ca_of_the_wrong_purpose(
+    tmp_path: Path, mitm: InterceptingProxy, monkeypatch: pytest.MonkeyPatch, wrong_purpose: bool
+) -> None:
+    """/login through such a network, as a user on Claude Code 2.1.289 met it: the code is
+    pasted and the token exchange is refused. The failure says why and what to do, without
+    the sign-in URL. The control - the same proxy, signing as it should - reaches the server,
+    which turns the made-up code away. Claude Code's state goes to a directory of the test's
+    own, so the machine's login is never touched; no browser opens."""
+    from hx.auth import claude_code as cc_auth
+
+    if cc_auth.find_cli() is None:
+        pytest.skip("Claude Code is not installed")
+    mitm.wrong_purpose = wrong_purpose
+    monkeypatch.setenv("HX_CA_BUNDLE", str(mitm.ca_file))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    no_browser = tmp_path / "bin"
+    no_browser.mkdir()
+    for opener in ("open", "xdg-open"):
+        (no_browser / opener).write_text("#!/bin/sh\nexit 0\n")
+        (no_browser / opener).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{no_browser}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(cc_auth.LoginFailed) as failed:
+        await cc_auth.login_interactive(_PastedCode())
+    message = str(failed.value)
+    assert "https://" not in message
+    assert "Paste code" not in message
+    if wrong_purpose:
+        assert message.startswith(
+            "`claude auth login` failed: unsupported certificate purpose. " + WRONG_PURPOSE_HINT
+        ), message
+        assert "platform.claude.com" in mitm.rejected
+    else:
+        assert message == "`claude auth login` failed: Request failed with status code 400"
+        assert "platform.claude.com" in mitm.intercepted

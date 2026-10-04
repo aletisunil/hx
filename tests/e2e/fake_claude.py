@@ -11,6 +11,7 @@ State lives in ``$E2E_CLAUDE_DIR``:
   test starts; ``cursor`` says how far it has been read;
 * ``auth.json`` - what ``claude auth status`` reports (absent: signed out);
 * ``status_delay`` - seconds ``claude auth status`` takes to answer;
+* ``login_error`` - why ``claude auth login`` fails, whatever code is pasted;
 * ``version`` and ``models.json`` - which Claude Code this is: what
   ``--version`` prints and the models ``initialize`` lists (absent: 2.1.205
   and :data:`MODELS`);
@@ -130,8 +131,13 @@ def auth(args: list[str]) -> int:
         sys.stdout.write("Paste code here if prompted > ")
         sys.stdout.flush()
         code = sys.stdin.readline().strip()
-        if code != "good-code":
-            print("\nLogin failed: invalid code")
+        failure = STATE / "login_error"
+        if failure.exists() or code != "good-code":
+            # On the prompt's line, as Claude Code 2.1 prints it when stdin is a pipe.
+            reason = (
+                failure.read_text() if failure.exists() else "Request failed with status code 400"
+            )
+            print(f"Login failed: {reason}")
             return 1
         path.write_text(
             json.dumps(

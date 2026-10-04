@@ -41,11 +41,38 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
 def ca_bundle() -> Path | None:
-    """The CA bundle the environment names, if it points at a real file."""
+    """The CA bundle the environment names, if it points at a file of certificates."""
+    named = _named_bundle()
+    if named is None or _load_error(named[1]) is not None:
+        return None
+    return named[1]
+
+
+def _named_bundle() -> tuple[str, Path] | None:
+    """The first of :data:`CA_BUNDLE_VARS` that names a real file, and that file."""
     for name in CA_BUNDLE_VARS:
         raw = (os.environ.get(name) or "").strip()
         if raw and Path(raw).expanduser().is_file():
-            return Path(raw).expanduser()
+            return name, Path(raw).expanduser()
+    return None
+
+
+def _load_error(path: Path) -> str | None:
+    """Why ``path`` cannot serve as a CA bundle - a DER file, a key, an empty
+    file - or ``None`` when it can. Asked again only when the file changes."""
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    return _load_error_of(path, stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=4)
+def _load_error_of(path: Path, mtime_ns: int, size: int) -> str | None:
+    try:
+        ssl.create_default_context(cafile=str(path))
+    except (ssl.SSLError, OSError, ValueError) as exc:
+        return _flatten(getattr(exc, "reason", None) or str(exc))
     return None
 
 
@@ -80,6 +107,15 @@ def tls_notice() -> str | None:
     """One line for the startup transcript when TLS is not stock."""
     if verification_disabled():
         return f"{NO_VERIFY_VAR} is set: TLS certificates are not being verified."
+    named = _named_bundle()
+    if named is not None and (error := _load_error(named[1])) is not None:
+        # Ignored, as OpenSSL and Node ignore a CA file they cannot read: failing
+        # to start would cost every route, the ones this file is not for too.
+        name, path = named
+        return (
+            f"{name} names {path}, which holds no usable CA certificates ({error}). "
+            f"Verifying TLS against the system trust store instead."
+        )
     bundle = ca_bundle()
     return f"Verifying TLS against {bundle}." if bundle is not None else None
 
@@ -108,13 +144,29 @@ _CERT_FAILURE = re.compile(
     r"certificate verif"
     r"|self[- ]signed certificate"
     r"|unable to (?:get local issuer|verify the first) certificate"
-    r"|UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT|SELF_SIGNED_CERT_IN_CHAIN",
+    r"|UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT|SELF_SIGNED_CERT_IN_CHAIN"
+    r"|certificate purpose|INVALID_PURPOSE",
     re.IGNORECASE,
 )
 
+_WRONG_PURPOSE = re.compile(r"(?:unsupported|unsuitable) certificate purpose|INVALID_PURPOSE")
+"""A chain the client does trust, but with a certificate in it - typically the
+issuing CA of a network that intercepts TLS - that may not serve as a TLS
+server's: OpenSSL says "unsuitable", the BoringSSL in Claude Code "unsupported"."""
 
-def tls_hint() -> str:
-    """What to do about a certificate the client would not trust."""
+
+def tls_hint(reason: str = "") -> str:
+    """What to do about a certificate the client would not accept.
+
+    ``reason`` is the client's own words, when there are any: a certificate of
+    the wrong purpose is already trusted, so adding its CA again changes nothing.
+    """
+    if _WRONG_PURPOSE.search(reason):
+        return (
+            "Your network intercepts TLS with a certificate that is not valid for servers. "
+            "Ask its administrator to fix that certificate or to exclude this service from "
+            f"inspection; until then, {NO_VERIFY_VAR}=1 turns verification off."
+        )
     bundle = ca_bundle()
     if bundle is not None:
         return (
@@ -130,7 +182,7 @@ def tls_hint() -> str:
 def with_tls_hint(message: str) -> str:
     """``message``, followed by :func:`tls_hint` when it reports a certificate
     failure - in any client's words: OpenSSL's, Node's, Claude Code's."""
-    hint = tls_hint()
+    hint = tls_hint(message)
     if not _CERT_FAILURE.search(message) or hint in message:
         return message
     return f"{message.rstrip().rstrip('.')}. {hint}"
@@ -156,7 +208,8 @@ def describe(exc: BaseException) -> str:
                 or getattr(err, "reason", None)
                 or "certificate verify failed"
             )
-            return f"TLS certificate verification failed ({_flatten(reason)}). {tls_hint()}"
+            reason = _flatten(reason)
+            return f"TLS certificate verification failed ({reason}). {tls_hint(reason)}"
         if isinstance(err, ssl.SSLError):
             return f"TLS handshake failed: {_flatten(err.reason or str(err))}."
     if isinstance(exc, httpx.TimeoutException):

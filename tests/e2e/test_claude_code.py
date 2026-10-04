@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import trustme
+
 from tests.e2e import stub as openrouter
 from tests.e2e.conftest import HX, FakeClaude
 from tests.e2e.test_print import png
@@ -497,6 +499,13 @@ CERT_FAILURE = (
 """What Claude Code 2.1 reports when its connection meets a CA it does not trust."""
 
 
+def corporate_ca(hx: HX) -> Path:
+    """A network's CA certificate, as a PEM file HX can load."""
+    path = hx.root / "corp-ca.pem"
+    trustme.CA(organization_name="Corp").cert_pem.write_to_path(str(path))
+    return path
+
+
 def test_corporate_tls_settings_reach_claude_code(
     hx: HX, claude: FakeClaude, project: Path
 ) -> None:
@@ -505,8 +514,7 @@ def test_corporate_tls_settings_reach_claude_code(
     Node's switch, and Claude Code's own certificate settings survive the scrub - while
     everything that moves billing off the subscription is still dropped."""
     (project / "a.txt").write_text("alpha=17\n")
-    bundle = hx.root / "corp-ca.pem"
-    bundle.write_text("-----BEGIN CERTIFICATE-----\nnot parsed by the fake\n")
+    bundle = corporate_ca(hx)
     claude.login()
     claude.use()
     claude.script(calls(("Read", {"file_path": "a.txt"})), say("alpha is 17."))
@@ -558,6 +566,18 @@ def test_corporate_tls_settings_reach_claude_code(
     assert not any(name.startswith("NODE_") for name in env)
     assert not any(name.startswith("CLAUDE_CODE_CLIENT") for name in env)
 
+    # A bundle that holds no certificates - a DER file, a stale path's leftovers - is said
+    # out loud and left out, as OpenSSL and Node leave it: HX starts and verifies against
+    # the system store, and Claude Code is not handed a file it cannot read either.
+    broken = hx.root / "broken-ca.pem"
+    broken.write_text("-----BEGIN CERTIFICATE-----\nnot a certificate\n")
+    claude.script(say("Still verifying."))
+    result = hx.run("-p", "hello", env={"SSL_CERT_FILE": str(broken)}, check=True)
+    assert result.stdout == "Still verifying.\n"
+    assert f"SSL_CERT_FILE names {broken}, which holds no usable CA certificates" in result.stderr
+    assert "Verifying TLS against the system trust store instead." in result.stderr
+    assert "NODE_EXTRA_CA_CERTS" not in claude.spawns(tools=True)[-1]["env"]
+
 
 def test_a_certificate_failure_says_how_to_fix_it(hx: HX, claude: FakeClaude) -> None:
     """Claude Code refusing the network's CA names HX's fix after its own words; with a
@@ -573,8 +593,7 @@ def test_a_certificate_failure_says_how_to_fix_it(hx: HX, claude: FakeClaude) ->
         "system trust store or set HX_CA_BUNDLE to its PEM file."
     ) in result.stderr
 
-    bundle = hx.root / "corp-ca.pem"
-    bundle.write_text("-----BEGIN CERTIFICATE-----\n")
+    bundle = corporate_ca(hx)
     claude.script({"error": CERT_FAILURE}, say("Through the proxy now."))
     term = hx.tui(env={"HX_CA_BUNDLE": str(bundle)})
     term.submit("hello")
@@ -652,6 +671,64 @@ def test_signing_in_from_the_tui(hx: HX, claude: FakeClaude) -> None:
     term.wait_for("Claude Code signed in (e2e@example.com, max plan)")
     term.snapshot("signed in")
     assert json.loads((claude.state / "auth.json").read_text())["loggedIn"] is True
+
+
+WRONG_PURPOSE_HINT = (
+    "Your network intercepts TLS with a certificate that is not valid for servers. Ask its "
+    "administrator to fix that certificate or to exclude this service from inspection; until "
+    "then, HX_SSL_NO_VERIFY=1 turns verification off."
+)
+
+
+def test_a_network_that_breaks_sign_in_says_why_and_what_to_do(hx: HX, claude: FakeClaude) -> None:
+    """Behind TLS inspection whose certificate may not serve a TLS server, Claude Code's sign-in
+    fails after the code is pasted. The notice gives Claude Code's reason and the fix - not the
+    sign-in URL, which the dialog showed already - and not "add the CA", which is already
+    trusted. Once the network is fixed, signing in again lists the subscription's models; a
+    turn that meets the same network says the same."""
+    bundle = corporate_ca(hx)
+    (claude.state / "login_error").write_text("unsupported certificate purpose")
+    term = hx.tui(env={"HX_CA_BUNDLE": str(bundle)})
+    term.submit("/login claude-code")
+    term.wait_for("https://claude.example/oauth/authorize")
+    term.paste("good-code")
+    term.press("enter")
+    term.wait_for(lambda screen: "verificationoff." in "".join(screen.split()))
+    solid = "".join(term.text().split())
+    expected = "Sign-infailed:`claudeauthlogin`failed:unsupportedcertificatepurpose."
+    assert "".join(f"{expected}{WRONG_PURPOSE_HINT}".split()) in solid
+    assert "claude.example/oauth" not in solid
+    assert "Pastecode" not in solid
+    assert "holdstheCA" not in solid
+    # Wrapped, the notice keeps its colour and nothing else: its foreground's 102 once
+    # opened a bright green background under every line after the first.
+    notice = [y for y, row in enumerate(term.text().split("\n")) if "intercepts TLS" in row]
+    assert notice
+    with term._lock:
+        filled = {term.screen.buffer[notice[0]][x].bg for x in range(term.columns)}
+    assert filled == {"default"}
+    term.snapshot("sign-in refused by the network")
+
+    (claude.state / "login_error").unlink()
+    term.submit("/login claude-code")
+    term.wait_for("https://claude.example/oauth/authorize")
+    term.paste("good-code")
+    term.press("enter")
+    term.wait_for("Claude Code signed in (e2e@example.com, max plan)")
+    term.submit("/model")
+    term.paste("anthropic", newline="")
+    term.wait_for("claude-code/claude-sonnet-5")
+    term.snapshot("subscription models after signing in")
+    term.press("esc")
+
+    # Claude Code 2.1.289's words, measured behind such a proxy.
+    claude.use()
+    claude.script({"error": "API Error: Unable to connect to API (INVALID_PURPOSE)"})
+    result = hx.run("-p", "hello", env={"HX_CA_BUNDLE": str(bundle)})
+    assert result.returncode != 0
+    assert (
+        f"Claude Code: API Error: Unable to connect to API (INVALID_PURPOSE). {WRONG_PURPOSE_HINT}"
+    ) in result.stderr
 
 
 def test_a_subagent_gets_its_own_process_while_the_parent_waits(

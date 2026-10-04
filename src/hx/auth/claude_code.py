@@ -290,6 +290,22 @@ def login_terminal() -> int:
 
 
 _URL = re.compile(r"https://\S+")
+_PASTE_PROMPT = re.compile(r"^.*Paste code[^>]*>\s*")
+_FAILED = re.compile(r"^Login failed:\s*", re.IGNORECASE)
+
+
+def _failure(output: list[str]) -> str | None:
+    """Why ``claude auth login`` failed: its last line of its own, ``unsupported
+    certificate purpose`` from ``Login failed: unsupported certificate purpose``.
+
+    Not the URL it printed before - the screen already showed that, and it is
+    wider than the notice - nor the paste prompt the reason is printed after.
+    """
+    for line in reversed(output):
+        line = _FAILED.sub("", _PASTE_PROMPT.sub("", line)).strip()
+        if line and not _URL.search(line):
+            return line
+    return None
 
 
 class LoginFailed(Exception):
@@ -361,8 +377,8 @@ async def login_interactive(interaction: LoginInteraction) -> LoginStatus:
     forget_status()
 
     if code != 0:
-        tail = " ".join(line.strip() for line in output[-3:] if line.strip())
-        raise LoginFailed(f"`claude auth login` failed: {tail or f'exit {code}'}")
+        reason = _failure(output) or f"exit {code}"
+        raise LoginFailed(net.with_tls_hint(f"`claude auth login` failed: {reason}"))
     current = await status_async(fresh=True)
     if current is None or not current.logged_in:
         raise LoginFailed("Claude Code still reports no login.")

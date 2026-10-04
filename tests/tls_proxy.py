@@ -25,6 +25,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import trustme
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.x509.oid import ExtendedKeyUsageOID
 
 HEADER_LIMIT = 64 * 1024
 
@@ -39,10 +42,15 @@ class InterceptingProxy:
     require_client_cert: bool = False
     """Refuse a client that does not present a certificate from :attr:`ca` -
     the device certificate a zero-trust network asks every machine for."""
+    wrong_purpose: bool = False
+    """Sign through an issuing CA under :attr:`ca` whose extended key usage leaves
+    out server authentication: the chain is trusted, and still refused, with
+    "unsupported certificate purpose". A real inspection appliance did this."""
     events: list[tuple[str, str]] = field(default_factory=list)
     """``("intercepted" | "rejected", host)`` in the order they happened."""
     port: int = 0
     _contexts: dict[str, ssl.SSLContext] = field(default_factory=dict)
+    _issuer: trustme.CA | None = None
     _loop: asyncio.AbstractEventLoop | None = None
     _server: asyncio.Server | None = None
     _thread: threading.Thread | None = None
@@ -128,7 +136,12 @@ class InterceptingProxy:
         context = self._contexts.get(host)
         if context is None:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            self.ca.issue_cert(host).configure_cert(context)
+            issuer = self.ca
+            if self.wrong_purpose:
+                if self._issuer is None:
+                    self._issuer = _client_only_child(self.ca)
+                issuer = self._issuer
+            issuer.issue_cert(host).configure_cert(context)
             if self.require_client_cert:
                 context.verify_mode = ssl.CERT_REQUIRED
                 self.ca.configure_trust(context)
@@ -178,6 +191,33 @@ class InterceptingProxy:
         await asyncio.gather(
             _pipe(reader, up_writer), _pipe(up_reader, writer), return_exceptions=True
         )
+
+
+def _client_only_child(ca: trustme.CA) -> trustme.CA:
+    """A CA under ``ca`` that may only vouch for TLS clients.
+
+    trustme has no option for it, so its child CA is signed again with the
+    extension added; the key, names and identifiers stay, and so does every
+    certificate the child then issues.
+    """
+    child = ca.create_child_ca()
+    cert = child._certificate
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(cert.subject)
+        .issuer_name(cert.issuer)
+        .public_key(cert.public_key())
+        .serial_number(cert.serial_number)
+        .not_valid_before(cert.not_valid_before_utc)
+        .not_valid_after(cert.not_valid_after_utc)
+    )
+    for extension in cert.extensions:
+        builder = builder.add_extension(extension.value, extension.critical)
+    builder = builder.add_extension(
+        x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False
+    )
+    child._certificate = builder.sign(ca._private_key, hashes.SHA256())
+    return child
 
 
 def _upstream_context() -> ssl.SSLContext:

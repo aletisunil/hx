@@ -26,6 +26,19 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `/login claude-code` behind a network whose TLS inspection signs with a certificate not
+  valid for servers ("unsupported certificate purpose") now gives Claude Code's reason and
+  the fix: have the network fixed or exempted, or set `HX_SSL_NO_VERIFY=1` meanwhile. It
+  used to give the whole sign-in URL and no fix. Turns and HX's own requests that fail the
+  same way give the same advice, not "add the CA", which is trusted already.
+- A `HX_CA_BUNDLE`, `SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` that names a file holding no
+  certificates no longer crashes HX at startup. HX says so and verifies against the system
+  trust store, and does not hand the file to Claude Code.
+- A wrapped error notice no longer shows a bright green background under every line after
+  the first.
+
 ---
 
 ## [0.2.14] - 2026-10-04

@@ -266,6 +266,13 @@ def active_background(text: str) -> str:
                     # Truncated. Nothing legible to re-open, and consuming the
                     # rest would be a guess at parameters that never arrived.
                     break
+            elif code == 38 and index + 1 < len(codes):
+                # A foreground's parameters are not codes: the 102 of
+                # 38;2;204;102;102 would otherwise open a bright green background.
+                span = 3 if codes[index + 1] == 5 else 5 if codes[index + 1] == 2 else 0
+                if not span or index + span > len(codes):
+                    break
+                index += span - 1
             index += 1
     return current
 
