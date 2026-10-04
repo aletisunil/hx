@@ -6,6 +6,8 @@ Routing is a property of the model id, exactly as in the settings file:
   Every id that worked before this module existed still routes there.
 * ``openai-codex/gpt-5.6-terra`` - the ChatGPT subscription route.
 * ``devin/swe-1-6`` - the Devin subscription route.
+* ``claude-code/claude-sonnet-5`` - a Claude subscription, through the
+  ``claude`` CLI.
 
 There is deliberately no ``/route`` command and no auto-selection: with two
 credentials installed, "which one paid for that turn" must be answerable by
@@ -19,6 +21,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from hx.auth import claude_code as claude_code_auth
 from hx.auth.oauth import codex as codex_oauth
 from hx.auth.oauth import devin as devin_oauth
 from hx.auth.resolve import AuthResolver, ResolvedAuth
@@ -38,6 +41,7 @@ else:  # runtime: dataclass field annotations are evaluated lazily anyway
 
 CODEX = codex_oauth.PROVIDER_ID
 DEVIN = devin_oauth.PROVIDER_ID
+CLAUDE_CODE = claude_code_auth.PROVIDER_ID
 
 
 class AuthKind(StrEnum):
@@ -125,6 +129,21 @@ def _build_devin(
     )
 
 
+def _build_claude_code(
+    spec: ProviderSpec,
+    resolver: AuthResolver,
+    session_id: str | None,
+    models: ModelRegistry | None,
+) -> Provider:
+    from hx.auth.resolve import MissingCredential, missing_message
+    from hx.providers.claude_code import ClaudeCodeProvider
+
+    # Asked of the CLI, not of HX's store: Claude Code keeps its own login.
+    if not resolver.has_credential(spec.id):
+        raise MissingCredential(spec.id, missing_message(spec.id))
+    return ClaudeCodeProvider(effort=models.reasoning_effort if models is not None else None)
+
+
 SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         id=OPENROUTER,
@@ -147,6 +166,13 @@ SPECS: tuple[ProviderSpec, ...] = (
         namespace=f"{DEVIN}/",
         build=_build_devin,
     ),
+    ProviderSpec(
+        id=CLAUDE_CODE,
+        label="Claude (Pro/Max, via Claude Code)",
+        kind=AuthKind.SUBSCRIPTION,
+        namespace=f"{CLAUDE_CODE}/",
+        build=_build_claude_code,
+    ),
 )
 
 BY_ID: dict[str, ProviderSpec] = {spec.id: spec for spec in SPECS}
@@ -164,6 +190,9 @@ def subscription_plan(provider_id: str, resolver: AuthResolver) -> str | None:
     account and on a ``free`` one, with the same error. Gating a model switch on
     this would lock out users the plan says nothing about.
     """
+    if provider_id == CLAUDE_CODE:
+        status = claude_code_auth.status()
+        return status.plan if status is not None and status.logged_in else None
     if provider_id != CODEX:
         return None
 
@@ -184,6 +213,9 @@ def subscription_account(provider_id: str, resolver: AuthResolver) -> str | None
     """
     from hx.auth.store import OAuthCredential
 
+    if provider_id == CLAUDE_CODE:
+        status = claude_code_auth.status()
+        return status.account if status is not None and status.logged_in else None
     if provider_id != DEVIN:
         return None
     stored = resolver.store.read(provider_id)
@@ -205,6 +237,15 @@ def browser_login(
     if provider_id == DEVIN:
         return devin_oauth.login_browser
     return None
+
+
+def holds_own_login(provider_id: str) -> bool:
+    """Whether the route's credential lives with another program, not in HX's store.
+
+    Signing in and out of such a route is that program's flow: HX keeps nothing
+    to save or delete.
+    """
+    return provider_id == CLAUDE_CODE
 
 
 class UnknownProvider(Exception):

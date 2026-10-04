@@ -297,3 +297,17 @@ def test_todo_list_is_shown(hx: HX, stub: Stub) -> None:
     for item in ("Read the code", "Fix the bug", "Run the tests"):
         assert item in term.scrollback()
     assert "Run the tests" in stub.requests[1].system + json.dumps(stub.requests[1].messages)
+
+
+def test_glob_on_a_bare_directory_pattern_is_a_usable_error(hx: HX, stub: Stub) -> None:
+    """A pattern that names only a directory (".") is answered with what to use instead,
+    rather than a Python traceback, and the model recovers with a real pattern."""
+    (hx.project / "main.py").write_text("print(1)\n")
+    stub.script(call("Glob", pattern="."), call("Glob", pattern="*"), say("One file: main.py."))
+    result = hx.run("-p", "what files are here?", check=True)
+
+    assert result.stdout == "One file: main.py.\n"
+    first, second = stub.requests[1].tool_results()[-1], stub.requests[2].tool_results()[-1]
+    assert "it names a directory, not files. Use '*' or '**/*'." in first
+    assert "IndexError" not in first
+    assert "main.py" in second

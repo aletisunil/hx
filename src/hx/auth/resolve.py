@@ -9,6 +9,9 @@ The rule, per provider id:
   provider, and the environment is consulted only when nothing is stored. In
   particular a *failed* refresh does not quietly fall back to an env var - the
   user gets told their login expired instead of a confusing bill.
+* ``claude-code`` stores nothing here at all. Its credential is Claude Code's
+  own login, which the ``claude`` CLI keeps and refreshes; HX only asks the CLI
+  whether it is signed in (:mod:`hx.auth.claude_code`).
 
 OAuth tokens are refreshed inside :meth:`AuthStore.modify`, so two turns
 starting at once cannot both spend the same refresh token.
@@ -21,6 +24,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from hx.auth import claude_code
 from hx.auth.oauth import codex as codex_oauth
 from hx.auth.oauth import devin as devin_oauth
 from hx.auth.store import (
@@ -84,6 +88,9 @@ class AuthResolver:
 
     async def resolve(self, provider_id: str) -> ResolvedAuth:
         """The token to send now, refreshing it first if it is about to expire."""
+        if provider_id == claude_code.PROVIDER_ID:
+            await claude_code.status_async()
+            return _claude_code_auth()
         ready, stale = self._peek(provider_id)
         if ready is not None:
             return ready
@@ -105,6 +112,8 @@ class AuthResolver:
         rather than blocking, because a provider that can expire should be
         built around the async :meth:`resolve` instead.
         """
+        if provider_id == claude_code.PROVIDER_ID:
+            return _claude_code_auth()
         ready, stale = self._peek(provider_id)
         if ready is not None:
             return ready
@@ -150,11 +159,26 @@ class AuthResolver:
 
         return self._from_env(provider_id), None
 
+    async def check_external_logins(self) -> None:
+        """Ask the programs that keep their own login - Claude Code - for its
+        state, off the event loop.
+
+        Their answers are cached, so the synchronous :meth:`has_credential` and
+        :meth:`source` that follow read them from memory. Anything on the event
+        loop that is about to ask those of every route awaits this first: asking
+        the ``claude`` CLI itself can take seconds, and the screen would stop
+        answering keys meanwhile.
+        """
+        await claude_code.status_async()
+
     def has_credential(self, provider_id: str) -> bool:
         """Whether a route is usable, without refreshing or exposing anything.
 
-        Drives which providers ``/model`` is allowed to offer.
+        Drives which providers ``/model`` is allowed to offer. Code on the event
+        loop awaits :meth:`check_external_logins` first.
         """
+        if provider_id == claude_code.PROVIDER_ID:
+            return claude_code.signed_in()
         if self.store.read(provider_id) is not None:
             return True
         return any(os.environ.get(name) for name in PROVIDER_ENV.get(provider_id, ()))
@@ -165,6 +189,8 @@ class AuthResolver:
         The origin only - never the secret, and never a description of it, so
         callers can print this next to whatever label they choose.
         """
+        if provider_id == claude_code.PROVIDER_ID:
+            return "Claude Code login (`claude auth status`)" if claude_code.signed_in() else None
         if provider_id in ENV_FIRST:
             for name in PROVIDER_ENV.get(provider_id, ()):
                 if os.environ.get(name):
@@ -229,8 +255,26 @@ class AuthResolver:
         return updated
 
 
+def _claude_code_auth() -> ResolvedAuth:
+    """Claude Code's login, as far as HX sees it: who, never a token."""
+    status = claude_code.status()
+    if status is None or not status.is_subscription:
+        raise MissingCredential(claude_code.PROVIDER_ID, claude_code.missing_message())
+    return ResolvedAuth(
+        token="",
+        source="Claude Code login",
+        extra={
+            "account": status.org_id or status.account,
+            "email": status.email,
+            "plan": status.plan,
+        },
+    )
+
+
 def missing_message(provider_id: str) -> str:
     """What to tell the user, and what to run, when a route has no credential."""
+    if provider_id == claude_code.PROVIDER_ID:
+        return claude_code.missing_message()
     if provider_id == OPENROUTER:
         return (
             "No OpenRouter API key found. Set OPENROUTER_API_KEY, or run `hx` interactively "

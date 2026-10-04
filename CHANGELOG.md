@@ -26,6 +26,41 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Claude Pro/Max route: `hx auth login claude-code`, then
+  `hx --model claude-code/claude-sonnet-5`. Runs Claude models on your Claude
+  subscription through the official Claude Code CLI, with HX's own tools,
+  approvals and transcript. `/model` lists the account's models and `/effort`
+  their levels.
+- Behind a TLS-inspecting proxy the `claude-code` route takes the same
+  settings as every other route: `HX_CA_BUNDLE` reaches Claude Code as
+  `NODE_EXTRA_CA_CERTS` and `HX_SSL_NO_VERIFY` as
+  `NODE_TLS_REJECT_UNAUTHORIZED=0`, Claude Code's own `CLAUDE_CODE_CERT_STORE`
+  and `CLAUDE_CODE_CLIENT_CERT` / `_KEY` / `_KEY_PASSPHRASE` (for a network
+  that requires a client certificate) pass through, and a certificate failure
+  it reports names the fix.
+- On the `claude-code` route, a turn Anthropic bills as Extra Usage while
+  your plan still has room says so, and names HX's part of the system prompt,
+  instead of claiming the plan's usage limit is reached. A turn whose prompt
+  carries HX's own system prompt text (a copied `system-prompt.md`, an
+  AGENTS.md, an agent definition) is refused before it is sent, naming where
+  the text is; `hx prompt` shows the sources.
+
+### Fixed
+
+- A subagent that fails - a provider error, a refused prompt, the turn limit -
+  reports why to the parent model, instead of "(the subagent returned no
+  text)".
+
+- `Glob` with a pattern of `.` returns an error saying to use `*` or `**/*`,
+  instead of a Python `IndexError`.
+- With `tui.enterWhileBusy` set to `"steer"`, `alt+enter` queues a message
+  behind the running turn, as the prompt says. It used to steer like `enter`,
+  leaving no way to queue in that mode.
+- The status bar's `⧗N queued` count stays visible in a project with a long
+  path or branch name; the path is shortened instead of the count being cut off.
+
 ---
 
 ## [0.2.12] - 2026-10-01

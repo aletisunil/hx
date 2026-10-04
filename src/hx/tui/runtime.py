@@ -465,6 +465,9 @@ class HXSession:
         if spec.id == registry.provider_for(self.loop.model).id:
             return
 
+        # Building a route checks its credential; for one whose login another
+        # program keeps, that is asked here, off the event loop.
+        await self.auth.check_external_logins()
         provider = registry.build_provider(
             model_id,
             self.auth,
@@ -1010,12 +1013,19 @@ class HXSession:
                 # the message into the running turn instead of behind it.
                 self.loop.steer(text, images)
                 return
-            # Held rather than refused: the user typed it while a turn was
-            # running, and dropping it loses the message.
-            self._queued.append(UserTurn(text, tuple(images)))
-            self.status.update(queued=len(self._queued))
+            self._queue(text, images)
             return
         self._turn = asyncio.create_task(self._run_turn(text, images))
+
+    def _queue(self, text: str, images: Sequence[ImageBlock] = ()) -> None:
+        """Hold a message until the running turn ends.
+
+        Held rather than refused: the user typed it while a turn was running,
+        and dropping it loses the message. The text is already in the
+        transcript; this only puts it in line.
+        """
+        self._queued.append(UserTurn(text, tuple(images)))
+        self.status.update(queued=len(self._queued))
 
     async def run_shell_passthrough(self, command: str) -> None:
         """``!command`` - run a shell command directly, without a model turn.
@@ -1139,6 +1149,11 @@ class HXSession:
         reading of "steer" that means anything on an empty prompt: steering the
         empty string would put a blank message into the turn and print a blank
         one in the transcript.
+
+        With ``tui.enterWhileBusy`` set to steer, enter is the key that steers,
+        so a typed message on this key queues instead - the swap the prompt's
+        placeholder promises. The empty prompt still steers the head: queueing
+        nothing is not a reading of the key at all.
         """
         if not self.is_busy:
             if text:
@@ -1148,6 +1163,9 @@ class HXSession:
             self.steer_queued()
             return
         self.view.transcript.append(UserMessage(text, images))
+        if self._enter_steers:
+            self._queue(text, images)
+            return
         self.loop.steer(text, images)
 
     def _request_images(self, paths: list[Path] | None) -> None:

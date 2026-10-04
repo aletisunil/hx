@@ -107,7 +107,13 @@ class SubagentRunner:
         try:
             loop = self._build_loop(definition, subagent_id)
             result = await loop.run(prompt)
-            report = _final_text(result) or "(the subagent returned no text)"
+            report = _final_text(result)
+            if result.error is not None:
+                # The parent model only sees the report: without the reason it
+                # cannot tell a refused or broken run from one with nothing to say.
+                failure = f"The subagent failed: {result.error}"
+                report = f"{report}\n\n{failure}" if report else failure
+            report = report or "(the subagent returned no text)"
             cost = loop.session.usage.total_cost_usd
             self._roll_up_cost(loop)
             return SubagentResult(

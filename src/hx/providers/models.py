@@ -2,7 +2,8 @@
 
 Populated from OpenRouter's ``/api/v1/models`` and, for each signed-in
 subscription, from that backend's own per-account catalogue
-(:mod:`hx.providers.codex_catalogue`, :mod:`hx.providers.devin_catalogue`).
+(:mod:`hx.providers.codex_catalogue`, :mod:`hx.providers.devin_catalogue`,
+:mod:`hx.providers.claude_code_catalogue`).
 Cached to ``~/.hx/models.json`` and refreshed on demand (``/models refresh``),
 after a login, or when the cache is older than a day. The registry drives the
 ``/model`` picker, the context gauge, and cost fallback maths.
@@ -147,6 +148,29 @@ DEVIN_MODELS: tuple[ModelInfo, ...] = tuple(
 )
 
 
+CLAUDE_CODE_NAMESPACE = "claude-code/"
+
+#: Fallback list for a Claude subscription, used only when Claude Code cannot be
+#: asked - see :mod:`hx.providers.claude_code_catalogue`. Claude Code's own
+#: aliases: whatever the account's plan offers, these name something in it.
+CLAUDE_CODE_MODELS: tuple[ModelInfo, ...] = tuple(
+    ModelInfo(
+        id=f"{CLAUDE_CODE_NAMESPACE}{alias}",
+        name=name,
+        context_window=200_000,
+        max_output_tokens=64_000,
+        pricing=ModelPricing(),
+        cache_mode=CacheMode.IMPLICIT,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_images=True,
+        provider_id="claude-code",
+        is_subscription=True,
+    )
+    for alias, name in (("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku"))
+)
+
+
 @dataclass(slots=True)
 class _Entitlement:
     """What one subscription's backend said its login may call."""
@@ -185,6 +209,16 @@ async def _fetch_devin(auth: ResolvedAuth) -> list[ModelInfo]:
     return await devin_catalogue.fetch_models(auth)
 
 
+async def _fetch_claude_code(auth: ResolvedAuth) -> list[ModelInfo]:
+    from hx.providers import claude_code_catalogue
+
+    return await claude_code_catalogue.fetch_models(auth)
+
+
+def _claude_code_account(auth: ResolvedAuth) -> str | None:
+    return str(auth.extra.get("account") or "") or None
+
+
 def _codex_account(auth: ResolvedAuth) -> str | None:
     return str(auth.extra.get("account_id") or "") or None
 
@@ -201,6 +235,9 @@ def _token_fingerprint(auth: ResolvedAuth) -> str | None:
 SUBSCRIPTIONS: tuple[_Subscription, ...] = (
     _Subscription("openai-codex", "Codex", CODEX_MODELS, _fetch_codex, _codex_account),
     _Subscription("devin", "Devin", DEVIN_MODELS, _fetch_devin, _token_fingerprint),
+    _Subscription(
+        "claude-code", "Claude Code", CLAUDE_CODE_MODELS, _fetch_claude_code, _claude_code_account
+    ),
 )
 
 
@@ -302,6 +339,8 @@ class ModelRegistry:
         from hx.net import describe
         from hx.providers.openrouter import fetch_models
 
+        # Off the event loop, before the synchronous credential checks below.
+        await resolver.check_external_logins()
         # Asked for first: a broken OpenRouter key raises below, and it must not
         # also cost a subscription its model list.
         for sub in SUBSCRIPTIONS:
@@ -697,8 +736,9 @@ def infer_cache_mode(model_id: str) -> CacheMode:
     provider.
     """
     vendor = model_id.split("/", 1)[0].lower()
-    if vendor in ("openai-codex", "devin"):
-        # Both cache server-side off a stable prefix; neither takes breakpoints.
+    if vendor in ("openai-codex", "devin", "claude-code"):
+        # All cache server-side off a stable prefix - Claude Code places its
+        # own breakpoints - and none takes HX's.
         return CacheMode.IMPLICIT
     if vendor in ModelRegistry.EXPLICIT_CACHE_VENDORS:
         return CacheMode.EXPLICIT

@@ -55,6 +55,13 @@ class GlobTool(Tool):
             ]
         except (ValueError, OSError) as exc:
             raise ToolError(f"bad pattern: {exc}") from exc
+        except IndexError as exc:
+            # Python 3.12's pathlib crashes on a pattern with no parts left once
+            # normalised - ".", "./" - instead of matching nothing.
+            raise ToolError(
+                f"bad pattern {params['pattern']!r}: it names a directory, not files. "
+                "Use '*' or '**/*'."
+            ) from exc
 
         matches.sort(key=_mtime, reverse=True)
         shown = matches[:limit]

@@ -284,6 +284,84 @@ def hx(sandbox_root: Path, project: Path, stub: Stub, record: TestRecord) -> Ite
     runner.close()
 
 
+FAKE_CLAUDE = Path(__file__).with_name("fake_claude.py")
+
+
+class FakeClaude:
+    """The ``claude`` CLI the claude-code route drives, scripted.
+
+    Installed as ``claude`` on the test's ``PATH``. Every process HX starts
+    reads the same queue of model turns and writes what it saw to one log.
+    """
+
+    def __init__(self, hx: HX) -> None:
+        self.hx = hx
+        self.state = hx.root / "claude"
+        self.state.mkdir(exist_ok=True)
+        shim = hx.bin / "claude"
+        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_CLAUDE}" "$@"\n')
+        shim.chmod(0o755)
+        hx.extra_env["E2E_CLAUDE_DIR"] = str(self.state)
+
+    def login(self, plan: str = "max", method: str = "claude.ai") -> None:
+        (self.state / "auth.json").write_text(
+            json.dumps(
+                {
+                    "loggedIn": True,
+                    "authMethod": method,
+                    "email": "e2e@example.com",
+                    "orgId": "org-e2e",
+                    "orgName": "E2E Org",
+                    "subscriptionType": plan,
+                }
+            )
+        )
+
+    def slow_status(self, seconds: float) -> None:
+        """Make ``claude auth status`` take ``seconds`` to answer."""
+        (self.state / "status_delay").write_text(str(seconds))
+
+    def use(self, model: str = "claude-code/claude-sonnet-5") -> None:
+        self.hx.extra_env["HX_MODEL"] = model
+
+    def script(self, *turns: dict[str, Any]) -> None:
+        path = self.state / "script.json"
+        queued = json.loads(path.read_text()) if path.exists() else []
+        path.write_text(json.dumps([*queued, *turns]))
+
+    def uninstall(self) -> None:
+        (self.hx.bin / "claude").unlink()
+
+    def log(self, kind: str | None = None) -> list[dict[str, Any]]:
+        path = self.state / "log.jsonl"
+        if not path.exists():
+            return []
+        entries = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        return [e for e in entries if kind is None or e["kind"] == kind]
+
+    def spawns(self, *, tools: bool | None = None) -> list[dict[str, Any]]:
+        """Every ``claude -p`` HX started; ``tools`` keeps only working sessions
+        (True) or only one-offs such as the naming call (False)."""
+        found = self.log("spawn")
+        if tools is None:
+            return found
+        return [s for s in found if ("--mcp-config" in s["argv"]) is tools]
+
+    def note_log(self) -> None:
+        self.hx.record.steps.append(
+            Step("note", "claude CLI log", text="\n".join(json.dumps(e)[:400] for e in self.log()))
+        )
+
+
+@pytest.fixture()
+def claude(hx: HX) -> Iterator[FakeClaude]:
+    fake = FakeClaude(hx)
+    yield fake
+    fake.note_log()
+    unexpected = fake.log("unexpected")
+    assert not unexpected, f"unscripted Claude Code turns: {unexpected}"
+
+
 def git(cwd: Path, *args: str) -> str:
     """Run git in a test's project, for setting one up."""
     return subprocess.run(

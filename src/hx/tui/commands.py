@@ -111,6 +111,7 @@ async def cmd_model(ctx: CommandContext, args: str) -> None:
     if registry is None:
         ctx.app.notice("No model registry is loaded.", "warning")
         return
+    await ctx.app.auth.check_external_logins()
     models = _reachable(ctx, registry.all())
     if not models:
         # A recorded failure replaces the remedy rather than trailing it:
@@ -852,6 +853,7 @@ async def cmd_login(ctx: CommandContext, args: str) -> None:
 
     provider_id = args.strip()
     if not provider_id:
+        await ctx.app.auth.check_external_logins()
         chosen = await ctx.app.ask(ProviderDialog(_provider_rows(registry.SPECS, ctx.app.auth)))
         if not chosen:
             return
@@ -869,7 +871,40 @@ async def cmd_login(ctx: CommandContext, args: str) -> None:
         await cmd_configure(ctx, "")
         return
 
+    if registry.holds_own_login(spec.id):
+        await _run_claude_code_login(ctx, spec)
+        return
+
     await _run_oauth_login(ctx, spec)
+
+
+async def _run_claude_code_login(ctx: CommandContext, spec: Any) -> None:
+    """Sign Claude Code in, through its own flow, with HX drawing the prompts.
+
+    Nothing is saved by HX: the login is Claude Code's, kept where Claude Code
+    keeps it, and every ``claude`` on this machine shares it.
+    """
+    from hx.auth import claude_code
+    from hx.tui.views.login import LoginDialog
+
+    modal = LoginDialog(spec.label, on_change=ctx.app.repaint)
+    ctx.app.show(modal)
+    try:
+        status = await claude_code.login_interactive(modal)
+    except asyncio.CancelledError:
+        ctx.app.notice("Sign-in cancelled.", "warning")
+        return
+    except Exception as exc:
+        ctx.app.notice(f"Sign-in failed: {exc}", "error")
+        return
+    finally:
+        ctx.app.dismiss_modal(modal)
+
+    who = status.account or "your Claude account"
+    plan = f", {status.plan} plan" if status.plan else ""
+    count = await _refresh_after_login(ctx, spec.id)
+    offer = f"{count} models available" if count else "Pick a model with /model"
+    ctx.app.notice(f"Claude Code signed in ({who}{plan}). {offer}.", "success")
 
 
 async def _run_oauth_login(ctx: CommandContext, spec: Any) -> None:
@@ -960,6 +995,16 @@ async def cmd_logout(ctx: CommandContext, args: str) -> None:
     if not provider_id:
         known = ", ".join(s.id for s in registry.SPECS)
         ctx.app.notice(f"Usage: /logout <provider>. Known: {known}", "warning")
+        return
+
+    if registry.holds_own_login(provider_id):
+        # HX holds nothing to forget, and signing Claude Code out from here
+        # would sign out every Claude Code on the machine - not HX's call.
+        ctx.app.notice(
+            "HX keeps no Claude credential: the login is Claude Code's. Run "
+            "`claude auth logout` to sign Claude Code out (everywhere it runs).",
+            "warning",
+        )
         return
 
     if AuthStore().delete(provider_id):

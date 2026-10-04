@@ -16,6 +16,11 @@ store is decided here, once, and every client is built through
 ``HX_SSL_NO_VERIFY=1`` turns verification off. It exists because a blocked
 user will otherwise reach for a worse workaround; it says so out loud in
 :func:`tls_notice` rather than failing quietly open.
+
+Not every request is HX's own. The ``claude-code`` route runs the ``claude``
+CLI, a Node program with its own TLS stack, which never sees an
+``SSLContext`` built here. :func:`node_tls_env` restates the same policy in the
+variables Node reads, so a setting that fixes one route fixes them all.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from __future__ import annotations
 import os
 import re
 import ssl
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -78,6 +84,58 @@ def tls_notice() -> str | None:
     return f"Verifying TLS against {bundle}." if bundle is not None else None
 
 
+def node_tls_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """What to add to a Node child's ``environ`` so it trusts what HX trusts.
+
+    * A bundle HX verifies against becomes ``NODE_EXTRA_CA_CERTS``, which Node
+      adds to its own roots and the OS store. One the user already gave Node
+      is theirs and stays: they set it for Node, and it already worked there.
+    * ``HX_SSL_NO_VERIFY`` becomes ``NODE_TLS_REJECT_UNAUTHORIZED=0``.
+
+    A machine whose OS store already holds the CA needs neither: Claude Code
+    reads the OS store itself.
+    """
+    added: dict[str, str] = {}
+    bundle = ca_bundle()
+    if bundle is not None and not (environ.get("NODE_EXTRA_CA_CERTS") or "").strip():
+        added["NODE_EXTRA_CA_CERTS"] = str(bundle)
+    if verification_disabled():
+        added["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+    return added
+
+
+_CERT_FAILURE = re.compile(
+    r"certificate verif"
+    r"|self[- ]signed certificate"
+    r"|unable to (?:get local issuer|verify the first) certificate"
+    r"|UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT|SELF_SIGNED_CERT_IN_CHAIN",
+    re.IGNORECASE,
+)
+
+
+def tls_hint() -> str:
+    """What to do about a certificate the client would not trust."""
+    bundle = ca_bundle()
+    if bundle is not None:
+        return (
+            f"HX is verifying TLS against {bundle}; check that it holds the CA "
+            f"your network signs with."
+        )
+    return (
+        f"If your network intercepts TLS, add its CA to the system trust store "
+        f"or set {CA_BUNDLE_VARS[0]} to its PEM file."
+    )
+
+
+def with_tls_hint(message: str) -> str:
+    """``message``, followed by :func:`tls_hint` when it reports a certificate
+    failure - in any client's words: OpenSSL's, Node's, Claude Code's."""
+    hint = tls_hint()
+    if not _CERT_FAILURE.search(message) or hint in message:
+        return message
+    return f"{message.rstrip().rstrip('.')}. {hint}"
+
+
 def async_client(**kwargs: Any) -> httpx.AsyncClient:
     """``httpx.AsyncClient`` with hx's trust store already applied."""
     kwargs.setdefault("verify", ssl_verify())
@@ -98,18 +156,16 @@ def describe(exc: BaseException) -> str:
                 or getattr(err, "reason", None)
                 or "certificate verify failed"
             )
-            return (
-                f"TLS certificate verification failed ({_flatten(reason)}). "
-                f"If your network intercepts TLS, add its CA to the system trust store "
-                f"or set {CA_BUNDLE_VARS[0]} to its PEM file."
-            )
+            return f"TLS certificate verification failed ({_flatten(reason)}). {tls_hint()}"
         if isinstance(err, ssl.SSLError):
             return f"TLS handshake failed: {_flatten(err.reason or str(err))}."
     if isinstance(exc, httpx.TimeoutException):
         return f"Timed out talking to {_host(exc)}."
     if isinstance(exc, httpx.ConnectError):
         return f"Cannot reach {_host(exc)}: {_flatten(str(exc))}."
-    return f"{type(exc).__name__}: {_flatten(str(exc))}"
+    # A child process's failure arrives as text, already flattened by whoever
+    # raised it: the hint is all there is left to add.
+    return with_tls_hint(f"{type(exc).__name__}: {_flatten(str(exc))}")
 
 
 def _chain(exc: BaseException) -> list[BaseException]:

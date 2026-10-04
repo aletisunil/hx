@@ -55,6 +55,9 @@ dev = [
   # A VT emulator, so tests can assert what the differ actually paints rather
   # than what it claims to have written.
   "pyte>=0.8",
+  # A throwaway CA, so the TLS tests can stand up the intercepting proxy a
+  # corporate network puts between HX and the API.
+  "trustme>=1.2",
 ]
 
 [project.scripts]

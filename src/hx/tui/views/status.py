@@ -36,19 +36,29 @@ narrow pane should spend its columns on the counts instead."""
 MODE_ROLES = {"plan": "border", "default": "dim", "acceptEdits": "warning", "bypass": "error"}
 
 
-def justify(left: str, right: str, width: int) -> str:
+def justify(left: str, right: str, width: int, tail: str = "") -> str:
     """Left half flush left, right half flush right; the left half yields first.
 
     The right half is short and fixed - the model and the permission mode - and
     it is what a user glances at without reading. A long project path must not
     push either of them off the end, so the path is the half that is cut.
+
+    ``tail`` ends the left half and is cut only after ``left`` is gone: a
+    transient count such as the queue depth, which is the reason to look at the
+    line at all, must not be the first thing a long path pushes off it.
     """
     right_width = cell_width(right)
     keep_right = bool(right_width) and width - right_width - GAP >= MIN_LEFT
     room = width - right_width - GAP if keep_right else width
 
-    if cell_width(left) > room:
-        left = truncate_to_width(left, max(0, room - cell_width(ELLIPSIS))) + ELLIPSIS
+    if cell_width(left) + cell_width(tail) > room:
+        room_for_left = room - cell_width(tail) - cell_width(ELLIPSIS)
+        if room_for_left > 0:
+            left = truncate_to_width(left, room_for_left) + ELLIPSIS + tail
+        else:
+            left = truncate_to_width(left + tail, max(0, room - cell_width(ELLIPSIS))) + ELLIPSIS
+    else:
+        left += tail
     if not keep_right:
         return left
     return left + " " * max(0, width - cell_width(left) - right_width) + right
@@ -141,7 +151,7 @@ class StatusBar(Widget):
 
         inner = max(1, width - 2)
         return [
-            fill_line(" " + justify(self._location(), self._mode(), inner), width),
+            fill_line(" " + justify(self._location(), self._mode(), inner, self._queue()), width),
             fill_line(" " + justify(self._stats(inner), self._model(), inner), width),
         ]
 
@@ -151,9 +161,10 @@ class StatusBar(Widget):
         field = fg("dim", self.cwd or "")
         if self.branch:
             field += fg("dim", f" ({self.branch})")
-        if self.queued:
-            field += fg("muted", f"  ⧗{self.queued} queued")
         return field
+
+    def _queue(self) -> str:
+        return fg("muted", f"  ⧗{self.queued} queued") if self.queued else ""
 
     def _mode(self) -> str:
         field = fg(MODE_ROLES.get(self.mode, "dim"), self.mode)

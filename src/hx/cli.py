@@ -1159,7 +1159,7 @@ AUTH_USAGE = """\
 hx auth                     Show which routes have a credential
 hx auth set [provider]      Paste an API key (hidden) and save it
 hx auth clear [provider]    Remove a saved API key
-hx auth login [provider]    Sign in - openrouter, openai-codex, devin
+hx auth login [provider]    Sign in - openrouter, openai-codex, devin, claude-code
 hx auth logout <provider>   Forget a stored credential
 
 Providers:
@@ -1168,6 +1168,8 @@ Providers:
   openai-codex    ChatGPT Plus/Pro subscription, signed in over OAuth.
   devin           Devin subscription, signed in over OAuth. A session token in
                   HX_DEVIN_API_KEY or DEVIN_API_KEY is used when none is saved.
+  claude-code     Claude Pro/Max subscription, through the `claude` CLI and its
+                  own login. HX stores nothing; `claude auth logout` signs out.
   tavily          API key for WebSearch and WebFetch. Not a model route:
                   it is spent per search, not per token.
 """
@@ -1219,6 +1221,9 @@ def run_login(provider_id: str) -> int:
         print(f"Unknown provider {provider_id!r}. Known: {known}", file=sys.stderr)
         return 2
 
+    if registry.holds_own_login(provider_id):
+        return _login_claude_code(spec)
+
     browser_flow = registry.browser_login(provider_id)
     if browser_flow is None:
         print(f"{spec.label} has no interactive login.", file=sys.stderr)
@@ -1258,6 +1263,24 @@ def run_login(provider_id: str) -> int:
         )
 
     _report_models_after_login(provider_id)
+    return 0
+
+
+def _login_claude_code(spec: Any) -> int:
+    """Hand the terminal to ``claude auth login``. The login stays Claude Code's."""
+    from hx.auth import claude_code
+
+    code = claude_code.login_terminal()
+    status = claude_code.status(fresh=True)
+    if code != 0 or status is None or not status.logged_in:
+        print("Claude Code is not signed in.", file=sys.stderr)
+        return code or 1
+    if not status.is_subscription:
+        print(claude_code.missing_message(), file=sys.stderr)
+        return 1
+    plan = f", {status.plan} plan" if status.plan else ""
+    print(f"Signed in to {spec.label} as {status.account or 'your Claude account'}{plan}.")
+    _report_models_after_login(spec.id)
     return 0
 
 
@@ -1356,6 +1379,12 @@ def run_auth_command(args: list[str]) -> int:
         if len(args) < 2:
             print(AUTH_USAGE, file=sys.stderr)
             return 2
+        if registry.holds_own_login(args[1]):
+            print(
+                "HX keeps no Claude credential: the login is Claude Code's. Run "
+                "`claude auth logout` to sign Claude Code out (everywhere it runs)."
+            )
+            return 0
         if AuthStore().delete(args[1]):
             print(f"Removed the {args[1]} credential from {auth_file()}.")
             return 0

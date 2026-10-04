@@ -50,7 +50,7 @@ Requires Python 3.11+. macOS and Linux. Update with `hx upgrade`.
 
 ### Credentials
 
-HX reaches models over three routes. Which one serves a turn is decided by the
+HX reaches models over four routes. Which one serves a turn is decided by the
 model id alone, so "what paid for that" is always answerable by reading it:
 
 | Model id | Route | Billing |
@@ -58,8 +58,10 @@ model id alone, so "what paid for that" is always answerable by reading it:
 | `anthropic/claude-sonnet-4.5`, `openai/gpt-5`, … | OpenRouter | per token, API key |
 | `openai-codex/gpt-5.6-terra` | ChatGPT Plus/Pro | your subscription |
 | `devin/swe-1-6`, `devin/claude-opus-5`, … | Devin | your subscription |
+| `claude-code/claude-sonnet-5`, `claude-code/claude-opus-4-8`, … | Claude Pro/Max, via Claude Code | your subscription |
 
-Credentials live in `~/.hx/auth.json`, mode 0600, one entry per route.
+Credentials live in `~/.hx/auth.json`, mode 0600, one entry per route - except
+Claude Code's, which stays with Claude Code.
 
 **OpenRouter.** On first run HX asks for a key. Get one at
 <https://openrouter.ai/keys>. Change it later with `/configure` in the TUI, or:
@@ -183,6 +185,47 @@ changes what a turn costs or how much fits. Router models such as
 `devin/adaptive` are resolved to a concrete model on every turn by Devin itself.
 If the list cannot be fetched, `devin/swe-1-6` and `devin/swe-1-6-fast` stand in.
 
+**Claude Pro/Max.** HX runs Claude models on your Claude subscription through
+the official [Claude Code](https://claude.com/claude-code) CLI, the way the
+Claude Agent SDK does. Install Claude Code, then:
+
+```sh
+hx auth login claude-code       # Claude Code's own sign-in; or /login inside HX
+hx --model claude-code/claude-sonnet-5
+```
+
+HX holds no Claude token. The login is Claude Code's, kept and refreshed where
+Claude Code keeps it, so `hx auth logout claude-code` only tells you to run
+`claude auth logout` - which signs out every Claude Code on the machine. A
+headless machine can use a token from `claude setup-token` in
+`CLAUDE_CODE_OAUTH_TOKEN`. A Console login (`claude auth login --console`) bills
+per token and is refused: this route is the subscription.
+
+How a turn works: HX starts `claude -p` with every one of Claude Code's own
+tools switched off and serves HX's tools to it as an MCP server. The model's
+tool calls are run, permission-checked and drawn by HX exactly as on every
+other route; Claude Code holds each call open until HX answers it, however long
+an approval takes. The system prompt is Claude Code's, with your AGENTS.md
+files, skills index and `--append-system-prompt` text added. One Claude Code
+process serves a conversation for as long as it can, so the prompt cache
+carries from turn to turn; after an interrupt, a steer while a tool runs, a
+compaction, `/model`, `/effort` or a resumed session, HX starts a new one on a
+session rebuilt from its own transcript. That costs a second or so and a
+partly cold cache, not the conversation.
+
+Claude Code is started isolated from your Claude Code setup: no CLAUDE.md, no
+hooks, no plugins or MCP servers from `~/.claude`, no auto-memory, no
+auto-compaction (HX compacts its own transcript), and nothing saved to Claude
+Code's session list. Variables that would move it off the subscription -
+`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK` and the
+rest - are removed from its environment; its TLS settings are kept (see
+*Behind a TLS-inspecting proxy* below). `HX_CLAUDE_CODE_PATH` points HX at a
+`claude` other than the one on `PATH`.
+
+`/model` offers the models Claude Code lists for the account, each with the
+efforts it accepts for `/effort`; `/models refresh` asks again. When a usage
+limit is reached, HX says which one and when it resets.
+
 **Web search.** Optional, and the one credential that is not a model route.
 It powers two tools:
 
@@ -192,7 +235,7 @@ It powers two tools:
 | `WebFetch` | read up to 5 URLs, returned as markdown |
 
 [Tavily](https://app.tavily.com) bills per search rather than per token, so it
-works identically on both routes — including the ChatGPT subscription one,
+works identically on every route - including the subscription ones,
 where a provider-native search tool is not on offer.
 
 Get a key at <https://app.tavily.com> — the free tier is 1000 searches a month
@@ -246,9 +289,18 @@ startup every session, because it is not a fix. A TLS failure is reported in
 one line - `/model` and the startup notice both name the certificate problem
 rather than reporting an empty catalogue with no cause.
 
-There is no Claude Pro/Max route. Anthropic rejects OAuth tokens unless the
-request impersonates Claude Code, which HX will not do. Claude models stay
-available through OpenRouter.
+The same settings cover the `claude-code` route, whose requests Claude Code
+makes with its own TLS stack: HX passes `HX_CA_BUNDLE` on to it as
+`NODE_EXTRA_CA_CERTS` (unless you already set that yourself), and
+`HX_SSL_NO_VERIFY` as `NODE_TLS_REJECT_UNAUTHORIZED=0`. Claude Code reads the
+OS trust store on its own, and its own TLS settings reach it untouched:
+`CLAUDE_CODE_CERT_STORE`, and `CLAUDE_CODE_CLIENT_CERT`,
+`CLAUDE_CODE_CLIENT_KEY` and `CLAUDE_CODE_CLIENT_KEY_PASSPHRASE` for a network
+that requires a client certificate.
+
+HX never sends a Claude subscription token to the API itself - Anthropic
+accepts those only from Claude Code, and HX will not impersonate it. The
+`claude-code` route runs the real Claude Code instead.
 
 ---
 
@@ -274,7 +326,7 @@ hx mcp list|add|remove      # manage MCP servers
 hx mcp login <server>       # sign in to a remote MCP server in the browser
 hx mcp logout <server>      # forget a remote MCP server's sign-in
 hx auth [set|clear]         # manage the OpenRouter key
-hx auth login [provider]    # sign in (openrouter, openai-codex, devin)
+hx auth login [provider]    # sign in (openrouter, openai-codex, devin, claude-code)
 hx auth logout <provider>   # forget a stored credential
 hx docs [section]           # the manual; no argument lists its sections
 hx changelog [version]      # what shipped in each version
