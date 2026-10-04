@@ -448,6 +448,14 @@ class HXSession:
         if setter is not None:
             setter(key)
 
+    def catalogue_refreshed(self) -> None:
+        """Re-read the model in force from a catalogue that has just changed,
+        and show the window it now has (:meth:`AgentLoop.catalogue_refreshed`)."""
+        self.loop.catalogue_refreshed()
+        usage = self.loop.session.usage
+        self.status.set_context(usage.context_tokens, usage.context_window)
+        self.runner.request_render()
+
     async def use_route_for(self, model_id: str) -> None:
         """Point the session at whichever provider serves ``model_id``.
 
@@ -834,6 +842,11 @@ class HXSession:
         finished = asyncio.Event()
         self._overlay_finished = finished
         self._size_overlay(component)
+        # For one that changes without a keystroke - a refresh landing - and so
+        # has to ask for the frame itself.
+        set_redraw = getattr(component, "set_redraw", None)
+        if set_redraw is not None:
+            set_redraw(self.runner.request_render)
         self.view.show(component)
         self.runner.request_immediate_render()
         try:

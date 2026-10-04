@@ -51,6 +51,7 @@ from hx.core.usage import TurnUsage
 from hx.net import with_tls_hint
 from hx.providers import claude_code_transcript as transcript
 from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, StreamEnd, StreamItem
+from hx.providers.claude_code_catalogue import DATED
 from hx.providers.claude_code_cli import CliProcess, Exit, ServedTool, ToolServer
 
 PROVIDER_ID = cc_auth.PROVIDER_ID
@@ -435,7 +436,7 @@ class ClaudeCodeProvider:
             frame = await frames.get()
             if isinstance(frame, Exit):
                 conversation.state = State.DEAD
-                raise ProviderError(_exit_message(frame, turn.rate_limit))
+                raise ProviderError(_exit_message(frame, turn.rate_limit, request.model))
             kind = frame.get("type")
             if kind == "stream_event" and frame.get("parent_tool_use_id") is None:
                 for item in turn.consume(frame.get("event") or {}):
@@ -465,7 +466,13 @@ class ClaudeCodeProvider:
                 payload = from_payload(turn)
                 if payload is not None:
                     yield payload
-                yield StreamEnd(turn.stop_reason(), turn.finish_usage(started))
+                window, output = _reported_limits(frame, request.model)
+                yield StreamEnd(
+                    turn.stop_reason(),
+                    turn.finish_usage(started),
+                    context_window=window,
+                    max_output_tokens=output,
+                )
                 return
 
     def _remember(self, conversation: Conversation, turn: _Turn) -> None:
@@ -800,6 +807,30 @@ def _wire_model(model_id: str) -> str:
     return model_id[len(MODEL_PREFIX) :] if model_id.startswith(MODEL_PREFIX) else model_id
 
 
+def _reported_limits(frame: dict[str, Any], model_id: str) -> tuple[int | None, int | None]:
+    """``(contextWindow, maxOutputTokens)`` Claude Code reports for the model run.
+
+    ``modelUsage`` is keyed by the resolved name, and lists every model the
+    turn touched - one Claude Code chose for itself among them - so only the
+    entry for the model asked for is taken. Started by alias (``opus``), that
+    entry cannot be told apart and nothing is taken.
+    """
+    wanted = _wire_model(model_id)
+    usage = frame.get("modelUsage")
+    for name, entry in usage.items() if isinstance(usage, dict) else ():
+        if not isinstance(entry, dict):
+            continue
+        names = {DATED.sub("", str(n)) for n in (name, entry.get("canonicalModel")) if n}
+        if wanted not in names:
+            continue
+        window, output = entry.get("contextWindow"), entry.get("maxOutputTokens")
+        return (
+            window if isinstance(window, int) and window > 0 else None,
+            output if isinstance(output, int) and output > 0 else None,
+        )
+    return None, None
+
+
 def _private_file(text: str) -> Path:
     fd, name = tempfile.mkstemp(prefix="hx-claude-", suffix=".md")
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -833,7 +864,9 @@ def _startup_failure(message: str, cli: CliProcess) -> str:
     return with_tls_hint(f"Claude Code failed to start: {message}")
 
 
-def _exit_message(frame: Exit, rate_limit: dict[str, Any] | None) -> str:
+def _exit_message(frame: Exit, rate_limit: dict[str, Any] | None, model_id: str) -> str:
+    if _needs_credits(rate_limit, frame.stderr):
+        return _credits_message(model_id, frame.stderr.strip())
     if rate_limit:
         return _limit_message(rate_limit)
     detail = frame.stderr.strip()
@@ -849,6 +882,8 @@ def _result_error(
     errors = frame.get("errors")
     text = "; ".join(str(e) for e in errors) if isinstance(errors, list) and errors else ""
     text = text or str(frame.get("result") or frame.get("subtype") or "unknown error")
+    if _needs_credits(rate_limit, text):
+        return _credits_message(request.model, text)
     if _billed_as_extra_usage(frame, text, rate_limit):
         return _extra_usage_message(request, text)
     if rate_limit or "usage limit" in text.lower() or "out of extra usage" in text.lower():
@@ -856,6 +891,40 @@ def _result_error(
     if "authentication" in text.lower() or "/login" in text:
         return f"{text.strip()}. {cc_auth.missing_message()}"
     return with_tls_hint(f"Claude Code: {text.strip()}")
+
+
+def _needs_credits(rate_limit: dict[str, Any] | None, text: str) -> bool:
+    """A turn refused because the model, or its long context, needs usage credits.
+
+    Claude Code reports it as a rejected rate limit, with the billing period's
+    reset beside it, but no usage window is reached: the plan does not include
+    what was asked for, and it fails the same way until credits are turned on.
+    """
+    if (rate_limit or {}).get("errorCode") == "credits_required":
+        return True
+    lowered = text.lower()
+    return "requires usage credits" in lowered or "usage credits required" in lowered
+
+
+def _credits_message(model_id: str, detail: str) -> str:
+    """Said in HX's words alone: Claude Code's own adds a link meant for its
+    CLI and advice for flags HX sets itself."""
+    model = _wire_model(model_id)
+    base = model.removesuffix("[1m]")
+    lowered = detail.lower()
+    # Asked for at 1M, it is the long context that needs them - unless what was
+    # said names the model itself: "Fable 5.1 requires usage credits".
+    names_model = "requires usage credits" in lowered
+    if "1m context" in lowered or "long context" in lowered or (model != base and not names_model):
+        what = f"The 1M context of {base} needs"
+        instead = f"pick {MODEL_PREFIX}{base} for its standard context"
+    else:
+        what = f"{base} needs"
+        instead = "pick another model"
+    return (
+        f"{what} usage credits, which your Claude plan has off - its usage limits are not "
+        f"reached. Turn them on at claude.ai/settings/usage and send again, or {instead}."
+    )
 
 
 def _billed_as_extra_usage(

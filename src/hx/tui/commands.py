@@ -13,9 +13,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hx.core.usage import format_cost, format_tokens
+
+if TYPE_CHECKING:
+    from hx.providers.models import ModelRegistry
 
 Handler = Callable[["CommandContext", str], Awaitable[None]]
 
@@ -104,7 +107,7 @@ class CommandRegistry:
 async def cmd_model(ctx: CommandContext, args: str) -> None:
     """``/model [query]`` - fuzzy picker over the models this machine can reach,
     showing route, context window, price per Mtok, and cache support."""
-    from hx.providers.models import ModelRegistry
+    from hx.providers.models import match_models
     from hx.tui.views.pickers import ModelPicker
 
     registry: ModelRegistry | None = ctx.app.models
@@ -112,21 +115,15 @@ async def cmd_model(ctx: CommandContext, args: str) -> None:
         ctx.app.notice("No model registry is loaded.", "warning")
         return
     await ctx.app.auth.check_external_logins()
+    if await registry.revalidate(ctx.app.auth):
+        ctx.app.catalogue_refreshed()
     models = _reachable(ctx, registry.all())
-    if not models:
-        # A recorded failure replaces the remedy rather than trailing it:
-        # "run /models refresh" is not advice when refresh is what failed.
-        ctx.app.notice(
-            f"No models available. {registry.refresh_error}"
-            if registry.refresh_error
-            else "No models available. Run /models refresh, or /login to sign in.",
-            "warning",
-        )
-        return
 
     query = args.strip()
-    if query:
-        matches = registry.search(query)
+    if query and models:
+        # Over the reachable models only, as the picker is: a match on a route
+        # with no credential would be switched to by a single hit.
+        matches = match_models(models, query)
         # An id typed in full is a choice, not a query: it prefixes its own
         # variants (…-flash, …-flash-0731), so matching alone never narrows it.
         exact = next((m for m in matches if m.id.lower() == query.lower()), None)
@@ -141,9 +138,49 @@ async def cmd_model(ctx: CommandContext, args: str) -> None:
         else:
             models = matches
 
-    chosen = await ctx.app.ask(ModelPicker(models, ctx.session.meta.model, initial=query))
+    async def reload() -> tuple[list[Any], list[str]]:
+        try:
+            await registry.refresh(ctx.app.auth)
+        finally:
+            ctx.app.catalogue_refreshed()
+        fresh = _reachable(ctx, registry.all())
+        errors = [
+            f"Could not list this account's {label} models: {error}"
+            for label, error in registry.subscription_errors()
+        ]
+        return fresh, errors + _model_notes(registry, fresh)
+
+    chosen = await ctx.app.ask(
+        ModelPicker(
+            models,
+            ctx.session.meta.model,
+            initial=query,
+            notes=_model_notes(registry, models),
+            reload=reload,
+        )
+    )
     if chosen:
         await _switch_model(ctx, chosen)
+
+
+def _model_notes(registry: ModelRegistry, models: list[Any]) -> list[str]:
+    """What goes under the model list: why a model is missing from it.
+
+    "Why is the new Opus not here?" is asked in the picker, and the answer is
+    an update to the program that lists it. An empty list still opens, so
+    that ctrl+r is there to fill it.
+    """
+    notes = registry.subscription_advice({model.provider_id for model in models})
+    if models:
+        return notes
+    # A recorded failure is the reason, ahead of the remedy: "ctrl+r fetches
+    # the catalogue" reads as untried when it is what just failed.
+    reason = (
+        f"No models available: {registry.refresh_error}. ctrl+r tries again"
+        if registry.refresh_error
+        else "No models available. ctrl+r fetches the catalogue"
+    )
+    return [f"{reason}; /login signs in.", *notes]
 
 
 def _reachable(ctx: CommandContext, models: list[Any]) -> list[Any]:
@@ -301,7 +338,7 @@ async def cmd_effort(ctx: CommandContext, args: str) -> None:
         if not info.reasoning_levels:
             ctx.app.notice(
                 f"{model_id} publishes no reasoning levels, so there is nothing to pick "
-                "from. `/models refresh` fetches them for a subscription model.",
+                "from. ctrl+r in /model fetches them for a subscription model.",
                 "warning",
             )
             return
@@ -346,25 +383,6 @@ async def cmd_effort(ctx: CommandContext, args: str) -> None:
             "and the route decides. Only subscription models use it today.",
             "warning",
         )
-
-
-async def cmd_models(ctx: CommandContext, args: str) -> None:
-    """``/models refresh`` - re-fetch the catalogue."""
-    if args.strip() != "refresh":
-        ctx.app.notice("Usage: /models refresh", "warning")
-        return
-    from hx.net import describe
-
-    try:
-        await ctx.app.models.refresh(ctx.app.auth)
-    except Exception as exc:
-        ctx.app.notice(f"Model refresh failed: {describe(exc)}", "error")
-        return
-    for label, error in ctx.app.models.subscription_errors():
-        # Not fatal - the rest of the catalogue refreshed - but silence here
-        # reads as "your subscription has these two models", which is a lie.
-        ctx.app.notice(f"Could not list this account's {label} models: {error}", "warning")
-    ctx.app.notice(f"Refreshed {len(ctx.app.models.all())} models.", "success")
 
 
 async def cmd_clear(ctx: CommandContext, args: str) -> None:
@@ -981,8 +999,11 @@ async def _refresh_after_login(ctx: CommandContext, provider_id: str) -> int:
         await ctx.app.models.refresh(ctx.app.auth)
     except Exception as exc:
         ctx.app.notice(f"Model refresh failed: {describe(exc)}", "warning")
+    ctx.app.catalogue_refreshed()
     for label, error in ctx.app.models.subscription_errors():
         ctx.app.notice(f"Could not list this account's {label} models: {error}", "warning")
+    for advice in ctx.app.models.subscription_advice():
+        ctx.app.notice(advice, "warning")
     return sum(1 for model in ctx.app.models.all() if model.provider_id == provider_id)
 
 
@@ -1274,7 +1295,6 @@ def build_default_commands() -> CommandRegistry:
     registry = CommandRegistry()
     for command in (
         Command("model", "Choose the model", cmd_model, "[query]", takes_args=True),
-        Command("models", "Refresh the model catalogue", cmd_models, "refresh", takes_args=True),
         Command(
             "effort", "Set the reasoning depth", cmd_effort, "[level|default]", takes_args=True
         ),

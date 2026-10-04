@@ -291,13 +291,10 @@ class Runtime:
             self.notices.append(f"Model catalogue refresh failed: {describe(exc)}")
             return
         finally:
-            # The loop resolved its model before the refresh, from the cache
-            # being replaced. Left alone it would gauge against yesterday's
-            # context window and decide image support from a cache that did
-            # not record it - until the user happened to switch models.
-            self.loop.model_info = self.models.get_or_default(self.loop.model)
+            self.loop.catalogue_refreshed()
         for label, error in self.models.subscription_errors():
             self.notices.append(f"Could not list this account's {label} models: {error}")
+        self.notices.extend(self.models.subscription_advice())
 
     async def aclose(self) -> None:
         if self.mcp is not None:
@@ -489,6 +486,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         project_context=project_context,
         instructions=instructions,
         hooks=hooks,
+        models=models,
     )
 
     return Runtime(
@@ -1303,6 +1301,8 @@ def _report_models_after_login(provider_id: str) -> None:
         print(f"Could not refresh the model list: {describe(exc)}", file=sys.stderr)
     for label, error in models.subscription_errors():
         print(f"Could not list this account's {label} models: {error}", file=sys.stderr)
+    for advice in models.subscription_advice():
+        print(advice, file=sys.stderr)
 
     available = [m.id for m in models.all() if m.provider_id == provider_id]
     if not available:

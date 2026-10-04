@@ -8,7 +8,8 @@ import threading
 import time
 
 from tests.e2e.conftest import HX, SANDBOX, SANDBOX_STATUS
-from tests.e2e.stub import GPT5, Stub, call, say
+from tests.e2e.stub import GPT5, SONNET, Stub, call, say
+from tests.e2e.test_claude_code import flat, gauge
 
 
 def test_slash_opens_command_completion(hx: HX) -> None:
@@ -18,7 +19,7 @@ def test_slash_opens_command_completion(hx: HX) -> None:
     screen = term.wait_for("/model        Choose the model")
     term.snapshot("completion for /mo")
     assert "/mode         Set the permission mode" in screen
-    assert "/models" in screen
+    assert "/models" not in screen, "refreshing lives in the /model picker, as ctrl+r"
     assert "List commands and keys" not in screen, "/help does not match"
 
 
@@ -108,6 +109,136 @@ def test_ctrl_l_switches_the_model_and_remembers_it(hx: HX, stub: Stub) -> None:
     assert stub.requests[0].model == GPT5
     saved = json.loads((hx.hx_home / "settings.json").read_text())
     assert saved["models"]["model"] == GPT5
+
+
+def test_ctrl_r_refreshes_the_model_picker_in_place(hx: HX, stub: Stub) -> None:
+    """ctrl+r in the model picker fetches the catalogue again with the picker still open: the
+    filter and the selection survive, a model published since appears, a second ctrl+r while
+    one is out does not ask twice, and a failed refresh says why under the list and keeps what
+    was there. The new model is then a real choice: the next turn goes to it."""
+    newer = "openai/gpt-5.5"
+    stub.script(say("Answered by GPT-5.5."))
+    term = hx.tui()
+    term.submit("/model")
+    screen = term.wait_for("Select model")
+    assert "ctrl+r refresh" in screen
+    assert newer not in screen
+
+    def listed(screen: str) -> str:
+        """The picker alone: the status bar names the model in force too."""
+        return screen.split("Select model", 1)[-1].split("esc cancel", 1)[0]
+
+    term.type("openai")
+    term.wait_for(lambda s: "deepseek" not in listed(s) and "sonnet" not in listed(s))
+    stub.models = [
+        *stub.models,
+        {
+            "id": newer,
+            "name": "OpenAI: GPT-5.5",
+            "context_length": 1_000_000,
+            "top_provider": {"context_length": 1_000_000, "max_completion_tokens": 128_000},
+            "pricing": {"prompt": "0.000002", "completion": "0.000016"},
+            "supported_parameters": ["tools", "reasoning"],
+            "architecture": {"input_modalities": ["text", "image"]},
+        },
+    ]
+    stub.models_hold = threading.Event()
+    fetches = stub.model_fetches
+    term.press("ctrl+r")
+    screen = term.wait_for("Refreshing")
+    term.snapshot("model picker refreshing")
+    assert newer not in screen
+    term.press("ctrl+r")
+    stub.models_hold.set()
+    screen = term.wait_for(lambda s: newer in s and "Refreshed" in s, timeout=15)
+    term.settle()
+    screen = term.text()
+    term.snapshot("model picker refreshed in place")
+    assert stub.model_fetches == fetches + 1, "a second ctrl+r while one is out asks again"
+    assert "Select model" in screen, "the picker stays open"
+    lines = screen.splitlines()
+    title = next(i for i, line in enumerate(lines) if "Select model" in line)
+    assert lines[title + 1].strip() == "openai", "the filter survives"
+    assert re.search(r"→\s+openai/gpt-5\s", screen), "the selection stays on the same model"
+    assert re.search(r"openai/gpt-5\.5\s+\S+\s+\$2\.00/\$16\.00", screen)
+
+    stub.models_down = True
+    term.press("ctrl+r")
+    screen = term.wait_for("Refresh failed", timeout=15)
+    term.snapshot("model picker refresh failed")
+    assert newer in screen, "a failed refresh keeps the list it had"
+    assert "Refreshed" not in screen, "the old outcome is replaced, not stacked"
+
+    term.press(*["backspace"] * len("openai"))
+    term.type("gpt-5.5")
+    term.wait_for(lambda s: re.search(r"→\s+openai/gpt-5\.5\s", s) is not None)
+    term.press("enter")
+    term.wait_for(f"Model set to {newer}")
+    term.submit("who are you?")
+    term.wait_for("Answered by GPT-5.5.")
+    assert stub.requests[0].model == newer
+
+
+def test_a_refresh_moves_the_session_in_progress_to_the_new_window(hx: HX, stub: Stub) -> None:
+    """OpenRouter raising a model's window mid-session reaches the session already running on
+    it: after ctrl+r in /model, the gauge - and the compaction threshold measured against the
+    same window - reads the new size with the tokens already used unchanged, without the
+    model being picked again."""
+    stub.script(say("Answered."))
+    term = hx.tui()
+    term.submit("hello")
+    term.wait_for("Answered.")
+    before = term.wait_for(lambda s: gauge(s).endswith("/200k") and not gauge(s).startswith("0/"))
+    used = gauge(before).split("/")[0]
+
+    stub.models = [
+        {**entry, "context_length": 1_000_000} if entry["id"] == SONNET else entry
+        for entry in stub.models
+    ]
+    term.submit("/model")
+    term.wait_for("Select model")
+    term.press("ctrl+r")
+    term.wait_for("Refreshed", timeout=15)
+    term.press("esc")
+    term.wait_gone("Select model")
+    screen = term.wait_for(lambda s: gauge(s) == f"{used}/1M")
+    term.snapshot("the session in progress at the refreshed window")
+    assert "Model set to" not in screen, "the model was not picked again"
+
+
+def test_model_picker_opens_empty_and_ctrl_r_fills_it(hx: HX, stub: Stub) -> None:
+    """With the catalogue unreachable since startup, /model still opens - saying why it is
+    empty and that ctrl+r tries again - rather than refusing with a notice; once the network
+    is back, ctrl+r fills the list in place, the explanation goes, and a pick from it routes
+    the next turn."""
+    stub.models_down = True
+    stub.script(say("Answered by GPT-5."))
+    term = hx.tui()
+    term.submit("/model")
+    screen = term.wait_for("Select model")
+    term.settle()
+    screen = term.text()
+    term.snapshot("model picker with no catalogue")
+    assert "nothing to list" in screen
+    assert "no matches" not in screen, "no filter was typed, so nothing failed to match"
+    assert "No models available: " in flat(screen) and "ctrl+r tries again" in flat(screen)
+
+    stub.models_down = False
+    term.press("ctrl+r")
+    screen = term.wait_for(lambda s: "Refreshed" in s and "openai/gpt-5" in s, timeout=15)
+    term.settle()
+    screen = term.text()
+    term.snapshot("model picker filled by ctrl+r")
+    assert "No models available" not in screen
+    assert "nothing to list" not in screen
+
+    term.type("gpt-5")
+    term.wait_for(lambda s: re.search(r"→\s+openai/gpt-5\s", s) is not None)
+    term.press("enter")
+    term.wait_for(f"Model set to {GPT5}")
+    term.submit("who are you?")
+    term.wait_for("Answered by GPT-5.")
+    assert stub.requests[0].model == GPT5
 
 
 def test_effort_carries_into_every_new_session(hx: HX) -> None:

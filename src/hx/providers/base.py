@@ -38,6 +38,11 @@ class StreamDelta:
 class StreamEnd:
     stop_reason: StopReason
     usage: TurnUsage = field(default_factory=TurnUsage)
+    context_window: int | None = None
+    """The model's window as the backend reported it running this turn, when
+    it does. Truer than the catalogue's figure, which for some routes is a
+    guess: Claude Code lists its models without their sizes."""
+    max_output_tokens: int | None = None
 
 
 StreamItem = StreamDelta | StreamEnd

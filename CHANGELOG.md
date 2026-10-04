@@ -26,6 +26,48 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- When the installed Claude Code is behind its current release - and so lists older Claude
+  models than your subscription can run - `/model` says so under the list, with the command
+  that updates it (`brew upgrade --cask claude-code` for a Homebrew install, otherwise
+  `claude update`). After updating, the next `/model` lists the new models; no
+  refresh needed.
+
+### Changed
+
+- The model catalogue is refreshed from inside the `/model` picker: press `ctrl+r`. The
+  list updates in place and keeps your filter and selection; the outcome, or why the refresh
+  failed, shows under the list. With no models at all, `/model` now opens anyway and says
+  so, so `ctrl+r` is there to fill it.
+
+### Removed
+
+- `/models refresh`. It sat one letter away from `/model` and did nothing without its one
+  argument; use `ctrl+r` in the `/model` picker.
+
+### Fixed
+
+- On the `claude-code` route, the context window is the one Claude Code reports, not a
+  200k guess: Opus 5.5 runs with 1M. Claude Code lists its models without their sizes, and
+  what it serves depends on the plan, so a model starts at the window it was measured
+  serving on every plan - 1M for Opus 5.5, Sonnet 5.5, Sonnet 5 and Opus 4.7, 200k
+  otherwise - until its first turn reports the real window and maximum output for your
+  account. From then on the context gauge, the compaction threshold, the `/model` picker
+  and later sessions all use it, and a catalogue refresh keeps it.
+- A model Claude Code lists at its long context - Fable 5.1 as `claude-fable-5-1[1m]` -
+  runs at it: `/model` offers `claude-code/claude-fable-5-1[1m]` at 1M, where HX used to
+  drop the `[1m]` and run the model at its standard context.
+- A turn refused because the model, or its 1M context, needs usage credits your Claude plan
+  has off no longer reads "usage limit is reached. It resets at ...": HX says what needs the
+  credits, where to turn them on, and which model runs without them. Once they are on, the
+  next turn runs.
+- After a catalogue refresh (`ctrl+r` in `/model`, or signing in), the session in progress
+  measures its context against the refreshed window, not the one it started with.
+- `/model anthropic` (or typing `anthropic` in the picker) lists the Claude models your Claude
+  Code subscription runs, first, ahead of the per-token OpenRouter ones; `openai` does the same
+  for Codex. Several words match in any order: `/model anthropic sonnet`.
+
 ---
 
 ## [0.2.13] - 2026-10-04

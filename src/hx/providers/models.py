@@ -4,18 +4,19 @@ Populated from OpenRouter's ``/api/v1/models`` and, for each signed-in
 subscription, from that backend's own per-account catalogue
 (:mod:`hx.providers.codex_catalogue`, :mod:`hx.providers.devin_catalogue`,
 :mod:`hx.providers.claude_code_catalogue`).
-Cached to ``~/.hx/models.json`` and refreshed on demand (``/models refresh``),
+Cached to ``~/.hx/models.json`` and refreshed on demand (ctrl+r in the ``/model`` picker),
 after a login, or when the cache is older than a day. The registry drives the
 ``/model`` picker, the context gauge, and cost fallback maths.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -184,6 +185,17 @@ class _Entitlement:
     """Why the list could not be fetched, in one line. Not fatal - the rest of
     the catalogue still refreshes and the fallback still offers models - but
     surfaced, so a picker missing the model someone just paid for says why."""
+    version: str | None = None
+    """The version of the program that answers for this login - Claude Code's
+    CLI - when it was last asked, whether or not it listed anything. The list
+    is that version's, so a different one installed since is asked again."""
+    advice: str | None = None
+    """What would widen the list, in one line: the update that program is
+    behind on. Stands only while :attr:`version` is the one installed."""
+
+
+_ASK = object()
+"""For :meth:`ModelRegistry._refresh_subscription`: the version is not known yet."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +207,10 @@ class _Subscription:
     fallback: tuple[ModelInfo, ...]
     fetch: Callable[[ResolvedAuth], Awaitable[list[ModelInfo]]] = field(repr=False)
     account: Callable[[ResolvedAuth], str | None] = field(repr=False)
+    version: Callable[[], Awaitable[str | None]] | None = field(default=None, repr=False)
+    """For a route whose list comes from a program installed here: its version."""
+    advise: Callable[[str | None], Awaitable[str | None]] | None = field(default=None, repr=False)
+    """Given :attr:`version`, the update that would list newer models, if any."""
 
 
 async def _fetch_codex(auth: ResolvedAuth) -> list[ModelInfo]:
@@ -219,6 +235,18 @@ def _claude_code_account(auth: ResolvedAuth) -> str | None:
     return str(auth.extra.get("account") or "") or None
 
 
+async def _claude_code_version() -> str | None:
+    from hx.providers import claude_code_catalogue
+
+    return await claude_code_catalogue.installed_version()
+
+
+async def _claude_code_advice(installed: str | None) -> str | None:
+    from hx.providers import claude_code_catalogue
+
+    return await claude_code_catalogue.update_advice(installed)
+
+
 def _codex_account(auth: ResolvedAuth) -> str | None:
     return str(auth.extra.get("account_id") or "") or None
 
@@ -236,7 +264,13 @@ SUBSCRIPTIONS: tuple[_Subscription, ...] = (
     _Subscription("openai-codex", "Codex", CODEX_MODELS, _fetch_codex, _codex_account),
     _Subscription("devin", "Devin", DEVIN_MODELS, _fetch_devin, _token_fingerprint),
     _Subscription(
-        "claude-code", "Claude Code", CLAUDE_CODE_MODELS, _fetch_claude_code, _claude_code_account
+        "claude-code",
+        "Claude Code",
+        CLAUDE_CODE_MODELS,
+        _fetch_claude_code,
+        _claude_code_account,
+        version=_claude_code_version,
+        advise=_claude_code_advice,
     ),
 )
 
@@ -263,6 +297,10 @@ class ModelRegistry:
         }
         """Per subscription route, what its backend said the login may call."""
         self._models: dict[str, ModelInfo] = {}
+        self._reported: dict[str, tuple[int, int]] = {}
+        """Per model id, ``(context window, max output)`` as its backend
+        reported them running it. Laid over the catalogue, whose figures for a
+        route that does not publish them - Claude Code - are a guess."""
         self._fetched_at: float = 0.0
         self._loaded = False
         self.refresh_error: str | None = None
@@ -279,6 +317,17 @@ class ModelRegistry:
             (sub.label, error)
             for sub in SUBSCRIPTIONS
             if (error := self._entitled[sub.provider_id].error)
+        ]
+
+    def subscription_advice(self, routes: Iterable[str] | None = None) -> list[str]:
+        """One line per subscription whose list an update would widen - of
+        ``routes`` only, when given."""
+        wanted = None if routes is None else set(routes)
+        return [
+            advice
+            for sub in SUBSCRIPTIONS
+            if (wanted is None or sub.provider_id in wanted)
+            and (advice := self._entitled[sub.provider_id].advice)
         ]
 
     def get(self, model_id: str) -> ModelInfo:
@@ -314,14 +363,43 @@ class ModelRegistry:
                 is_subscription=spec.is_subscription,
             )
 
+    def adopt_limits(self, model_id: str, context_window: int, max_output_tokens: int) -> None:
+        """Keep the limits a backend reported for a model, over the catalogue's.
+
+        Saved at once: the next session should start on the true window rather
+        than the guess, and a refresh - which lists the model without its size
+        again - must not put the guess back.
+        """
+        if not self._loaded:
+            self.load_cache()
+        limits = (context_window, max_output_tokens)
+        if self._reported.get(model_id) == limits:
+            return
+        self._reported[model_id] = limits
+        self._apply_reported()
+        self.save_cache()
+
+    def _forget_reported(self, provider_id: str) -> None:
+        """Drop the limits reported for one route's models."""
+        from hx.providers.registry import provider_for
+
+        self._reported = {
+            model_id: limits
+            for model_id, limits in self._reported.items()
+            if provider_for(model_id).id != provider_id
+        }
+
+    def _apply_reported(self) -> None:
+        for model_id, (window, output) in self._reported.items():
+            if (info := self._models.get(model_id)) is not None:
+                self._models[model_id] = replace(
+                    info, context_window=window, max_output_tokens=output
+                )
+
     def all(self) -> list[ModelInfo]:
         if not self._loaded:
             self.load_cache()
         return sorted(self._models.values(), key=lambda m: m.id)
-
-    def search(self, query: str) -> list[ModelInfo]:
-        """Fuzzy match for the ``/model`` picker, ranked by match quality."""
-        return match_models(self.all(), query)
 
     @property
     def is_stale(self) -> bool:
@@ -339,6 +417,10 @@ class ModelRegistry:
         from hx.net import describe
         from hx.providers.openrouter import fetch_models
 
+        if not self._loaded:
+            # So a failure below leaves the cached catalogue in place - and the
+            # cache written then keeps it - rather than an empty one.
+            self.load_cache()
         # Off the event loop, before the synchronous credential checks below.
         await resolver.check_external_logins()
         # Asked for first: a broken OpenRouter key raises below, and it must not
@@ -353,8 +435,11 @@ class ModelRegistry:
             except Exception as exc:
                 # Recorded and re-raised, and the catalogue we already had is
                 # left alone: a refresh that cannot reach the network is no
-                # reason to lose yesterday's models.
+                # reason to lose yesterday's models. What the subscriptions
+                # answered above still lands.
                 self.refresh_error = describe(exc)
+                self._merge_static()
+                self.save_cache()
                 raise
             for entry in raw:
                 try:
@@ -370,7 +455,36 @@ class ModelRegistry:
         self._fetched_at = time.time()
         self.save_cache()
 
-    async def _refresh_subscription(self, sub: _Subscription, resolver: AuthResolver) -> None:
+    async def revalidate(self, resolver: AuthResolver) -> bool:
+        """Ask again every subscription whose program has changed version since.
+
+        Updating Claude Code changes which models it lists - that is what its
+        update hint is for - and the catalogue is only refreshed once a day.
+        Without this the picker would go on offering the old models, and the
+        hint to update, until tomorrow. Costs one ``--version`` when nothing
+        changed. Returns whether the catalogue changed.
+        """
+        if not self._loaded:
+            self.load_cache()
+        changed = False
+        for sub in SUBSCRIPTIONS:
+            if sub.version is None or not resolver.has_credential(sub.provider_id):
+                continue
+            installed = await sub.version()
+            # None is a CLI that did not answer in time, not a new version:
+            # asking it for its list as well would only wait again.
+            if installed is None or installed == self._entitled[sub.provider_id].version:
+                continue
+            await self._refresh_subscription(sub, resolver, installed)
+            changed = True
+        if changed:
+            self._merge_static()
+            self.save_cache()
+        return changed
+
+    async def _refresh_subscription(
+        self, sub: _Subscription, resolver: AuthResolver, installed: object = _ASK
+    ) -> None:
         """Ask a subscription backend which models this login may actually call.
 
         The answer is per account and cannot be derived from the plan name, so
@@ -378,6 +492,9 @@ class ModelRegistry:
         failure to answer: it is what a client version the backend does not
         recognise returns, and emptying the picker is worse than showing the
         list HX already had.
+
+        ``installed`` is the version :attr:`_Subscription.version` gave, when
+        the caller has already asked.
         """
         from hx.net import describe
 
@@ -385,6 +502,7 @@ class ModelRegistry:
         if not resolver.has_credential(sub.provider_id):
             # Signed out: the previous account's entitlements are not ours.
             self._entitled[sub.provider_id] = _Entitlement()
+            self._forget_reported(sub.provider_id)
             return
         try:
             auth = await resolver.resolve(sub.provider_id)
@@ -392,19 +510,40 @@ class ModelRegistry:
             entitled.error = describe(exc)
             return
 
+        if installed is _ASK:
+            installed = await sub.version() if sub.version is not None else None
+        assert installed is None or isinstance(installed, str)
         account = sub.account(auth)
         if account != entitled.account:
             # A different login, so what is cached describes somebody else's
             # subscription. Dropped before the fetch rather than after it: if
             # the fetch then fails, the shipped list is a better answer than
             # another account's entitlements.
+            if entitled.account is not None:
+                # So are the windows its turns reported: another plan can
+                # serve the same model smaller.
+                self._forget_reported(sub.provider_id)
             entitled.models = None
             entitled.account = None
 
-        try:
-            fetched = await sub.fetch(auth)
-        except Exception as exc:
-            entitled.error = describe(exc)
+        async def listing() -> list[ModelInfo] | None:
+            try:
+                return await sub.fetch(auth)
+            except Exception as exc:
+                entitled.error = describe(exc)
+                return None
+
+        async def advice() -> str | None:
+            return await sub.advise(installed) if sub.advise is not None else None
+
+        # Side by side: the advice asks the network, the list a process.
+        fetched, entitled.advice = await asyncio.gather(listing(), advice())
+        # Kept even when the list did not come - a CLI too old to answer is
+        # still the one installed, and the update is then the whole remedy.
+        # Asking again on every /model would cost a handshake each time; a
+        # refresh, or a different version, asks again.
+        entitled.version = installed
+        if fetched is None:
             return
         entitled.error = None
         if fetched:
@@ -412,7 +551,18 @@ class ModelRegistry:
             entitled.account = account
 
     def _merge_static(self) -> None:
-        """Add the subscription routes, whose models are never in the OpenRouter fetch."""
+        """Add the subscription routes, whose models are never in the OpenRouter fetch.
+
+        Whatever a route listed before goes first: a list asked for again can
+        drop a model - an updated Claude Code no longer offers Opus 4.8 under
+        its own name - and a dropped model left in the picker fails when picked.
+        """
+        routes = {sub.provider_id for sub in SUBSCRIPTIONS}
+        self._models = {
+            model_id: info
+            for model_id, info in self._models.items()
+            if info.provider_id not in routes
+        }
         for sub in SUBSCRIPTIONS:
             fetched = self._entitled[sub.provider_id].models
             for info in fetched if fetched is not None else sub.fallback:
@@ -424,6 +574,7 @@ class ModelRegistry:
             # catalogue entry would cost that model its context window and its
             # `/effort` levels.
             self._models.setdefault(info.id, info)
+        self._apply_reported()
 
     def set_reasoning_effort(self, effort: str | None) -> None:
         """Ask for an effort on every model that offers one.
@@ -530,6 +681,7 @@ class ModelRegistry:
             self._fetched_at = 0.0
         for sub in SUBSCRIPTIONS:
             self._load_cached_subscription(sub, payload.get(_cache_key(sub)))
+        self._reported = _reported_limits(payload.get("reported_limits"))
         for entry in payload.get("models", []):
             try:
                 info = parse_model_entry(entry)
@@ -548,6 +700,10 @@ class ModelRegistry:
         """
         if not isinstance(payload, dict):
             return
+        entitled = _Entitlement(
+            version=_text(payload.get("version")), advice=_text(payload.get("advice"))
+        )
+        self._entitled[sub.provider_id] = entitled
         entries = payload.get("models")
         if not isinstance(entries, list):
             return
@@ -557,9 +713,8 @@ class ModelRegistry:
             return
         if restored:
             account = payload.get("account_id")
-            self._entitled[sub.provider_id] = _Entitlement(
-                models=restored, account=str(account) if account else None
-            )
+            entitled.models = restored
+            entitled.account = str(account) if account else None
 
     def save_cache(self) -> None:
         path = models_cache_file()
@@ -591,14 +746,40 @@ class ModelRegistry:
         }
         for sub in SUBSCRIPTIONS:
             entitled = self._entitled[sub.provider_id]
-            if entitled.models is not None:
-                payload[_cache_key(sub)] = {
-                    "account_id": entitled.account,
-                    "models": [_subscription_entry(m) for m in entitled.models],
-                }
+            if entitled.models is None and entitled.version is None:
+                continue
+            block: dict[str, Any] = {
+                "account_id": entitled.account,
+                "models": [_subscription_entry(m) for m in entitled.models or ()],
+            }
+            if entitled.version is not None:
+                block["version"] = entitled.version
+            if entitled.advice is not None:
+                block["advice"] = entitled.advice
+            payload[_cache_key(sub)] = block
+        if self._reported:
+            payload["reported_limits"] = {
+                model_id: {"context_window": window, "max_output_tokens": output}
+                for model_id, (window, output) in self._reported.items()
+            }
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
         tmp.replace(path)
+
+
+def _reported_limits(block: Any) -> dict[str, tuple[int, int]]:
+    """The cache's ``reported_limits``, dropping any entry that is not two
+    positive integers: a guess is better than a window of zero."""
+    if not isinstance(block, dict):
+        return {}
+    limits: dict[str, tuple[int, int]] = {}
+    for model_id, entry in block.items():
+        if not isinstance(entry, dict):
+            continue
+        window, output = entry.get("context_window"), entry.get("max_output_tokens")
+        if isinstance(window, int) and isinstance(output, int) and window > 0 and output > 0:
+            limits[str(model_id)] = (window, output)
+    return limits
 
 
 def _predates_images(payload: dict[str, Any]) -> bool:
@@ -616,6 +797,10 @@ def _predates_images(payload: dict[str, Any]) -> bool:
         ):
             return True
     return False
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _cache_key(sub: _Subscription) -> str:
@@ -666,8 +851,13 @@ def _subscription_model(provider_id: str, entry: dict[str, Any]) -> ModelInfo:
 
 
 def match_models(models: list[ModelInfo], query: str) -> list[ModelInfo]:
-    """Rank models against a query: id prefix first, then substring, then
-    subsequence.
+    """Rank models against a query: id prefix first, then words in the id, then
+    words in the name, then subsequence.
+
+    Words match in any order - ``anthropic sonnet`` - each found whole, ahead
+    of the subsequence match that any long enough id satisfies. The name ranks
+    below the id because it carries notes: Claude Code's Opus is described
+    with "usage vs Sonnet", and is not what ``sonnet`` asked for.
 
     Lives here rather than in the picker so that ``/model opus`` and typing
     ``opus`` into the picker's filter box narrow the same list the same way.
@@ -675,17 +865,52 @@ def match_models(models: list[ModelInfo], query: str) -> list[ModelInfo]:
     needle = query.strip().lower()
     if not needle:
         return list(models)
-    scored: list[tuple[int, str, ModelInfo]] = []
+    words = needle.split()
+    scored: list[tuple[int, bool, str, ModelInfo]] = []
     for model in models:
-        haystack = f"{model.id} {model.name}".lower()
-        if needle in haystack:
-            score = 0 if model.id.lower().startswith(needle) else 1
-        elif _subsequence(needle, haystack):
+        ids = [model.id.lower(), *_maker_ids(model)]
+        in_ids = " ".join(ids)
+        haystack = f"{in_ids} {model.name.lower()}"
+        if all(word in in_ids for word in words):
+            score = 0 if any(i.startswith(words[0]) for i in ids) else 1
+        elif all(word in haystack for word in words):
             score = 2
+        elif any(_subsequence(needle, field) for field in (*ids, model.name.lower())):
+            # Per field: across all of them joined, letters strewn over two
+            # ids match nearly anything - "claude-opus" found Sonnet.
+            score = 3
         else:
             continue
-        scored.append((score, model.id, model))
-    return [m for _, _, m in sorted(scored, key=lambda item: (item[0], item[1]))]
+        # Between equally good matches, the one a subscription already pays
+        # for comes before the same model billed per token.
+        scored.append((score, not model.is_subscription, model.id, model))
+    return [m for *_, m in sorted(scored, key=lambda item: item[:3])]
+
+
+_MAKERS: tuple[tuple[str, str], ...] = (
+    ("claude", "anthropic"),
+    ("sonnet", "anthropic"),
+    ("opus", "anthropic"),
+    ("haiku", "anthropic"),
+    ("gpt", "openai"),
+)
+"""Model-name prefix to maker, for the subscription routes' models. Claude
+Code's own aliases (``sonnet``) are in it: they stand in when it cannot be
+asked."""
+
+
+def _maker_ids(model: ModelInfo) -> list[str]:
+    """``anthropic/claude-sonnet-5`` for ``claude-code/claude-sonnet-5``.
+
+    An OpenRouter id leads with its maker; a subscription id leads with the
+    route. Searched under the maker's name too, so typing ``anthropic`` finds
+    the Claude models a subscription pays for rather than only the ones billed
+    per token.
+    """
+    if not model.is_subscription:
+        return []
+    slug = model.id.partition("/")[2].lower()
+    return [f"{maker}/{slug}" for prefix, maker in _MAKERS if slug.startswith(prefix)][:1]
 
 
 def parse_model_entry(entry: dict[str, Any]) -> ModelInfo:

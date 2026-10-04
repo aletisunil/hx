@@ -11,6 +11,9 @@ State lives in ``$E2E_CLAUDE_DIR``:
   test starts; ``cursor`` says how far it has been read;
 * ``auth.json`` - what ``claude auth status`` reports (absent: signed out);
 * ``status_delay`` - seconds ``claude auth status`` takes to answer;
+* ``version`` and ``models.json`` - which Claude Code this is: what
+  ``--version`` prints and the models ``initialize`` lists (absent: 2.1.205
+  and :data:`MODELS`);
 * ``log.jsonl`` - one line per thing a process saw or did, for assertions.
 
 HX's own bookkeeping calls - naming a session, summarising one for a compaction
@@ -67,6 +70,28 @@ MODELS = [
         "description": "Haiku 4.5 · Fastest for quick answers",
     },
 ]
+
+
+def models() -> list[dict[str, Any]]:
+    path = STATE / "models.json"
+    return json.loads(path.read_text()) if path.exists() else MODELS
+
+
+DEFAULT_LIMITS = (200_000, 64_000)
+"""``(contextWindow, maxOutputTokens)`` for a model with nothing set for it."""
+
+
+def limits() -> dict[str, tuple[int, int]]:
+    """Per resolved model, the limits a turn reports - set by ``FakeClaude.limits``."""
+    path = STATE / "limits.json"
+    if not path.exists():
+        return {}
+    return {model: (pair[0], pair[1]) for model, pair in json.loads(path.read_text()).items()}
+
+
+def version() -> str:
+    path = STATE / "version"
+    return path.read_text().strip() if path.exists() else "2.1.205"
 
 
 def log(kind: str, **fields: Any) -> None:
@@ -246,7 +271,7 @@ class Session:
                         "request_id": frame["request_id"],
                         "response": {
                             "commands": [],
-                            "models": MODELS,
+                            "models": models(),
                             "account": {
                                 "email": "e2e@example.com",
                                 "subscriptionType": "Claude Max",
@@ -286,6 +311,7 @@ class Session:
                         "is_error": False,
                         "result": turn.get("text", ""),
                         "session_id": f"fake-{PID}",
+                        "modelUsage": self.model_usage(),
                     }
                 )
                 return
@@ -310,6 +336,32 @@ class Session:
                     "parent_tool_use_id": None,
                 }
             )
+
+    def model_usage(self) -> dict[str, Any]:
+        """What Claude Code reports per model at the end of a turn, limits included.
+
+        Keyed by the resolved name, as Claude Code keys it, whether it was
+        started with an alias or the full name - with ``[1m]`` kept when the
+        model was asked for at its long context, and ``canonicalModel`` without."""
+        wanted = self._flag("--model") or "default"
+        resolved = next(
+            (m["resolvedModel"] for m in models() if wanted in (m["value"], m["resolvedModel"])),
+            wanted,
+        )
+        canonical = re.sub(r"-\d{8}$", "", resolved.removesuffix("[1m]"))
+        key = f"{canonical}[1m]" if wanted.endswith("[1m]") else canonical
+        window, output = limits().get(key, DEFAULT_LIMITS)
+        return {
+            key: {
+                "inputTokens": 10,
+                "outputTokens": 20,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "contextWindow": window,
+                "maxOutputTokens": output,
+                "canonicalModel": canonical,
+            }
+        }
 
     def next_turn(self) -> dict[str, Any] | None:
         if self.system and self.system.strip() == TITLE_SYSTEM:
@@ -354,8 +406,22 @@ class Session:
                 }
             )
         if turn.get("error"):
-            # An API failure: the CLI reports it as a success-shaped result
-            # with is_error set, and the HTTP status beside it when it had one.
+            # An API failure: the CLI says it in a synthetic assistant message,
+            # then reports a success-shaped result with is_error set, and the
+            # HTTP status beside it when it had one.
+            emit(
+                {
+                    "type": "assistant",
+                    "error": "rate_limit" if turn.get("rate_limit") else "unknown",
+                    "message": {
+                        "model": "<synthetic>",
+                        "role": "assistant",
+                        "stop_reason": "stop_sequence",
+                        "content": [{"type": "text", "text": turn["error"]}],
+                    },
+                    "parent_tool_use_id": None,
+                }
+            )
             frame = {
                 "type": "result",
                 "subtype": "success",
@@ -499,7 +565,8 @@ def main() -> int:
     if argv[:1] == ["auth"]:
         return auth(argv[1:])
     if argv[:1] in (["--version"], ["-v"]):
-        print("2.1.205 (Claude Code)")
+        log("version", path=sys.argv[0])
+        print(f"{version()} (Claude Code)")
         return 0
     if "-p" not in argv:
         print("fake claude: only -p and auth are scripted", file=sys.stderr)

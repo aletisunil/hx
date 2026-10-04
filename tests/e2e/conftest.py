@@ -27,7 +27,7 @@ import pytest
 
 from hx.permissions.sandbox import SandboxBackend, detect_backend
 from tests.e2e.report import REPO, Report, Step, TestRecord
-from tests.e2e.stub import SONNET, Stub
+from tests.e2e.stub import RELEASES_PATH, SONNET, Stub
 from tests.e2e.terminal import Terminal
 
 HX_BIN = Path(sys.executable).parent / "hx"
@@ -161,6 +161,8 @@ class HX:
             "TMPDIR": str(self.root),
             "HX_OPENROUTER_API_KEY": API_KEY,
             "HX_OPENROUTER_BASE_URL": self.stub.url,
+            # Never the real npm registry: which Claude Code is current is the stub's to say.
+            "HX_CLAUDE_CODE_RELEASES_URL": self.stub.url + RELEASES_PATH,
             "HX_MODEL": SONNET,
             "HX_TRUE_COLOR": "1",
             # Keys here are written to the pty, not typed: whatever the
@@ -298,10 +300,39 @@ class FakeClaude:
         self.hx = hx
         self.state = hx.root / "claude"
         self.state.mkdir(exist_ok=True)
-        shim = hx.bin / "claude"
-        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_CLAUDE}" "$@"\n')
-        shim.chmod(0o755)
+        self._write_shim(hx.bin / "claude")
         hx.extra_env["E2E_CLAUDE_DIR"] = str(self.state)
+
+    @staticmethod
+    def _write_shim(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_CLAUDE}" "$@"\n')
+        path.chmod(0o755)
+
+    def install(
+        self, version: str, models: list[dict[str, Any]] | None = None, *, cask: str | None = None
+    ) -> None:
+        """Make the ``claude`` on PATH Claude Code ``version``, listing ``models``
+        (the fake's default list when ``None``).
+
+        ``cask`` lays it out the way Homebrew does - the binary under
+        ``Caskroom/<cask>/<version>/``, linked from PATH - and installing again
+        is then an upgrade: the old version stays, the link moves.
+        """
+        (self.state / "version").write_text(version)
+        listed = self.state / "models.json"
+        if models is None:
+            listed.unlink(missing_ok=True)
+        else:
+            listed.write_text(json.dumps(models))
+        on_path = self.hx.bin / "claude"
+        on_path.unlink(missing_ok=True)
+        if cask is None:
+            self._write_shim(on_path)
+            return
+        binary = self.hx.root / "Caskroom" / cask / version / "claude"
+        self._write_shim(binary)
+        on_path.symlink_to(binary)
 
     def login(self, plan: str = "max", method: str = "claude.ai") -> None:
         (self.state / "auth.json").write_text(
@@ -320,6 +351,13 @@ class FakeClaude:
     def slow_status(self, seconds: float) -> None:
         """Make ``claude auth status`` take ``seconds`` to answer."""
         (self.state / "status_delay").write_text(str(seconds))
+
+    def limits(self, model: str, context_window: int, max_output_tokens: int) -> None:
+        """What a turn on ``model`` (a resolved name) reports as its limits."""
+        path = self.state / "limits.json"
+        current = json.loads(path.read_text()) if path.exists() else {}
+        current[model] = [context_window, max_output_tokens]
+        path.write_text(json.dumps(current))
 
     def use(self, model: str = "claude-code/claude-sonnet-5") -> None:
         self.hx.extra_env["HX_MODEL"] = model

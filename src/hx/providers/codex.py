@@ -203,7 +203,7 @@ def _error_message(status: int, body: str) -> str:
         return (
             "This ChatGPT account is not entitled to this model. Entitlement is "
             "per model and per account, and the account's real list is what the "
-            "Codex backend serves - run `/models refresh` and pick one of the "
+            "Codex backend serves - press ctrl+r in /model and pick one of the "
             "openai-codex models it offers. If the list comes back empty, check "
             "that the subscription is active and Codex is enabled for the account "
             "(chatgpt.com/codex); `hx auth` shows which account the stored login is on."

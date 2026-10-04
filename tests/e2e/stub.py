@@ -31,6 +31,11 @@ SONNET = "anthropic/claude-sonnet-4.5"
 GPT5 = "openai/gpt-5"
 TEXT_ONLY = "deepseek/deepseek-chat"
 
+CLAUDE_CODE_VERSION = "2.1.205"
+"""What the fake ``claude`` reports by default - the current release, so no
+test sees an update hint it did not set up."""
+RELEASES_PATH = "/claude-code/dist-tags"
+
 CATALOGUE: list[dict[str, Any]] = [
     {
         "id": SONNET,
@@ -193,6 +198,19 @@ class Stub:
         title model, caught with the call still out."""
         self.models = list(CATALOGUE)
         self.model_fetches = 0
+        self.models_down = False
+        """When set, the catalogue answers 503: OpenRouter unreachable."""
+        self.models_hold: threading.Event | None = None
+        """When set, the catalogue is answered only once this event is - a slow
+        network, caught with a refresh still out."""
+        self.claude_code_releases: dict[str, str] | None = {
+            "stable": CLAUDE_CODE_VERSION,
+            "latest": CLAUDE_CODE_VERSION,
+        }
+        """Claude Code's release channels, as npm's dist-tags answer them. HX is
+        pointed here with ``HX_CLAUDE_CODE_RELEASES_URL``; ``None`` answers 503,
+        an npm registry the network cannot reach."""
+        self.release_fetches = 0
         self._closing = threading.Event()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
@@ -279,7 +297,20 @@ class Stub:
             def do_GET(self) -> None:
                 if self.path.rstrip("/").endswith("/models"):
                     stub.model_fetches += 1
-                    self._json(200, {"data": stub.models})
+                    if stub.models_hold is not None:
+                        stub.models_hold.wait(timeout=30)
+                    if stub.models_down:
+                        self._json(503, {"error": {"message": "catalogue unavailable"}})
+                    else:
+                        self._json(200, {"data": stub.models})
+                    return
+                if self.path.rstrip("/").endswith(RELEASES_PATH):
+                    stub.release_fetches += 1
+                    releases = stub.claude_code_releases
+                    if releases is None:
+                        self._json(503, {"error": "registry unavailable"})
+                    else:
+                        self._json(200, releases)
                     return
                 self._json(404, {"error": {"message": f"no route {self.path}"}})
 

@@ -115,7 +115,7 @@ reach it at all.
 
 **Which Codex models you get** is decided by your ChatGPT account, not by HX.
 Signing in fetches the account's own list from the Codex backend, and `/model`
-offers exactly that; `/models refresh` asks again. Entitlement is per model —
+offers exactly that; ctrl+r in `/model` asks again. Entitlement is per model -
 the same `plus` account can run `gpt-5.6-sol` and be refused `gpt-5.3-codex` —
 so a model the picker does not list is one the subscription does not cover.
 
@@ -177,7 +177,7 @@ you to sign in again. On a machine with no browser at all, a session token in
 `HX_DEVIN_API_KEY` or `DEVIN_API_KEY` is used when nothing is saved.
 
 Signing in fetches the account's own model list, and `/model` offers exactly
-that; `/models refresh` asks again. Devin publishes each reasoning depth as a
+that; ctrl+r in `/model` asks again. Devin publishes each reasoning depth as a
 model of its own - Claude Opus 5 High, Claude Opus 5 Max - and HX folds each
 family into one model, so `/effort` picks the depth on Devin exactly as it does
 on Codex. A fast lane or a 1M-context lane stays a separate model, since it
@@ -223,8 +223,15 @@ rest - are removed from its environment; its TLS settings are kept (see
 `claude` other than the one on `PATH`.
 
 `/model` offers the models Claude Code lists for the account, each with the
-efforts it accepts for `/effort`; `/models refresh` asks again. When a usage
-limit is reached, HX says which one and when it resets.
+efforts it accepts for `/effort`; ctrl+r in `/model` asks again. A model Claude
+Code runs at its long context keeps `[1m]` in its id
+(`claude-code/claude-fable-5-1[1m]`), exactly as Claude Code's own `/model` runs
+it. Claude Code lists no context sizes, so a model starts at the window it was
+measured serving on every plan - 1M for Opus 5.5, Sonnet 5.5, Sonnet 5 and Opus
+4.7, otherwise 200k - and from its first turn uses the window Claude Code
+reports for your account. When a usage limit is reached, HX says which one and
+when it resets; when a model or its 1M context needs usage credits your plan
+has off, HX says that instead, and what to pick without them.
 
 **Web search.** Optional, and the one credential that is not a model route.
 It powers two tools:
@@ -380,7 +387,7 @@ be rebound (see [Keybindings](#keybindings)).
 | `ctrl+d` | exit, when the prompt is empty |
 | `shift+tab` | cycle permission mode |
 | `ctrl+p` | command palette |
-| `ctrl+l` | model picker |
+| `ctrl+l` | model picker; inside it, `ctrl+r` fetches the catalogue again |
 | `ctrl+o` | expand tool output (also `ctrl+r`) |
 | `ctrl+t` | show the current plan |
 | `ctrl+x` | copy the selected message to the clipboard |
@@ -486,8 +493,7 @@ silently resolved.
 
 | Command | Does |
 |---|---|
-| `/model [query]` | pick a model; shows context window, price per Mtok, cache support |
-| `/models refresh` | re-fetch the catalogue |
+| `/model [query]` | pick a model; shows context window, price per Mtok, cache support. `ctrl+r` in the picker re-fetches the catalogue |
 | `/effort [level]` | how hard a reasoning model thinks, from the levels it offers |
 | `/configure` | session settings and the API key |
 | `/login [provider]` | sign in to a model route |

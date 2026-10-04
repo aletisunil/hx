@@ -173,6 +173,7 @@ class SubagentRunner:
             model_info=self.models.get_or_default(model) if self.models else None,
             project_context=self.project_context,
             hooks=self.hooks,
+            models=self.models,
         )
         loop.origin = f"{definition.name} subagent"
         return loop

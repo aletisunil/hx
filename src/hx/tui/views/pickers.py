@@ -12,7 +12,9 @@ the longest id or title that would ever appear.
 
 from __future__ import annotations
 
+import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any, ClassVar
 
 from hx.core.usage import format_tokens
@@ -37,6 +39,11 @@ class Picker(Widget, Framed):
 
     title: str = ""
     placeholder: str = "Filter…"
+    notes: tuple[str, ...] = ()
+    """Lines under the list, about the list: why something is missing from it."""
+    status: tuple[str, str] | None = None
+    """``(role, text)`` under the notes: what the last thing asked of the
+    picker itself came to. One line, replaced rather than stacked."""
 
     CHROME = 9
     """Lines the frame spends on itself: two rules, four blank lines, the
@@ -53,6 +60,8 @@ class Picker(Widget, Framed):
         self.result: str | None = None
         self.done = False
         self._rows: list[tuple[str, list[str]]] = []
+        self._notes_height = 0
+        """Rows :attr:`notes` took at the last draw, wrapped to its width."""
         self._rows_available: Any = None
         """Rows the overlay may use, supplied by whoever put this on screen.
 
@@ -91,7 +100,7 @@ class Picker(Widget, Framed):
         # rather than resolved, which would not terminate.
         if len(self._rows) > 1:
             chrome += 1
-        return max(LIST_MINIMUM, room - chrome)
+        return max(LIST_MINIMUM, room - chrome - self._notes_height)
 
     # -- data --------------------------------------------------------------
 
@@ -113,6 +122,15 @@ class Picker(Widget, Framed):
     def draw(self, width: int) -> list[str]:
         laid_out = columns([cells for _value, cells in self._rows])
         current = self.current_value()
+        notes: list[Text | Spacer] = [Text(fg("warning", note), 1, 0) for note in self.notes]
+        if self.status is not None:
+            role, text = self.status
+            notes.append(Text(fg(role, text), 1, 0))
+        if notes:
+            notes.insert(0, Spacer(1))
+        # Measured before the window is chosen: a note wrapped to three lines
+        # costs the list three rows, or the frame runs off the bottom.
+        self._notes_height = sum(len(part.render(width)) for part in notes)
 
         body: list[str] = []
         for index in self._window():
@@ -123,7 +141,8 @@ class Picker(Widget, Framed):
             body.append(cursor + marker + laid_out[index])
 
         if not self._rows:
-            body.append(fg("muted", "no matches"))
+            # "no matches" over an empty filter blames a query nobody typed.
+            body.append(fg("muted", "no matches" if self.query else "nothing to list"))
         elif len(self._rows) > self.visible_rows():
             body.append(fg("muted", f"({self.selected + 1}/{len(self._rows)})"))
 
@@ -142,21 +161,16 @@ class Picker(Widget, Framed):
             Text(filter_line, 1, 0),
             Spacer(1),
             Lines(body),
+            *notes,
             Spacer(1),
-            Text(
-                hints_line(
-                    [
-                        Hint("↑↓", "move"),
-                        Hint("enter", "select"),
-                        Hint("esc", "cancel"),
-                    ]
-                ),
-                1,
-                0,
-            ),
+            Text(hints_line(self.hints()), 1, 0),
             *self.closing(),
         ]
         return [line for part in parts for line in part.render(width)]
+
+    def hints(self) -> list[Hint]:
+        """The keys this picker answers to, for the line under it."""
+        return [Hint("↑↓", "move"), Hint("enter", "select"), Hint("esc", "cancel")]
 
     def _window(self) -> range:
         """The visible slice, centred on the selection where it can be."""
@@ -235,6 +249,10 @@ class CommandPalette(Picker):
         ]
 
 
+Reload = Callable[[], Awaitable[tuple[list[Any], list[str]]]]
+"""Fetches the catalogue again: the models to list, and the notes to go under them."""
+
+
 class ModelPicker(Picker):
     """Model chooser.
 
@@ -246,6 +264,11 @@ class ModelPicker(Picker):
     two credentials installed, a subscription model priced at $0.00/$0.00 is
     indistinguishable from a free OpenRouter one, and the difference is the
     whole question of which account a turn lands on.
+
+    ctrl+r fetches the catalogue again in place. It is here rather than behind
+    a command of its own because this is where a missing model is noticed, and
+    closing the list to refresh it and then opening it again loses the filter
+    that showed the model was missing.
     """
 
     title = "Select model"
@@ -253,13 +276,77 @@ class ModelPicker(Picker):
 
     LIMIT: ClassVar[int] = 200
 
-    def __init__(self, models: list[Any], current: str, initial: str = "") -> None:
+    def __init__(
+        self,
+        models: list[Any],
+        current: str,
+        initial: str = "",
+        notes: list[str] | None = None,
+        reload: Reload | None = None,
+    ) -> None:
         self.models = models
         self.current = current
+        self.notes = tuple(notes or ())
+        self._reload = reload
+        self._reloading: asyncio.Task[None] | None = None
+        self._redraw: Callable[[], None] = lambda: None
+        """Asks for a frame. A refresh lands between keystrokes, when nothing
+        else would draw what it brought."""
         super().__init__(initial)
+
+    def set_redraw(self, redraw: Callable[[], None]) -> None:
+        self._redraw = redraw
 
     def current_value(self) -> str | None:
         return self.current
+
+    def hints(self) -> list[Hint]:
+        hints = super().hints()
+        if self._reload is not None:
+            hints.insert(2, Hint("ctrl+r", "refresh"))
+        return hints
+
+    def handle_input(self, key: str, data: str) -> bool:
+        if key == "ctrl+r" and self._reload is not None and not self.done:
+            self._start_reload()
+            return True
+        return super().handle_input(key, data)
+
+    def _start_reload(self) -> None:
+        # One at a time: a second press while the first is out would only ask
+        # the network the same question again.
+        if self._reloading is not None and not self._reloading.done():
+            return
+        self.status = ("muted", "Refreshing the catalogue…")
+        self.invalidate()
+        self._reloading = asyncio.get_running_loop().create_task(self._reload_now())
+
+    async def _reload_now(self) -> None:
+        from hx.net import describe
+
+        assert self._reload is not None
+        try:
+            models, notes = await self._reload()
+        except Exception as exc:
+            # The list already on screen stays: a refresh that cannot reach
+            # the network is no reason to lose the models it had.
+            self.status = ("error", f"Refresh failed: {describe(exc)}")
+        else:
+            # Kept on the model it was on rather than the row number, which
+            # now names whatever sorted into that slot - or, when there was
+            # none, on the model in force, as the picker opens.
+            selected = self._rows[self.selected][0] if self._rows else None
+            self.models = models
+            self.notes = tuple(notes)
+            self._rows = self.rows(self.query)
+            values = [value for value, _cells in self._rows]
+            self.selected = next(
+                (values.index(value) for value in (selected, self.current) if value in values),
+                min(self.selected, max(0, len(values) - 1)),
+            )
+            self.status = ("success", f"Refreshed {len(models)} models.")
+        self.invalidate()
+        self._redraw()
 
     def rows(self, query: str) -> list[tuple[str, list[str]]]:
         from hx.providers.models import match_models

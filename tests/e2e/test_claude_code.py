@@ -147,9 +147,8 @@ def test_a_conversation_keeps_one_process_until_the_model_changes(
     naming = [s for s in claude.spawns(tools=False) if s["system"]]
     assert naming and "You name things" in naming[0]["system"], "the session was named"
 
+    # One model answers to it, so it is switched to rather than offered.
     term.submit("/model claude-opus")
-    term.wait_for("→   claude-code/claude-opus-4-8")
-    term.press("enter")
     term.wait_for(lambda s: s.splitlines()[-1].rstrip().endswith("claude-opus-4-8 (sub)"))
     term.submit("and now?")
     term.wait_for("Opus here: still under the oak.")
@@ -737,8 +736,6 @@ def test_a_session_started_elsewhere_continues_on_claude_code(
     term.submit("what is on my list?")
     term.wait_for("Your list says: buy milk.")
     term.submit("/model claude-code/claude-sonnet")
-    term.wait_for("→   claude-code/claude-sonnet-5")
-    term.press("enter")
     term.wait_for(lambda s: s.splitlines()[-1].rstrip().endswith("claude-sonnet-5 (sub)"))
     term.submit("anything else?")
     term.wait_for("Still just milk.")
@@ -753,6 +750,62 @@ def test_a_session_started_elsewhere_continues_on_claude_code(
     assert call["name"] == "mcp__hx__Read"
     assert "buy milk" in result["content"][0]["text"]
     assert not any(b["type"] == "thinking" for r in records for b in r["message"]["content"])
+
+
+def picker_rows(screen: str) -> list[str]:
+    """The /model picker's rows, cursor and tick stripped: the id first, then its columns."""
+    return [line.strip(" →✓") for line in screen.splitlines() if re.search(r"\scache[✓~✗]", line)]
+
+
+def test_the_model_picker_finds_subscription_models_by_their_maker(
+    hx: HX, claude: FakeClaude, stub: openrouter.Stub
+) -> None:
+    """Filtering /model by "anthropic" lists the Claude models the subscription already pays
+    for, ahead of the same maker's models billed per token through OpenRouter. A maker plus a
+    model name puts both routes' Sonnets first, the subscription's on top, and a model that
+    only mentions Sonnet in its description after them; the subscription's runs the next turn."""
+    claude.login()
+    claude.script(say("Sonnet 5, on your subscription."))
+    term = hx.tui()
+    term.submit("/model")
+    term.wait_for("Select model")
+    term.type("anthropic")
+    screen = term.wait_for(lambda s: "openai/gpt-5" not in s and "claude-code/" in s)
+    term.snapshot("/model filtered by anthropic")
+
+    rows = picker_rows(screen)
+    ids = [row.split()[0] for row in rows]
+    assert ids == [
+        "claude-code/claude-haiku-4-5",
+        "claude-code/claude-opus-4-8",
+        "claude-code/claude-sonnet-5",
+        openrouter.SONNET,
+    ], ids
+    for row, window in zip(rows[:3], ("200k", "200k", "1M"), strict=True):
+        assert re.search(rf"\s{window}\s+subscription\s", row), row
+    assert re.search(r"\s\$3\.00/\$15\.00\s", rows[3]), rows[3]
+
+    term.press("esc")
+    term.wait_gone("Select model")
+    term.submit("/model anthropic sonnet")
+    screen = term.wait_for("Select model")
+    picked = picker_rows(screen)
+    assert [row.split()[0] for row in picked] == [
+        "claude-code/claude-sonnet-5",
+        openrouter.SONNET,
+        "claude-code/claude-opus-4-8",
+    ], picked
+    # The picker opens on the model in force - OpenRouter's Sonnet - so one up.
+    term.press("up")
+    term.wait_for("→   claude-code/claude-sonnet-5")
+    term.press("enter")
+    term.wait_for(lambda s: s.splitlines()[-1].rstrip().endswith("claude-sonnet-5 (sub)"))
+    term.submit("who are you?")
+    term.wait_for("Sonnet 5, on your subscription.")
+    term.snapshot("the subscription's Sonnet chosen by maker and name")
+    (session,) = claude.spawns(tools=True)
+    assert session["argv"][session["argv"].index("--model") + 1] == "claude-sonnet-5"
+    assert not stub.requests, "nothing was billed per token"
 
 
 def test_a_compaction_mid_turn_continues_on_a_rebuilt_session(
@@ -795,6 +848,252 @@ def test_a_compaction_mid_turn_continues_on_a_rebuilt_session(
     assert len(live) <= 1
 
 
+def gauge(screen: str) -> str:
+    """The status bar's context gauge: ``0/200k``, ``1.2k/1M``."""
+    match = re.search(r"\s(\S+/\S+)\s+\(auto\)", screen.splitlines()[-1])
+    assert match, screen.splitlines()[-1]
+    return match.group(1)
+
+
+def test_the_context_window_is_the_one_claude_code_reports(hx: HX, claude: FakeClaude) -> None:
+    """Claude Code lists its models without their sizes, so one HX has no measurement for -
+    Opus 4.8, which serves 1M on some plans and 200k on others - starts on a 200k guess. The
+    first turn on Opus reports its real window, 1M: the gauge, the /model picker, a catalogue
+    refresh that lists Opus without a size again, and the next session all say 1M from then
+    on. Sonnet 5, never run, starts at the 1M it was measured serving on every plan."""
+    claude.login()
+    claude.limits("claude-opus-4-8", 1_000_000, 128_000)
+    claude.use("claude-code/claude-opus-4-8")
+    claude.script(say("Opus here."))
+
+    term = hx.tui()
+    term.wait_for(lambda s: gauge(s) == "0/200k")
+    term.snapshot("Opus before its first turn, on the guess")
+    term.submit("hello")
+    term.wait_for("Opus here.")
+    term.wait_for(lambda s: gauge(s).endswith("/1M"))
+    term.snapshot("Opus after a turn, at the window Claude Code reported")
+
+    term.submit("/model claude-code")
+    term.wait_for(lambda s: "Select model" in s and "claude-code/claude-opus-4-8" in s, timeout=15)
+    term.settle()
+    rows = {row.split()[0]: row.split()[1] for row in picker_rows(term.text())}
+    term.snapshot("/model with the window Opus reported")
+    assert rows["claude-code/claude-opus-4-8"] == "1M"
+    assert rows["claude-code/claude-sonnet-5"] == "1M", "never run, so the measured window"
+
+    term.press("ctrl+r")
+    term.wait_for("Refreshed", timeout=15)
+    rows = {row.split()[0]: row.split()[1] for row in picker_rows(term.text())}
+    term.snapshot("/model after a refresh")
+    assert rows["claude-code/claude-opus-4-8"] == "1M", "a refresh does not undo what was learned"
+    term.press("esc")
+    term.wait_gone("Select model")
+    term.press("ctrl+d")
+    term.wait_exit()
+
+    again = hx.tui()
+    again.wait_for(lambda s: gauge(s) == "0/1M")
+    again.snapshot("the next session starts at 1M")
+
+
+def test_a_window_reported_in_print_mode_is_kept_too(hx: HX, claude: FakeClaude) -> None:
+    """`hx -p` learns Opus's window the same way the TUI does, so a session opened after a
+    scripted run starts at 1M rather than the guess."""
+    claude.login()
+    claude.limits("claude-opus-4-8", 1_000_000, 128_000)
+    claude.use("claude-code/claude-opus-4-8")
+    claude.script(say("Opus here."))
+    hx.run("-p", "hello", check=True)
+
+    term = hx.tui()
+    term.wait_for(lambda s: gauge(s) == "0/1M")
+    term.snapshot("a session after a print-mode run on Opus")
+
+
+PRO_MODELS = [
+    {
+        "value": "default",
+        "resolvedModel": "claude-opus-5-5",
+        "displayName": "Default (recommended)",
+        "description": "Opus 5.5 · Best for everyday, complex tasks",
+        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+        "supportsAdaptiveThinking": True,
+    },
+    {
+        "value": "opus",
+        "resolvedModel": "claude-opus-5-5",
+        "displayName": "Opus",
+        "description": "Opus 5.5 · Best for everyday, complex tasks",
+        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+        "supportsAdaptiveThinking": True,
+    },
+    {
+        "value": "claude-fable-5-1[1m]",
+        "resolvedModel": "claude-fable-5-1",
+        "displayName": "Fable",
+        "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+        "supportsAdaptiveThinking": True,
+    },
+    {
+        "value": "sonnet",
+        "resolvedModel": "claude-sonnet-5-5",
+        "displayName": "Sonnet",
+        "description": "Sonnet 5.5 · Efficient for routine tasks",
+        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+        "supportsAdaptiveThinking": True,
+    },
+    {
+        "value": "haiku",
+        "resolvedModel": "claude-haiku-4-5-20251001",
+        "displayName": "Haiku",
+        "description": "Haiku 4.5 · Fastest for quick answers",
+    },
+]
+"""What Claude Code 2.1.285 lists for a Pro account. Fable's long context is in ``value``
+alone: ``resolvedModel`` names the model without it."""
+
+CREDITS_REQUIRED = {
+    # What Claude Code reports when a model, or its long context, needs usage
+    # credits the account has off: rejected, with the billing period's reset
+    # and no usage window - none is reached.
+    "status": "rejected",
+    "resetsAt": int(time.time()) + 27 * 86_400,
+    "overageDisabledReason": "org_level_disabled",
+    "isUsingOverage": False,
+    "errorCode": "credits_required",
+    "canUserPurchaseCredits": True,
+    "hasChargeableSavedPaymentMethod": True,
+}
+FABLE_NEEDS_CREDITS = (
+    "Fable 5.1 requires usage credits. Switch to another model, or manage usage credits at "
+    "claude.ai/settings/usage?from=cc_cli_limit_message, to continue."
+)
+LONG_CONTEXT_NEEDS_CREDITS = (
+    "API Error: Usage credits required for 1M context · turn on usage credits at "
+    "claude.ai/settings/usage?from=cc_cli_limit_message (they take effect in a new session), "
+    "or use --model to switch to standard context"
+)
+
+
+def test_a_model_claude_code_lists_at_its_long_context_runs_at_it(
+    hx: HX, claude: FakeClaude
+) -> None:
+    """Claude Code lists Fable as ``claude-fable-5-1[1m]``, resolving to the bare name. HX
+    runs what Claude Code's own /model would: the long-context id, shown at 1M before its
+    first turn, and kept at 1M by the window the turn reports under that id."""
+    claude.login(plan="pro")
+    claude.install("2.1.285", PRO_MODELS)
+    claude.limits("claude-fable-5-1[1m]", 1_000_000, 128_000)
+    claude.use("claude-code/claude-fable-5-1[1m]")
+    claude.script(say("Fable here."))
+
+    term = hx.tui()
+    term.wait_for(lambda s: gauge(s) == "0/1M")
+    term.snapshot("Fable before its first turn, at its long context")
+    term.submit("hello")
+    term.wait_for("Fable here.")
+    term.wait_for(lambda s: gauge(s).endswith("/1M"))
+    (spawn,) = claude.spawns(tools=True)
+    assert spawn["argv"][spawn["argv"].index("--model") + 1] == "claude-fable-5-1[1m]"
+
+    term.submit("/model claude-code")
+    term.wait_for(lambda s: "Select model" in s and "claude-code/claude-fable-5-1[1m]" in s)
+    term.settle()
+    rows = {row.split()[0]: row.split()[1] for row in picker_rows(term.text())}
+    term.snapshot("/model on a Pro account's Claude Code")
+    assert rows["claude-code/claude-fable-5-1[1m]"] == "1M"
+    assert rows["claude-code/claude-opus-5-5"] == "1M", "measured, never run"
+    assert rows["claude-code/claude-sonnet-5-5"] == "1M", "measured, never run"
+    assert rows["claude-code/claude-haiku-4-5"] == "200k"
+    assert "claude-code/claude-fable-5-1 " not in term.text(), "only the id Claude Code lists"
+
+
+def test_a_window_served_below_the_measurement_wins(hx: HX, claude: FakeClaude) -> None:
+    """The measured window is only where a model starts. Served smaller - a plan that keeps
+    Sonnet 5.5 at 200k - the gauge drops to what the turn reported, and the next session
+    starts there rather than back at the measurement."""
+    claude.login(plan="pro")
+    claude.install("2.1.285", PRO_MODELS)
+    claude.limits("claude-sonnet-5-5", 200_000, 64_000)
+    claude.use("claude-code/claude-sonnet-5-5")
+    claude.script(say("Sonnet here."))
+
+    term = hx.tui()
+    term.wait_for(lambda s: gauge(s) == "0/1M")
+    term.snapshot("Sonnet 5.5 before its first turn, at the measured 1M")
+    term.submit("hello")
+    term.wait_for("Sonnet here.")
+    term.wait_for(lambda s: gauge(s).endswith("/200k"))
+    term.snapshot("Sonnet 5.5 after a turn served at 200k")
+    term.press("ctrl+d")
+    term.wait_exit()
+
+    again = hx.tui()
+    again.wait_for(lambda s: gauge(s) == "0/200k")
+    again.snapshot("the next session starts at the served 200k")
+
+
+def test_a_model_that_needs_usage_credits_says_so(hx: HX, claude: FakeClaude) -> None:
+    """Fable on Pro needs usage credits, and Claude Code refuses the turn with a rejected rate
+    limit - but no usage window is reached and nothing resets. HX says what the model needs
+    and how to get it, tries once, and once credits are on the same model runs: in a new
+    Claude Code process, the only kind that sees them."""
+    claude.login(plan="pro")
+    claude.install("2.1.285", PRO_MODELS)
+    claude.limits("claude-fable-5-1[1m]", 1_000_000, 128_000)
+    claude.use("claude-code/claude-fable-5-1[1m]")
+    claude.script(
+        {"rate_limit": CREDITS_REQUIRED, "error": FABLE_NEEDS_CREDITS, "api_error_status": 429},
+        say("Fable here."),
+    )
+
+    term = hx.tui()
+    term.submit("hello")
+    term.wait_for("usage credits")
+    screen = flat(term.text())
+    term.snapshot("a model that needs usage credits")
+    assert "usage limit is reached" not in screen
+    assert "resets at" not in screen.lower()
+    assert "claude-fable-5-1 needs usage credits" in screen
+    assert "claude.ai/settings/usage" in screen
+    assert "pick another model" in screen
+    assert "cc_cli_limit_message" not in screen, "Claude Code's link, for its own CLI"
+    assert len(claude.log("turn")) == 1, "no retry: it would be refused the same way"
+
+    term.submit("credits are on now")
+    term.wait_for("Fable here.")
+    term.snapshot("the same model runs once credits are on")
+    first, second = claude.spawns(tools=True)
+    assert first["pid"] != second["pid"]
+
+
+def test_a_long_context_that_needs_usage_credits_says_so(hx: HX, claude: FakeClaude) -> None:
+    """Asked for at 1M on a plan that charges credits for it, Claude Code refuses the turn.
+    `hx -p` says it is the long context that needs credits, not a usage limit, and that the
+    model at its standard context runs without them."""
+    claude.login(plan="pro")
+    claude.use("claude-code/claude-sonnet-4-6[1m]")
+    claude.script(
+        {
+            "rate_limit": CREDITS_REQUIRED,
+            "error": LONG_CONTEXT_NEEDS_CREDITS,
+            "api_error_status": 429,
+        }
+    )
+    result = hx.run("-p", "hello")
+    hx.note(result.stderr)
+    assert result.returncode != 0
+    stderr = flat(result.stderr)
+    assert "usage limit is reached" not in stderr
+    assert "resets at" not in stderr.lower()
+    assert "1M context of claude-sonnet-4-6 needs usage credits" in stderr
+    assert "pick claude-code/claude-sonnet-4-6 for its standard context" in stderr
+    assert "claude.ai/settings/usage" in stderr
+    assert len(claude.log("turn")) == 1
+
+
 def test_the_reasoning_effort_reaches_claude_code(hx: HX, claude: FakeClaude) -> None:
     """A saved effort is passed to Claude Code; without one, Claude Code picks per model."""
     claude.login()
@@ -832,10 +1131,9 @@ def test_a_slow_claude_code_never_freezes_the_screen(hx: HX, claude: FakeClaude)
     echoed = echoes_within(term, "abc", 1.0)
     hx.note(f"keys typed while /model asked Claude Code echoed after {echoed:.2f}s")
     term.snapshot("typing while /model waits on Claude Code")
-    term.wait_for("→   claude-code/claude-sonnet-5", timeout=10)
-    term.snapshot("Claude Code models offered")
+    term.wait_for("Model set to claude-code/claude-sonnet-5", timeout=10)
+    term.snapshot("switched to a Claude Code model")
     assert len(claude.log("status")) == asked + 1
-    term.press("esc")
     term.press("ctrl+u")
 
     term.submit("/login claude-code")
@@ -847,3 +1145,155 @@ def test_a_slow_claude_code_never_freezes_the_screen(hx: HX, claude: FakeClaude)
     hx.note(f"keys typed while the sign-in was confirmed echoed after {echoed:.2f}s")
     term.wait_for("Claude Code signed in (e2e@example.com, max plan)", timeout=15)
     term.snapshot("signed in; what was typed meanwhile is still in the prompt")
+
+
+CURRENT_MODELS = [
+    {
+        "value": "default",
+        "resolvedModel": "claude-opus-5-5",
+        "displayName": "Default (recommended)",
+        "description": "Opus 5.5 · Best for everyday, complex tasks",
+        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+        "value": "opus",
+        "resolvedModel": "claude-opus-5-5",
+        "displayName": "Opus",
+        "description": "Opus 5.5 · Best for everyday, complex tasks",
+        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+        "value": "sonnet",
+        "resolvedModel": "claude-sonnet-5-5",
+        "displayName": "Sonnet",
+        "description": "Sonnet 5.5 · Efficient for routine tasks",
+        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+        "value": "haiku",
+        "resolvedModel": "claude-haiku-4-5-20251001",
+        "displayName": "Haiku",
+        "description": "Haiku 4.5 · Fastest for quick answers",
+    },
+]
+"""What a Claude Code released after Opus 5.5 lists."""
+
+RELEASES = {"stable": "2.1.285", "latest": "2.1.289"}
+
+
+def flat(screen: str) -> str:
+    """The screen as one line of words, so a sentence the picker wrapped still matches."""
+    return " ".join(screen.split())
+
+
+def claude_code_ids(screen: str) -> list[str]:
+    return [row.split()[0] for row in picker_rows(screen) if row.startswith("claude-code/")]
+
+
+def test_an_outdated_claude_code_says_how_to_get_newer_models(
+    hx: HX, claude: FakeClaude, stub: openrouter.Stub
+) -> None:
+    """Claude Code decides which Claude models a subscription offers, and an old one only knows
+    old models. /model says the installed Claude Code is behind its release and how to update
+    it - with Homebrew, as it was installed here - and still says so after a restart, without
+    asking the registry again. Upgraded while HX runs, the next /model lists the new models,
+    with no hint, and the new Opus answers the next turn."""
+    claude.login()
+    claude.install("2.1.205", cask="claude-code")
+    stub.claude_code_releases = dict(RELEASES)
+    hint = (
+        "Claude Code 2.1.205 is behind the current release, 2.1.285, so newer Claude models "
+        "are missing. Update it: brew upgrade --cask claude-code"
+    )
+
+    term = hx.tui()
+    term.submit("/model claude-code")
+    screen = term.wait_for(lambda s: "Select model" in s and hint in flat(s), timeout=15)
+    term.snapshot("/model under Claude Code 2.1.205, behind 2.1.285")
+    assert claude_code_ids(screen) == [
+        "claude-code/claude-haiku-4-5",
+        "claude-code/claude-opus-4-8",
+        "claude-code/claude-sonnet-5",
+    ], screen
+    term.press("esc")
+    term.wait_gone("Select model")
+    term.close()
+    asked = stub.release_fetches
+    assert asked >= 1
+
+    term = hx.tui()
+    term.submit("/model claude-code")
+    screen = term.wait_for(lambda s: "Select model" in s and hint in flat(s), timeout=15)
+    term.snapshot("/model after a restart, the catalogue still fresh")
+    assert stub.release_fetches == asked, "a fresh catalogue is not a reason to ask npm again"
+    term.press("esc")
+    term.wait_gone("Select model")
+
+    claude.install("2.1.285", CURRENT_MODELS, cask="claude-code")
+    term.submit("/model claude-code")
+    screen = term.wait_for(
+        lambda s: "Select model" in s and "claude-code/claude-opus-5-5" in s, timeout=15
+    )
+    term.settle()
+    screen = term.text()
+    term.snapshot("/model once Claude Code is upgraded to 2.1.285")
+    assert claude_code_ids(screen) == [
+        "claude-code/claude-haiku-4-5",
+        "claude-code/claude-opus-5-5",
+        "claude-code/claude-sonnet-5-5",
+    ], screen
+    assert "is behind" not in flat(screen)
+    term.press("esc")
+    term.wait_gone("Select model")
+
+    claude.script(say("Opus 5.5, on your subscription."))
+    term.submit("/model claude-code/claude-opus-5-5")
+    term.wait_for(lambda s: s.splitlines()[-1].rstrip().endswith("claude-opus-5-5 (sub)"))
+    term.submit("who are you?")
+    term.wait_for("Opus 5.5, on your subscription.")
+    term.snapshot("the upgraded Claude Code's Opus answering")
+    (session,) = claude.spawns(tools=True)
+    assert session["argv"][session["argv"].index("--model") + 1] == "claude-opus-5-5"
+
+
+def test_the_update_hint_is_only_given_when_a_release_is_known_to_be_newer(
+    hx: HX, claude: FakeClaude, stub: openrouter.Stub
+) -> None:
+    """With the npm registry unreachable HX claims nothing and complains about nothing. Once it
+    answers, ctrl+r in the picker says the installed Claude Code is behind - to be updated with
+    `claude update`, as it was not installed through Homebrew - and a Claude Code on the
+    latest channel, ahead of stable, is not told to update."""
+    claude.login()
+    claude.install("2.1.205")
+    stub.claude_code_releases = None
+
+    term = hx.tui()
+    term.submit("/model claude-code")
+    screen = term.wait_for(lambda s: "Select model" in s and "claude-code/" in s, timeout=15)
+    term.settle()
+    screen = term.text()
+    term.snapshot("/model with the npm registry unreachable")
+    assert "is behind" not in flat(screen) and "registry" not in screen.lower()
+    assert stub.release_fetches >= 1
+
+    stub.claude_code_releases = dict(RELEASES)
+    term.press("ctrl+r")
+    screen = term.wait_for("Refreshed", timeout=15)
+    term.snapshot("ctrl+r in /model with Claude Code behind")
+    assert (
+        "Claude Code 2.1.205 is behind the current release, 2.1.285, so newer Claude models "
+        "are missing. Update it: claude update"
+    ) in flat(screen.split("Select model", 1)[1]), "said under the list it explains"
+    term.press("esc")
+    term.wait_gone("Select model")
+
+    claude.install("2.1.289", CURRENT_MODELS)
+    term.submit("/model claude-code")
+    screen = term.wait_for(
+        lambda s: "Select model" in s and "claude-code/claude-opus-5-5" in s, timeout=15
+    )
+    term.settle()
+    screen = term.text()
+    term.snapshot("/model under Claude Code 2.1.289, from the latest channel")
+    after_picker = flat(screen.split("Select model", 1)[1])
+    assert "is behind" not in after_picker, screen

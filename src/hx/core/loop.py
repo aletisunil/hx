@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from hx.hooks.engine import HookEngine
     from hx.permissions.engine import PermissionEngine
     from hx.providers.base import Provider
-    from hx.providers.models import ModelInfo
+    from hx.providers.models import ModelInfo, ModelRegistry
     from hx.skills.runtime import ActiveSkills
     from hx.tools.registry import ToolRegistry
 
@@ -107,6 +107,7 @@ class AgentLoop:
         project_context: str | None = None,
         instructions: list[Instructions] | None = None,
         hooks: HookEngine | None = None,
+        models: ModelRegistry | None = None,
     ) -> None:
         self.provider = provider
         self.session = session
@@ -124,6 +125,9 @@ class AgentLoop:
         self.instructions = instructions or []
         """The AGENTS.md files folded into ``project_context``, least specific first."""
         self.hooks = hooks
+        self.models = models
+        """Where a window the backend reports is kept, so the picker and the
+        next session start from it rather than from the catalogue's guess."""
         self._cancelled = False
         self._turn_index = 0
         self._steer: list[UserTurn] = []
@@ -154,6 +158,19 @@ class AgentLoop:
         if self.compactor is not None:
             self.compactor.provider = provider
         return previous
+
+    def catalogue_refreshed(self) -> None:
+        """Re-read the model in force from a catalogue that has just changed.
+
+        It was resolved from the one being replaced. Left alone, the window the
+        gauge and the compaction threshold measure against would stay the old
+        one, and image support would be decided from it, until the user
+        happened to switch models.
+        """
+        if self.models is None:
+            return
+        self.model_info = self.models.get_or_default(self.model)
+        self.session.usage.context_window = self.model_info.context_window
 
     def set_model(self, model_id: str, model_info: ModelInfo | None = None) -> None:
         self.session.meta.model = model_id
@@ -450,6 +467,7 @@ class AgentLoop:
                 if isinstance(item, StreamEnd):
                     stop_reason = item.stop_reason
                     usage = item.usage
+                    self._adopt_limits(item)
                     continue
                 if not isinstance(item, StreamDelta):  # pragma: no cover - defensive
                     continue
@@ -580,6 +598,26 @@ class AgentLoop:
             blocks.append(TextBlock(text="".join(text_parts)))
         blocks.extend(tool_calls)
         return assistant_message(blocks, model=self.model)
+
+    def _adopt_limits(self, end: StreamEnd) -> None:
+        """Take the window the backend reported over the catalogue's figure.
+
+        Before the usage update that follows, so the gauge it drives - and the
+        compaction threshold measured against the same window - move together.
+        Kept in the catalogue too, by every mode and every subagent alike: a
+        figure only the live session knew would be the guess again next time.
+        """
+        info = self.model_info
+        if info is None or info.id != self.model:
+            return
+        window = end.context_window or info.context_window
+        output = end.max_output_tokens or info.max_output_tokens
+        if (window, output) == (info.context_window, info.max_output_tokens):
+            return
+        self.model_info = replace(info, context_window=window, max_output_tokens=output)
+        self.session.usage.context_window = window
+        if self.models is not None:
+            self.models.adopt_limits(info.id, window, output)
 
     def _record_usage(
         self,
