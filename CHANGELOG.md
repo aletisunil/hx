@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.14] - 2026-10-04
+
 ### Added
 
 - When the installed Claude Code is behind its current release - and so lists older Claude
@@ -875,7 +879,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.13...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.14...HEAD
+[0.2.14]: https://github.com/aletisunil/hx/compare/v0.2.13...v0.2.14
 [0.2.13]: https://github.com/aletisunil/hx/compare/v0.2.12...v0.2.13
 [0.2.12]: https://github.com/aletisunil/hx/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/aletisunil/hx/compare/v0.2.10...v0.2.11
