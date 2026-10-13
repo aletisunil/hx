@@ -120,8 +120,9 @@ def test_typing_while_busy_queues_the_message(hx: HX, stub: Stub) -> None:
     term.submit("first")
     term.wait_for("Working on")
     term.submit("second")
-    term.wait_for("second")
-    term.settle()
+    # Not settle(): the working status repaints every frame while the turn runs,
+    # so HX never goes quiet and a settle only ever ran out its timeout.
+    term.wait_for(lambda screen: "second" in screen and "⧗1 queued" in screen)
     term.snapshot("second message queued while the first runs")
     assert len(stub.requests) == 1
 

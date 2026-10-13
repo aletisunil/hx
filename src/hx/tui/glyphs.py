@@ -18,6 +18,10 @@ TOOL_DONE = "●"
 TOOL_FAILED = "✗"
 """A tool call failed, or a notice reports an error."""
 
+TOOL_AWAITING = "?"
+"""A tool call held at an approval. Not the spinner: nothing is running until
+the user answers, and a spinner says something is."""
+
 TODO_PENDING = "○"
 """A todo not started. Only that - a running tool uses the spinner."""
 

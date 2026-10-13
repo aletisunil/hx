@@ -138,21 +138,25 @@ class WorkingIndicator:
     def running(self) -> bool:
         return self._running
 
-    def start(self) -> None:
+    def start(self, elapsed: float = 0.0) -> None:
+        """Show the status, ``elapsed`` seconds into the turn - not zero when it
+        comes back after an approval."""
         self._running = True
-        self._elapsed = 0.0
+        self._elapsed = elapsed
         self._paint()
 
     def stop(self) -> None:
         self._running = False
         self.target.set_status("")
 
-    def tick(self, elapsed: float) -> None:
+    def tick(self, elapsed: float) -> bool:
+        """Advance the spinner. Whether anything changed."""
         if not self._running:
-            return
+            return False
         self._frame = (self._frame + 1) % len(SPINNER)
         self._elapsed = elapsed
         self._paint()
+        return True
 
     def _paint(self) -> None:
         from hx.keys import primary_key

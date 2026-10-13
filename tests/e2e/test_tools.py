@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 
 from tests.e2e.conftest import HX
 from tests.e2e.stub import Stub, ToolCall, call, calls, say
+from tests.e2e.terminal import Terminal
 
 
 def test_write_asks_and_allow_once(hx: HX, stub: Stub) -> None:
@@ -50,6 +53,35 @@ def test_deny_tells_the_model(hx: HX, stub: Stub) -> None:
     assert not target.exists()
     assert "✗ denied · notes.txt" in term.text()
     assert stub.requests[1].tool_results()[0] == "Write was not permitted: the user declined"
+
+
+def test_a_denied_command_says_nothing_about_time(hx: HX, stub: Stub) -> None:
+    """A denied call never ran, so it has no "Took": the time the user spent deciding
+    is not the command's. The allowed call beside it still reports its own run."""
+    stub.script(
+        call("Bash", "First this.", command="touch denied.txt"),
+        call("Bash", "Then this.", command="touch allowed.txt && sleep 1"),
+        say("Done."),
+    )
+    term = hx.tui()
+    term.submit("make two files")
+    term.wait_for("Permission needed")
+    time.sleep(3)  # the user thinks about it
+    term.type("n")
+    term.wait_for(lambda screen: "Permission needed" in screen and "allowed.txt" in screen)
+    time.sleep(3)
+    term.type("y")
+    term.wait_for("Done.")
+    term.settle()
+    term.snapshot("one call denied, one allowed")
+
+    assert not (hx.project / "denied.txt").exists()
+    assert (hx.project / "allowed.txt").exists()
+    scrollback = term.scrollback()
+    denied = scrollback[scrollback.index("✗ $ touch denied.txt") : scrollback.index("Then this.")]
+    assert "Took" not in denied, denied
+    took = [float(seconds) for seconds in re.findall(r"Took ([\d.]+)s", scrollback)]
+    assert len(took) == 1 and 1 <= took[0] < 2, took
 
 
 def test_always_allow_is_remembered(hx: HX, stub: Stub) -> None:
@@ -324,3 +356,86 @@ def test_glob_on_a_bare_directory_pattern_is_a_usable_error(hx: HX, stub: Stub) 
     for answer in (dot, dot_slash, absolute):
         assert "Error" not in answer and "Unacceptable" not in answer
     assert "main.py" in real
+
+
+WORKING = re.compile(r"([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]) Working… \((\d+)s")
+
+
+def _working(screen: str) -> tuple[str, int] | None:
+    """The spinner frame and the seconds the working status shows, if it is shown."""
+    found = WORKING.search(screen)
+    return (found[1], int(found[2])) if found else None
+
+
+def _watch_working(term: Terminal, seconds: float) -> list[tuple[str, int]]:
+    """What the working status showed, sampled for ``seconds``."""
+    seen: list[tuple[str, int]] = []
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if (state := _working(term.text())) is not None:
+            seen.append(state)
+        time.sleep(0.03)
+    return seen
+
+
+def test_working_status_animates_while_tools_run(hx: HX, stub: Stub) -> None:
+    """The working status moves for the whole turn: through each tool the model runs,
+    and through the command after an approval. It counts the turn's time, not the time
+    since the last model call. While the approval is open nothing spins, and the held
+    call's "Took" is its own run, not the user's time to decide. The status goes when
+    the turn ends, and a `!` command approved afterwards does not bring it back."""
+    stub.script(
+        call("Bash", "Looking first.", command="printf 'phase%s\\n' one && sleep 3"),
+        call(
+            "Bash",
+            "Now the change.",
+            command="touch made.txt && printf 'phase%s\\n' two && sleep 3",
+        ),
+        say("All done."),
+    )
+    term = hx.tui()
+    term.submit("look, then change it")
+
+    term.wait_for("phaseone")
+    term.snapshot("a read-only command runs")
+    during_read = _watch_working(term, 1.5)
+    assert during_read, "the working status is shown while the command runs"
+    assert len({frame for frame, _ in during_read}) >= 3, "and its spinner moves"
+    assert during_read[-1][1] >= 1, "and its clock counts"
+
+    screen = term.wait_for("Permission needed")
+    assert "? $ touch made.txt" in screen, "the held call is shown waiting, not running"
+    # Nothing is animating, so HX goes quiet - a spinner would keep painting.
+    started = time.monotonic()
+    term.settle(quiet=0.5, timeout=3)
+    assert time.monotonic() - started < 1.5, "HX keeps writing while nothing moves"
+    term.snapshot("an approval holds the turn")
+    assert _working(term.text()) is None, "nothing claims to be working while it waits"
+    still = term.text()
+    time.sleep(4)  # the user thinks about it
+    assert term.text() == still
+
+    term.type("y")
+    term.wait_for("phasetwo")
+    term.snapshot("the approved command runs")
+    during_change = _watch_working(term, 1.5)
+    assert during_change, "the working status comes back once the approval is answered"
+    assert len({frame for frame, _ in during_change}) >= 3, "and its spinner moves"
+    assert during_change[0][1] >= 7, "the clock is the turn's, not reset by each model call"
+
+    term.wait_for("All done.")
+    term.settle()
+    term.snapshot("the turn is over")
+    screen = term.text()
+    assert _working(screen) is None
+    assert (hx.project / "made.txt").exists()
+    took = [float(seconds) for seconds in re.findall(r"Took ([\d.]+)s", term.scrollback())]
+    assert len(took) == 2 and all(3 <= seconds < 4 for seconds in took), took
+
+    term.submit("!touch made-by-bang.txt")
+    term.wait_for("Permission needed")
+    term.type("y")
+    term.wait_for("allowed once")
+    term.settle(quiet=0.5)
+    term.snapshot("after an approved ! command")
+    assert "Working…" not in term.text(), "a shell line is not a turn"

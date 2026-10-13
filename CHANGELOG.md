@@ -26,6 +26,16 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The "Working…" status and the tool spinners now keep moving while a tool runs. They
+  used to vanish or freeze from the moment the model asked for a tool until its next reply,
+  so a long command looked like an idle session. The clock now counts the whole turn, not
+  only the time since the last model reply.
+- A tool call waiting on an approval shows `?` and does not spin, and its "Took" counts
+  only the run, not the time you spent deciding. A denied call never ran, so it shows no
+  "Took" at all.
+
 ---
 
 ## [0.2.15] - 2026-10-04

@@ -20,7 +20,7 @@ from hx.term.component import Widget
 from hx.term.markdown import render_markdown
 from hx.term.primitives import Box, HangingText, Lines
 from hx.term.sanitize import plain_text
-from hx.tui.glyphs import IMAGE, NOTICE, SPINNER, TOOL_DONE, TOOL_FAILED
+from hx.tui.glyphs import IMAGE, NOTICE, SPINNER, TOOL_AWAITING, TOOL_DONE, TOOL_FAILED
 from hx.tui.limits import PREVIEW_LINES, STREAM_TAIL
 from hx.tui.paint import ThemePainter, fg, tint
 from hx.tui.renderers import (
@@ -163,7 +163,7 @@ class ToolBlock(Widget):
     for the red one without reading any of it.
     """
 
-    __slots__ = ("_call", "_frame", "_stream", "_stream_dirty", "_streamed")
+    __slots__ = ("_awaiting", "_call", "_frame", "_stream", "_stream_dirty", "_streamed")
 
     def __init__(self, call: ToolCall) -> None:
         super().__init__()
@@ -173,6 +173,8 @@ class ToolBlock(Widget):
         """What the tool has streamed, raw; the output is its sanitized form."""
         self._streamed = 0
         self._stream_dirty = False
+        self._awaiting = False
+        """Held at an approval: not running yet, so it does not spin."""
 
     @property
     def call(self) -> ToolCall:
@@ -230,10 +232,18 @@ class ToolBlock(Widget):
         self._stream, self._streamed, self._stream_dirty = [raw], len(raw), False
         self._call = replace(self._call, output=plain_text(raw))
 
-    def tick(self) -> None:
-        """Advance the spinner. Only meaningful while the call is running."""
-        if not self._call.finished:
-            self._frame = (self._frame + 1) % len(SPINNER)
+    def tick(self) -> bool:
+        """Advance the spinner while the call runs. Whether anything changed."""
+        if self._call.finished or self._awaiting:
+            return False
+        self._frame = (self._frame + 1) % len(SPINNER)
+        self.invalidate()
+        return True
+
+    def set_awaiting(self, awaiting: bool) -> None:
+        """Whether the call is held at an approval rather than running."""
+        if awaiting != self._awaiting:
+            self._awaiting = awaiting
             self.invalidate()
 
     def toggle(self) -> None:
@@ -242,7 +252,7 @@ class ToolBlock(Widget):
     @property
     def _state(self) -> str:
         if not self._call.finished:
-            return "running"
+            return "awaiting" if self._awaiting else "running"
         if self._call.interrupted:
             return "interrupted"
         return "error" if self._call.is_error else "done"
@@ -252,6 +262,7 @@ class ToolBlock(Widget):
         state = self._state
         marker, marker_role, background = {
             "running": (SPINNER[self._frame], "accent", "tool_pending_bg"),
+            "awaiting": (TOOL_AWAITING, "warning", "tool_pending_bg"),
             "done": (TOOL_DONE, "success", "tool_success_bg"),
             "error": (TOOL_FAILED, "error", "tool_error_bg"),
             # Stopped, not failed: the warning the "Interrupted" line is drawn in.

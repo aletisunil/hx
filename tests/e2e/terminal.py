@@ -277,7 +277,11 @@ class Terminal:
             if test(screen):
                 # Matched mid-paint is not matched: a frame is often drawn in
                 # more than one write, so look again once HX has gone quiet.
-                self.settle(quiet=0.08, timeout=2)
+                # Quiet for less than a spinner frame (80ms): while a turn runs
+                # HX repaints every frame, and a longer wait is never met - it
+                # ran out its timeout, and a tool the test meant to catch
+                # running had finished by then.
+                self.settle(quiet=0.04, timeout=2)
                 screen = read()
                 if test(screen):
                     return screen

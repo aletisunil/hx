@@ -75,6 +75,30 @@ class _Steered(Exception):
     """Internal: this stream was cancelled to deliver a steer, not to stop."""
 
 
+class _Stopwatch:
+    """How long one tool call has run, for its "Took".
+
+    Started once the call is cleared to run, and zero until then. The time a
+    person spent on an approval is not the tool's: a three-second command
+    answered after a minute's thought said it took a minute, and a denied one
+    that never ran said it took as long as the user took to say no.
+    """
+
+    __slots__ = ("_started",)
+
+    def __init__(self) -> None:
+        self._started: float | None = None
+
+    def start(self) -> None:
+        self._started = time.monotonic()
+
+    @property
+    def ms(self) -> float:
+        if self._started is None:
+            return 0.0
+        return (time.monotonic() - self._started) * 1000
+
+
 @dataclass(slots=True)
 class TurnResult:
     stop_reason: StopReason
@@ -712,7 +736,7 @@ class AgentLoop:
         self, call: ToolUseBlock, results: dict[str, ToolResultBlock]
     ) -> ToolResultBlock:
         """Run one call. Interrupted, it leaves its answer in ``results``."""
-        started = time.monotonic()
+        clock = _Stopwatch()
 
         # PreToolUse runs before the call is announced. A hook that rewrites the
         # input must not leave the transcript showing a command that never ran,
@@ -730,7 +754,7 @@ class AgentLoop:
         )
         streamed: list[str] = []
         try:
-            return await self._run_announced(call, pre, started, streamed, results)
+            return await self._run_announced(call, pre, clock, streamed, results)
         except asyncio.CancelledError:
             if call.id in results:
                 # The tool had finished and only its hooks were cut off.
@@ -743,7 +767,7 @@ class AgentLoop:
                 ToolCallFinished(
                     tool_use_id=call.id,
                     is_error=True,
-                    duration_ms=(time.monotonic() - started) * 1000,
+                    duration_ms=clock.ms,
                     summary="interrupted",
                     interrupted=True,
                 )
@@ -754,7 +778,7 @@ class AgentLoop:
         self,
         call: ToolUseBlock,
         pre: HookOutcome,
-        started: float,
+        clock: _Stopwatch,
         streamed: list[str],
         results: dict[str, ToolResultBlock],
     ) -> ToolResultBlock:
@@ -772,7 +796,7 @@ class AgentLoop:
                 ToolCallFinished(
                     tool_use_id=call.id,
                     is_error=True,
-                    duration_ms=(time.monotonic() - started) * 1000,
+                    duration_ms=clock.ms,
                     summary="blocked by hook",
                     detail=refusal.content,
                 )
@@ -785,12 +809,13 @@ class AgentLoop:
                 ToolCallFinished(
                     tool_use_id=call.id,
                     is_error=True,
-                    duration_ms=(time.monotonic() - started) * 1000,
+                    duration_ms=clock.ms,
                     summary="denied",
                     detail=denied.content,
                 )
             )
             return denied
+        clock.start()
 
         def progress(chunk: str) -> None:
             streamed.append(chunk)
@@ -812,12 +837,12 @@ class AgentLoop:
         except asyncio.CancelledError:
             # The tool finished and its effects are real: its own result stands,
             # rather than telling the model a write that happened never did.
-            results[call.id] = self._finish(call, result, HookOutcome(), started)
+            results[call.id] = self._finish(call, result, HookOutcome(), clock)
             raise
-        return self._finish(call, result, post, started)
+        return self._finish(call, result, post, clock)
 
     def _finish(
-        self, call: ToolUseBlock, result: ToolResult, post: HookOutcome, started: float
+        self, call: ToolUseBlock, result: ToolResult, post: HookOutcome, clock: _Stopwatch
     ) -> ToolResultBlock:
         """Announce a call the tool finished, and its result for the model."""
         content = result.content
@@ -830,7 +855,7 @@ class AgentLoop:
             ToolCallFinished(
                 tool_use_id=call.id,
                 is_error=result.is_error or post.blocked,
-                duration_ms=(time.monotonic() - started) * 1000,
+                duration_ms=clock.ms,
                 summary=result.summary or ("error" if result.is_error else "done"),
                 detail=content if result.is_error or post.blocked else "",
                 metadata=dict(result.metadata),
@@ -863,6 +888,7 @@ class AgentLoop:
             detail=detail,
             detail_kind=detail_kind,
             origin=self.origin,
+            tool_use_id=call.id,
         )
         allowed, reason = await self.permissions.request(
             request, on_ask=lambda: self._announce_ask(call.id, request)

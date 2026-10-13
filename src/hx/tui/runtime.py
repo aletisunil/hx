@@ -122,6 +122,10 @@ class HXSession:
         )
 
         self._tools: dict[str, ToolBlock] = {}
+        self._awaiting: set[str] = set()
+        """Calls held at an approval. Kept by id rather than set on the block,
+        because the approval is asked before ``ToolCallStarted`` comes off the
+        bus and the block that will show the call does not exist yet."""
         self._pending: list[PermissionPrompt] = []
         """Approvals waiting on the user, oldest first.
 
@@ -204,10 +208,13 @@ class HXSession:
             if not self._turn_started:
                 continue
             elapsed = time.monotonic() - self._turn_started
-            self.view.dock.working.tick(elapsed)
+            # A frame only when something moved. Held at an approval nothing
+            # does, and a frame per tick then is output for its own sake.
+            moved = self.view.dock.working.tick(elapsed)
             for block in self._tools.values():
-                block.tick()
-            self.runner.request_render()
+                moved = block.tick() or moved
+            if moved:
+                self.runner.request_render()
 
     async def _watch_branch(self) -> None:
         """Keep the branch in the status bar current across external checkouts."""
@@ -876,6 +883,8 @@ class HXSession:
         )
         self.view.transcript.append(prompt)
         self._pending.append(prompt)
+        call_id = getattr(request, "tool_use_id", None)
+        self._hold_call(call_id, held=True)
         self._keyboard_owner()
         # The turn is blocked on a person, so the indicator must stop claiming
         # the tool is running.
@@ -892,14 +901,27 @@ class HXSession:
         finally:
             if prompt in self._pending:
                 self._pending.remove(prompt)
+            self._hold_call(call_id, held=False)
             # Hands the keyboard to whoever is next, so the block below stops
             # saying it is waiting the moment this one is answered.
             self._keyboard_owner()
             # Only the last one out hands the indicator back: with another
-            # approval still open the turn is still blocked on a person.
-            if not self._pending:
-                self.view.dock.working.start()
+            # approval still open the turn is still blocked on a person. And
+            # only to a turn: a `!` line asks here too, with nothing running.
+            if not self._pending and self._turn_started:
+                self.view.dock.working.start(time.monotonic() - self._turn_started)
             self.runner.request_immediate_render()
+
+    def _hold_call(self, tool_use_id: str | None, *, held: bool) -> None:
+        """Show a call as waiting on its approval, or as running again."""
+        if tool_use_id is None:
+            return
+        if held:
+            self._awaiting.add(tool_use_id)
+        else:
+            self._awaiting.discard(tool_use_id)
+        if (block := self._tools.get(tool_use_id)) is not None:
+            block.set_awaiting(held)
 
     def _keyboard_owner(self) -> PermissionPrompt | None:
         """The oldest approval still waiting on an answer.
@@ -1243,6 +1265,15 @@ class HXSession:
         self.runner.request_immediate_render()
 
     async def _run_turn(self, text: str, images: Sequence[ImageBlock] = ()) -> None:
+        # Working from here to the end of the task, not from TurnStarted to
+        # TurnFinished: the loop publishes that pair around each model call, and
+        # the tools between two calls are the turn too. Driven by the events,
+        # the status went the moment the model asked for a tool, every spinner
+        # froze while the tool ran, and the clock restarted at the next call.
+        self._turn_started = time.monotonic()
+        self.view.dock.working.start()
+        self.prompt.set_running(True, enter_steers=self._enter_steers)
+        self.runner.request_immediate_render()
         try:
             await self.loop.run(text, images)
         except asyncio.CancelledError:
@@ -1262,6 +1293,7 @@ class HXSession:
         finally:
             self._turn_started = 0.0
             self.view.dock.working.stop()
+            self.prompt.set_running(False)
             self.runner.request_immediate_render()
 
         # Only on a turn that ended on its own: an interrupt re-raises above
@@ -1277,16 +1309,14 @@ class HXSession:
     async def _consume_events(self) -> None:
         transcript = self.view.transcript
         status = self.view.dock.status
-        working = self.view.dock.working
 
         async for event in self.bus.subscribe():
             match event:
                 case ev.TurnStarted():
+                    # One model call, not the user's turn: the working status
+                    # belongs to ``_run_turn``. A new call starts new blocks.
                     self._assistant = None
                     self._thinking = None
-                    self._turn_started = time.monotonic()
-                    working.start()
-                    self.prompt.set_running(True, enter_steers=self._enter_steers)
                 case ev.TextDelta():
                     if self._assistant is None:
                         self._assistant = AssistantMessage()
@@ -1306,6 +1336,7 @@ class HXSession:
                         )
                     )
                     self._tools[event.tool_use_id] = started
+                    started.set_awaiting(event.tool_use_id in self._awaiting)
                     # A silent tool is held back rather than dropped: it is
                     # silent because something else draws its result, and if it
                     # fails there is no result and nothing else to draw. The
@@ -1368,10 +1399,6 @@ class HXSession:
                     )
                 case ev.ErrorRaised():
                     self._notice(event.message, "error")
-                case ev.TurnFinished():
-                    self._turn_started = 0.0
-                    working.stop()
-                    self.prompt.set_running(False)
 
             self.runner.request_render()
 

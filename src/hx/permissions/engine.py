@@ -78,6 +78,9 @@ class PermissionRequest:
     """
     origin: str | None = None
     """Which subagent asked, when it was not the main conversation."""
+    tool_use_id: str | None = None
+    """The call waiting on this, so the UI can show that call as waiting
+    rather than running. None for a request no tool call made - a `!` line."""
 
     def all_specifiers(self) -> tuple[str, ...]:
         """Everything a rule has to be matched against for this one call."""
