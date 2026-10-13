@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.16] - 2026-10-13
+
 ### Fixed
 
 - The "Working…" status and the tool spinners now keep moving while a tool runs. They
@@ -911,7 +915,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.15...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.16...HEAD
+[0.2.16]: https://github.com/aletisunil/hx/compare/v0.2.15...v0.2.16
 [0.2.15]: https://github.com/aletisunil/hx/compare/v0.2.14...v0.2.15
 [0.2.14]: https://github.com/aletisunil/hx/compare/v0.2.13...v0.2.14
 [0.2.13]: https://github.com/aletisunil/hx/compare/v0.2.12...v0.2.13
