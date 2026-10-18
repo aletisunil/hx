@@ -21,6 +21,7 @@ from hx.core.usage import format_tokens
 from hx.paths import tilde
 from hx.term.component import Widget
 from hx.term.primitives import Lines, Rule, Spacer, Text
+from hx.text import count
 from hx.tui.format import columns, one_line
 from hx.tui.fuzzy import filter_items
 from hx.tui.glyphs import CURRENT, CURSOR, GUTTER
@@ -344,7 +345,7 @@ class ModelPicker(Picker):
                 (values.index(value) for value in (selected, self.current) if value in values),
                 min(self.selected, max(0, len(values) - 1)),
             )
-            self.status = ("success", f"Refreshed {len(models)} models.")
+            self.status = ("success", f"Refreshed {count(len(models), 'model')}.")
         self.invalidate()
         self._redraw()
 
@@ -578,8 +579,7 @@ def _size(meta: Any) -> str:
     prompts = getattr(meta, "prompt_count", 0)
     if not prompts:
         return f"{meta.message_count} msgs"
-    unit = "prompt" if prompts == 1 else "prompts"
-    return f"{prompts} {unit} · {meta.message_count} msgs"
+    return f"{count(prompts, 'prompt')} · {meta.message_count} msgs"
 
 
 __all__ = [

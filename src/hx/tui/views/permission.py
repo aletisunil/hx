@@ -184,6 +184,19 @@ class PermissionPrompt(Widget, Framed):
         return [*lines[:PREVIEW_LINES], expand_note(len(lines) - PREVIEW_LINES)]
 
     def _detail_lines(self) -> list[str]:
+        if link := self._link():
+            return [fg("warning", f"{link[0]} is a link to {link[1]}"), "", *self._body_lines()]
+        return self._body_lines()
+
+    def _link(self) -> tuple[str, str] | None:
+        """The path an edit names and the file it really changes, when they differ."""
+        target = getattr(self.request, "link_target", None)
+        path = (self.request.params or {}).get("file_path")
+        if not target or not path:
+            return None
+        return plain_text(display_path(path, self.cwd)), plain_text(display_path(target, self.cwd))
+
+    def _body_lines(self) -> list[str]:
         # Sanitized before anything reads it. This is the one block on screen
         # whose whole job is to show the user what is about to happen, so text
         # that can move the cursor or repaint the line is the last thing it
@@ -216,6 +229,8 @@ class PermissionPrompt(Widget, Framed):
         already knows, and the record is cut before the part they do not.
         """
         specifier = self.request.specifier
+        if link := self._link():
+            return f"{link[0]} → {link[1]}"
         if specifier and specifier == (self.request.params or {}).get("file_path"):
             return plain_text(display_path(specifier, self.cwd))
         return plain_text(str(specifier or self.request.description))

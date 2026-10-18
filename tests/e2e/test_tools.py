@@ -278,15 +278,28 @@ def test_resuming_a_session_killed_mid_tool(hx: HX, stub: Stub) -> None:
 
 
 def test_counts_of_one_are_singular(hx: HX, stub: Stub) -> None:
-    """A tool that found or read one thing says so in the singular, and two stay plural."""
+    """A tool that found or read one thing says so in the singular, and two stay plural -
+    also in what a limit left out: one more line, match or result."""
     (hx.project / "one.txt").write_text("TODO: ship\n")
     (hx.project / "two.txt").write_text("first\nsecond\n")
+    (hx.project / "notes.md").write_text("first\n")
     stub.script(
         calls(
             ToolCall("Read", {"file_path": str(hx.project / "one.txt")}, id="read_one"),
             ToolCall("Read", {"file_path": str(hx.project / "two.txt")}, id="read_two"),
             ToolCall("Grep", {"pattern": "TODO", "path": str(hx.project)}, id="grep"),
             ToolCall("Glob", {"pattern": "one.*", "path": str(hx.project)}, id="glob"),
+            ToolCall(
+                "Read", {"file_path": str(hx.project / "two.txt"), "limit": 1}, id="read_part"
+            ),
+            ToolCall(
+                "Grep",
+                {"pattern": "first", "path": str(hx.project), "limit": 1},
+                id="grep_part",
+            ),
+            ToolCall(
+                "Glob", {"pattern": "*.txt", "path": str(hx.project), "limit": 1}, id="glob_part"
+            ),
         ),
         call("Write", file_path=str(hx.project / "note.txt"), content="done\n"),
         say("Counted."),
@@ -302,6 +315,10 @@ def test_counts_of_one_are_singular(hx: HX, stub: Stub) -> None:
     assert "1 result" in screen and "1 results" not in screen
     assert "1 match" in screen and "1 matches" not in screen
     assert stub.requests[2].tool_results()[-1].endswith("(1 line)")
+    read_part, grep_part, glob_part = stub.requests[1].tool_results()[-3:]
+    assert "... 1 more line. Re-read with offset=2." in read_part, read_part
+    assert "... 1 more result (raise limit to see them)" in grep_part, grep_part
+    assert "... 1 more match (raise limit to see them)" in glob_part, glob_part
 
 
 def test_status_bar_keeps_the_project_name_of_a_deep_path(hx: HX, stub: Stub) -> None:

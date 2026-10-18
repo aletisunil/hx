@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hx.text import count
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 from hx.tools.glob import IGNORED_DIRS
 
@@ -218,7 +219,7 @@ class SymbolsTool(Tool):
         if not rows:
             return ToolResult(content=f"{path}: no definitions found", summary="0 symbols")
         body = f"{path}\n" + "\n".join(rows)
-        return ToolResult(content=body, summary=f"{len(rows)} symbols")
+        return ToolResult(content=body, summary=count(len(rows), "symbol"))
 
     def _search(
         self, mode: str, symbol: str, params: dict[str, Any], ctx: ToolContext, limit: int
@@ -251,8 +252,8 @@ class SymbolsTool(Tool):
 
         body = "\n".join(hits)
         if truncated:
-            body += f"\n\n... stopped at {limit} hits (raise limit to see more)"
-        return ToolResult(content=body, summary=f"{len(hits)} hits")
+            body += f"\n\n... stopped at {count(limit, 'hit')} (raise limit to see more)"
+        return ToolResult(content=body, summary=count(len(hits), "hit"))
 
 
 def _matches(

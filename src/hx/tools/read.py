@@ -69,7 +69,7 @@ class ReadTool(Tool):
             return _read_image(path)
         if is_binary(path):
             size = path.stat().st_size
-            raise ToolError(f"{path}: binary file ({size} bytes), not read as text")
+            raise ToolError(f"{path}: binary file ({count(size, 'byte')}), not read as text")
 
         offset = max(int(params.get("offset") or 1), 1)
         limit = int(params.get("limit") or DEFAULT_LINE_LIMIT)
@@ -105,7 +105,8 @@ class ReadTool(Tool):
         remaining = len(lines) - (offset - 1 + len(window))
         if remaining > 0:
             rendered += (
-                f"\n\n... {remaining} more lines. Re-read with offset={offset + len(window)}."
+                f"\n\n... {count(remaining, 'more line')}. "
+                f"Re-read with offset={offset + len(window)}."
             )
 
         if not window:

@@ -889,6 +889,7 @@ class AgentLoop:
             description=f"{call.name}({_brief(call.input)})",
             detail=detail,
             detail_kind=detail_kind,
+            link_target=_link_target(call, self.settings.cwd),
             origin=self.origin,
             tool_use_id=call.id,
         )
@@ -1083,6 +1084,20 @@ def _permission_detail(call: ToolUseBlock, cwd: Path) -> tuple[str, str]:
             return str(raw_path), "text"
 
     return _detailed(call.input), "text"
+
+
+def _link_target(call: ToolUseBlock, cwd: Path) -> str | None:
+    """Where an Edit or Write lands when the path it names is a symlink."""
+    if call.name not in {"Edit", "Write"} or not (raw_path := call.input.get("file_path")):
+        return None
+    from hx.tools.read import resolve_path
+    from hx.tools.write import link_target
+
+    try:
+        target = link_target(resolve_path(str(raw_path), cwd))
+    except (OSError, RuntimeError):  # a link loop, or a directory we cannot see into
+        return None
+    return str(target) if target is not None else None
 
 
 def _detailed(params: dict[str, Any], limit: int = 400) -> str:

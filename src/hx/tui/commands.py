@@ -561,7 +561,7 @@ async def cmd_cost(ctx: CommandContext, args: str) -> None:
     # message records, and a single prompt produces many of both.
     scale = count(len(usage.turns), "API request")
     if prompts:
-        scale += f" across {prompts} prompt{'s' if prompts != 1 else ''}"
+        scale += f" across {count(prompts, 'prompt')}"
     lines = [
         f"Session cost:  {format_cost(usage.total_cost_usd)}  over {scale}",
         f"Input:         {format_tokens(usage.total_input)} uncached",
@@ -921,8 +921,8 @@ async def _run_claude_code_login(ctx: CommandContext, spec: Any) -> None:
 
     who = status.account or "your Claude account"
     plan = f", {status.plan} plan" if status.plan else ""
-    count = await _refresh_after_login(ctx, spec.id)
-    offer = f"{count} models available" if count else "Pick a model with /model"
+    models = await _refresh_after_login(ctx, spec.id)
+    offer = f"{count(models, 'model')} available" if models else "Pick a model with /model"
     ctx.app.notice(f"Claude Code signed in ({who}{plan}). {offer}.", "success")
 
 
@@ -983,8 +983,8 @@ async def _run_oauth_login(ctx: CommandContext, spec: Any) -> None:
 
     # The model list is per account, so it only means anything once there is an
     # account: ask now rather than leaving /model showing the fallback guess.
-    count = await _refresh_after_login(ctx, spec.id)
-    offer = f"{count} models available" if count else "Pick a model with /model"
+    models = await _refresh_after_login(ctx, spec.id)
+    offer = f"{count(models, 'model')} available" if models else "Pick a model with /model"
     ctx.app.notice(f"{signed_in}. {offer}.", "success")
 
 

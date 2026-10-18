@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hx.term.ansi import wrap
 from hx.term.component import Widget
 from hx.term.markdown import render_markdown
 from hx.term.primitives import Box, HangingText, Lines
@@ -155,6 +156,10 @@ def _stream_tail(text: str) -> str:
     return tail[tail.find("\n") + 1 :]
 
 
+BODY_INDENT = 2
+"""Cells a tool block's body sits in from its marker, under the header's text."""
+
+
 class ToolBlock(Widget):
     """One tool call: a header, optionally some output, tinted by its state.
 
@@ -271,9 +276,16 @@ class ToolBlock(Widget):
 
         renderer = renderer_for(self._call.name)
         lines = [fg(marker_role, f"{marker} ") + renderer.header(self._call)]
+        body = renderer.body(self._call)
+        if state == "error":
+            # An error is prose, and wraps like prose. Cut at the edge the way
+            # code is, "<long path> is a link to <long path>, and ... does not
+            # exist" lost exactly the part that said what was wrong.
+            room = max(1, width - 2 - BODY_INDENT)  # the box's padding, then the indent
+            body = [piece for line in body for piece in wrap(line, room)]
         # The body is indented to sit under the header's text rather than under
         # its marker, so the block has one left edge instead of two.
-        lines += [f"  {line}" for line in renderer.body(self._call)]
+        lines += [" " * BODY_INDENT + line for line in body]
         if self._call.interrupted:
             took = self._call.duration_ms
             lines.append(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import stat
 
 from hx.tools import anchors
@@ -114,9 +115,89 @@ def test_an_edit_keeps_the_file_mode_and_the_link(hx: HX, stub: Stub) -> None:
     assert stub.requests[6].tool_results()[-1] == "production now"
     assert link.is_symlink()
     assert real.read_text() == "[app]\nlevel = debug\n"
+    assert f"through the link to {real}" in stub.requests[3].tool_results()[-1]
     assert stat.S_IMODE(fresh.stat().st_mode) & 0o111 == 0
     leftovers = sorted(p.name for p in hx.project.rglob("*hx-tmp*"))
     assert leftovers == []
+
+
+def test_a_write_through_a_link_names_the_file_it_changes(hx: HX, stub: Stub) -> None:
+    """A link in the project can point anywhere - here into the home directory. Before the
+    edit, the approval says which file it changes, and the answered approval keeps saying
+    so. A link whose target has no directory is refused in words the user can read to the
+    end, and one whose directory exists gets its target created."""
+    shared = hx.home / "shared"
+    shared.mkdir()
+    real = shared / "config.yml"
+    real.write_text("retries: 3\n")
+    link = hx.project / "config.yml"
+    link.symlink_to(real)
+    nowhere = hx.project / "cache.json"
+    nowhere.symlink_to(hx.root / "missing" / "dir" / "cache.json")
+    later = hx.project / "later.txt"
+    later.symlink_to(shared / "later.txt")
+    settings = hx.project / ".hx" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({"permissions": {"allow": ["Write"]}}))
+    stub.script(
+        call("Read", file_path=str(link)),
+        call("Edit", file_path=str(link), old_string="3", new_string="5"),
+        call("Write", file_path=str(nowhere), content="{}\n"),
+        call("Write", file_path=str(later), content="soon\n"),
+        say("Linked."),
+    )
+    term = hx.tui()
+    term.submit("raise the retries")
+    term.wait_for("Permission needed")
+    term.settle()
+    term.snapshot("approval for an edit through a link")
+    screen = term.text()
+    assert "config.yml is a link to ~/shared/config.yml" in screen, screen
+    assert "+    1 retries: 5" in screen
+
+    term.press("enter")
+    term.wait_for("Linked.")
+    term.settle()
+    term.snapshot("after writing through links")
+    assert "config.yml → ~/shared/config.yml" in term.scrollback()
+    # The refusal is prose and wraps, so its reason at the end of a long path stays on screen.
+    assert "does not exist" in " ".join(term.scrollback().split()), term.scrollback()
+
+    assert link.is_symlink() and real.read_text() == "retries: 5\n"
+    assert f"through the link to {real}" in stub.requests[2].tool_results()[-1]
+    refused = stub.requests[3].tool_results()[-1]
+    missing = hx.root / "missing" / "dir"
+    assert refused == (
+        f"{nowhere} is a link to {missing / 'cache.json'}, and {missing} does not exist"
+    ), refused
+    assert not (hx.root / "missing").exists()
+    assert later.is_symlink() and (shared / "later.txt").read_text() == "soon\n"
+    assert f"through the link to {shared / 'later.txt'}" in stub.requests[4].tool_results()[-1]
+
+
+def test_an_edit_that_changes_nothing_in_a_crlf_file_is_refused(hx: HX, stub: Stub) -> None:
+    """In a CRLF file an edit's new text takes the file's line endings. An edit that differs
+    from its old text only in those endings changes nothing, and says so rather than
+    reporting an edit applied."""
+    source = hx.project / "run.bat"
+    original = b"@echo off\r\necho hi\r\n"
+    source.write_bytes(original)
+    stub.script(
+        call("Read", file_path=str(source)),
+        call(
+            "Edit",
+            file_path=str(source),
+            old_string="@echo off\necho hi",
+            new_string="@echo off\r\necho hi",
+        ),
+        say("Tried."),
+    )
+    hx.run("-p", "fix the line endings", "--mode", "bypass", check=True)
+
+    result = stub.requests[2].tool_results()[-1]
+    assert result.startswith("edit 1: old_string and new_string are identical"), result
+    assert "line endings" in result
+    assert source.read_bytes() == original
 
 
 def test_the_approval_previews_the_file_under_cwd(hx: HX, stub: Stub) -> None:

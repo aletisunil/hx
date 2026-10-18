@@ -30,12 +30,12 @@ from hx.term.sanitize import plain_text
 from hx.term.syntax import highlight as highlight_source
 from hx.term.width import cell_width, truncate_to_width
 from hx.text import count
+from hx.tools.edit import HUNK_HEADER, diff_rows
 from hx.tools.edit import count_changes as _count_changes
 from hx.tui.glyphs import BASH, ELLIPSIS, TODO_ACTIVE, TODO_DONE, TODO_PENDING
 from hx.tui.limits import EXPANDED_MAX, PREVIEW_LINES, RECORD_WIDTH
 from hx.tui.paint import color_mode, fg
 
-_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _WORD = re.compile(r"\s+|\w+|[^\w\s]")
 
 
@@ -48,9 +48,8 @@ def expand_note(hidden: int) -> str:
     """
     from hx.keys import primary_key
 
-    plural = "s" if hidden != 1 else ""
     return (
-        fg("muted", f"{ELLIPSIS} ({hidden} more line{plural}, ")
+        fg("muted", f"{ELLIPSIS} ({count(hidden, 'more line')}, ")
         + fg("dim", primary_key("app.tools.expand"))
         + fg("muted", " to expand)")
     )
@@ -146,18 +145,29 @@ def display_path(raw: Any, cwd: Path) -> str:
 
     An absolute path inside a tool header is noise - forty characters of prefix
     the user already knows, pushing the part they do not know off the edge.
+
+    The directories are resolved and the name is not, so a symlink is shown by
+    its own name. Resolved whole, ``config.yml`` linked to a file in the home
+    directory was shown as ``~/shared/config.yml``, a name the model never
+    used - and the approval naming the link and its target named one file twice.
     """
     if not raw:
         return ""
     text = str(raw)
     try:
         path = Path(text).expanduser()
+        path = path if path.is_absolute() else cwd / path
+        named = (
+            path.parent.resolve() / path.name
+            if path.name not in ("", ".", "..")
+            else path.resolve()
+        )
     except (OSError, ValueError):
         return single_row(text)
 
     for base, prefix in ((cwd, ""), (Path.home(), "~/")):
         try:
-            return single_row(prefix + str(path.resolve().relative_to(base.resolve())))
+            return single_row(prefix + str(named.relative_to(base.resolve())))
         except (OSError, ValueError):
             continue
     return single_row(text)
@@ -299,7 +309,6 @@ def render_diff(diff_text: str) -> list[str]:
     old_no = new_no = 0
     pending_removed: list[tuple[int, str]] = []
     pending_added: list[tuple[int, str]] = []
-    in_hunk = False
 
     def flush() -> None:
         if len(pending_removed) == 1 and len(pending_added) == 1:
@@ -315,20 +324,18 @@ def render_diff(diff_text: str) -> list[str]:
         pending_removed.clear()
         pending_added.clear()
 
-    for line in diff_text.splitlines():
-        hunk = _HUNK.match(line)
-        if not hunk and not in_hunk:
-            # The ``---``/``+++`` file headers. Skipped by position rather than
-            # by their doubled sign, which also hid every changed line whose own
-            # text starts with ``--`` or ``++`` - a SQL comment, ``++i``.
+    # File headers and anything else between hunks are left out by diff_rows:
+    # the approval or the edit header above already names the file.
+    for row in diff_rows(diff_text):
+        if row.kind == "file":
             continue
-        if hunk:
-            in_hunk = True
+        if row.header is not None:
             flush()
-            old_no, new_no = int(hunk.group(1)), int(hunk.group(3))
+            old_no, new_no = int(row.header.group(1)), int(row.header.group(3))
             if out:
                 out.append(fg("diff_context", ELLIPSIS))
             continue
+        line = row.text
         if line.startswith("-"):
             pending_removed.append((old_no, line[1:].expandtabs(4)))
             old_no += 1
@@ -351,7 +358,7 @@ def looks_like_diff(text: str) -> bool:
     prefix alone meant YAML front matter and a markdown rule were run through
     the diff painter, which strips exactly those lines and emits nothing.
     """
-    return any(_HUNK.match(line) for line in text.splitlines())
+    return any(HUNK_HEADER.match(line) for line in text.splitlines())
 
 
 #: Owned by the tools layer, which produces the diffs. The TUI may depend on
@@ -434,8 +441,7 @@ class WriteRenderer(ToolRenderer):
         header = fg("tool_title", "write ", bold=True) + fg("accent", path)
         content = str(call.params.get("content") or "")
         if content:
-            count = len(content.splitlines())
-            header += fg("dim", f"  {count} line{'s' if count != 1 else ''}")
+            header += fg("dim", f"  {count(len(content.splitlines()), 'line')}")
         return header
 
     def body(self, call: ToolCall) -> list[str]:
@@ -500,7 +506,7 @@ class BashRenderer(ToolRenderer):
         first, rest = self._command_lines(call)
         header = fg("accent", BASH, bold=True) + fg("tool_title", first or ELLIPSIS, bold=True)
         if rest:
-            header += fg("muted", f"  +{len(rest)} line{'s' if len(rest) != 1 else ''}")
+            header += fg("muted", f"  +{count(len(rest), 'line')}")
         if timeout := call.params.get("timeout"):
             header += fg("muted", f" (timeout {timeout}s)")
         if call.params.get("run_in_background"):

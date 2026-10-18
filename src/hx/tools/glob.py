@@ -59,7 +59,8 @@ class GlobTool(Tool):
         shown = matches[:limit]
         body = "\n".join(str(path) for path in shown) or "(no matches)"
         if len(matches) > limit:
-            body += f"\n\n... {len(matches) - limit} more matches (raise limit to see them)"
+            more = count(len(matches) - limit, "more match", "more matches")
+            body += f"\n\n... {more} (raise limit to see them)"
         return ToolResult(content=body, summary=count(len(matches), "match", "matches"))
 
 

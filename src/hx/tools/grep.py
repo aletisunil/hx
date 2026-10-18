@@ -79,7 +79,7 @@ class GrepTool(Tool):
         shown = lines[:limit]
         body = "\n".join(shown) or "(no matches)"
         if len(lines) > limit:
-            body += f"\n\n... {len(lines) - limit} more results (raise limit to see them)"
+            body += f"\n\n... {count(len(lines) - limit, 'more result')} (raise limit to see them)"
         return ToolResult(content=body, summary=count(len(lines), "result"))
 
     def _ripgrep(self, pattern: str, root: Path, mode: str, params: dict[str, Any]) -> list[str]:

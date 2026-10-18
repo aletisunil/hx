@@ -20,6 +20,7 @@ import httpx
 
 from hx import __version__
 from hx.net import async_client
+from hx.text import count
 
 if TYPE_CHECKING:
     from hx.mcp.oauth import OAuthSession
@@ -531,11 +532,7 @@ class MCPClient:
         if result.get("isError"):
             raise MCPToolError(text or f"{name} failed")
         if not text:
-            text = (
-                f"({len(images)} image{'s' if len(images) != 1 else ''})"
-                if images
-                else "(no content)"
-            )
+            text = f"({count(len(images), 'image')})" if images else "(no content)"
         return MCPToolOutput(text=text, images=images)
 
     async def _request(

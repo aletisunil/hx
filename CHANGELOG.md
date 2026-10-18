@@ -26,6 +26,24 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- Edit and Write no longer leave a private file's new content readable by other users while
+  they write it. The temporary file now gets the file's own mode before any content goes in.
+
+### Fixed
+
+- An edit through a symlink says which file it changes. The approval reads "config.yml is a
+  link to ~/shared/config.yml", and so does the answered approval and the result the model
+  gets. A link into a missing directory is refused in words, not with a raw error.
+- The transcript names a symlink by its own name, not by the name of its target.
+- A failed tool's error wraps in the transcript instead of being cut at the window's edge, so
+  a reason that comes after a long path stays readable.
+- An edit to a CRLF file that differs only in line endings is refused as identical. It used to
+  be reported as applied, with nothing changed.
+- Counts of one read in the singular when a limit leaves something out: "1 more line",
+  "1 more match", "1 more result". So do the other counts that still had "1 lines" forms.
+
 ---
 
 ## [0.2.17] - 2026-10-18

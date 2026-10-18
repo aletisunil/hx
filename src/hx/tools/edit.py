@@ -14,14 +14,16 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import re
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from hx.text import count
 from hx.tools import anchors
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 from hx.tools.read import FileTracker, hashline_enabled, read_exact, resolve_path
-from hx.tools.write import write_atomic
+from hx.tools.write import through_link, write_atomic
 
 if TYPE_CHECKING:
     from hx.core.checkpoints import CheckpointStore
@@ -162,7 +164,7 @@ class EditTool(Tool):
         diff = unified_diff(before, after, str(path))
         added, removed = count_changes(diff)
         return ToolResult(
-            content=f"Applied {count(applied, 'edit')} to {path}.\n\n{diff}",
+            content=f"Applied {count(applied, 'edit')} to {path}{through_link(path)}.\n\n{diff}",
             summary=f"{path.name} +{added} -{removed}",
             metadata={"path": str(path), "diff": diff},
         )
@@ -192,6 +194,14 @@ def apply_edits(content: str, edits: list[EditOp]) -> str:
             new = _crlf(new)
             if result.count(old) == 0:
                 old = _crlf(old)
+            # Compared again once both are spelled the file's way: an edit that
+            # only changed line endings came out identical here, replaced
+            # nothing, and was still reported as applied.
+            if old == new:
+                raise ToolError(
+                    f"edit {index}: old_string and new_string are identical once their "
+                    "line endings follow the file's CRLF. Edit keeps a file's line endings."
+                )
 
         occurrences = result.count(old)
         if occurrences == 0:
@@ -309,21 +319,75 @@ def parse_edits(params: dict[str, Any]) -> list[EditOp]:
     ]
 
 
-def count_changes(diff_text: str) -> tuple[int, int]:
-    """Added and removed line counts, ignoring the ``+++``/``---`` file headers.
+HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
-    Only lines inside a hunk are counted. Telling the headers apart by their
-    doubled sign instead skipped every changed line whose own text starts with
-    ``-`` or ``+`` - a SQL or Lua comment, ``++i``, a markdown rule.
+
+@dataclass(frozen=True, slots=True)
+class DiffRow:
+    """One meaningful line of a unified diff."""
+
+    kind: Literal["file", "hunk", "line"]
+    text: str
+    """The file's name, the hunk header, or the line with its ``-``/``+``/space."""
+    header: re.Match[str] | None = None
+    """For a hunk: its parsed header, which numbers the lines that follow."""
+
+
+def diff_rows(diff_text: str) -> Iterator[DiffRow]:
+    """The files, hunks and changed or context lines of a unified diff.
+
+    A hunk ends where its header says, after its count of old and new lines -
+    not at the next line that looks like a header. A changed line can start
+    with ``--`` or ``++`` (a SQL comment, ``++i``), so telling headers apart by
+    their sign hid those lines; and a hunk that never ended counted the next
+    file's ``---``/``+++`` headers as one removed and one added line.
+
+    Everything between hunks other than a file's header pair - ``diff --git``,
+    ``index``, mode lines - is left out.
     """
+    lines = diff_text.splitlines()
+    old_left = new_left = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        if header := HUNK_HEADER.match(line):
+            old_left = int(header.group(2)) if header.group(2) is not None else 1
+            new_left = int(header.group(4)) if header.group(4) is not None else 1
+            yield DiffRow("hunk", line, header)
+        elif old_left > 0 or new_left > 0:
+            if line.startswith("\\"):
+                continue  # "\ No newline at end of file" belongs to no side
+            if line.startswith("-"):
+                old_left -= 1
+            elif line.startswith("+"):
+                new_left -= 1
+            else:
+                old_left -= 1
+                new_left -= 1
+            yield DiffRow("line", line)
+        elif line.startswith("--- ") and index < len(lines) and lines[index].startswith("+++ "):
+            yield DiffRow("file", _file_name(line[4:], lines[index][4:]))
+            index += 1
+
+
+def _file_name(old: str, new: str) -> str:
+    """The path a ``---``/``+++`` pair is about: the new one, or the old one for a
+    deletion, without git's ``a/``/``b/`` prefixes or a trailing timestamp."""
+    old, new = old.split("\t", 1)[0], new.split("\t", 1)[0]
+    sides = ((old, "a/"), (new, "b/"))
+    if all(side.startswith(prefix) or side == "/dev/null" for side, prefix in sides):
+        old, new = (side if side == "/dev/null" else side[2:] for side, _ in sides)
+    return old if new == "/dev/null" else new
+
+
+def count_changes(diff_text: str) -> tuple[int, int]:
+    """Added and removed line counts, ignoring the ``+++``/``---`` file headers."""
     added = removed = 0
-    in_hunk = False
-    for line in diff_text.splitlines():
-        if line.startswith("@@"):
-            in_hunk = True
-        elif in_hunk and line.startswith("+"):
+    for row in diff_rows(diff_text):
+        if row.kind == "line" and row.text.startswith("+"):
             added += 1
-        elif in_hunk and line.startswith("-"):
+        elif row.kind == "line" and row.text.startswith("-"):
             removed += 1
     return added, removed
 

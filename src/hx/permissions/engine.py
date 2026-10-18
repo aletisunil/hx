@@ -76,6 +76,12 @@ class PermissionRequest:
     that painter strips exactly those lines, so the user was asked to approve a
     blank space.
     """
+    link_target: str | None = None
+    """The file an edit really changes, when the path it names is a symlink.
+
+    The link can point anywhere, out of the project included, and the diff
+    alone does not say where it lands.
+    """
     origin: str | None = None
     """Which subagent asked, when it was not the main conversation."""
     tool_use_id: str | None = None
