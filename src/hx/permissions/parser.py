@@ -132,18 +132,37 @@ MUTATING_FLAGS: dict[str, frozenset[str]] = {
         {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"}
     ),
     "fd": frozenset({"-x", "--exec", "-X", "--exec-batch"}),
-    "sort": frozenset({"-o", "--output"}),
+    "sort": frozenset({"-o", "--output", "--compress-program"}),
     "tree": frozenset({"-o"}),
     "date": frozenset({"-s", "--set"}),
     "rg": frozenset({"--pre"}),
     "yq": frozenset({"-i", "--inplace"}),
+    # Any word starting -r reverts: xxd reads `-r`, `-rp` and `-revert` alike.
+    "xxd": frozenset({"-r"}),
 }
 """Flags that turn a read-only command into a writing or executing one.
 
 ``sed`` edits in place under ``-i``, ``find`` runs arbitrary programs under
-``-exec`` and unlinks under ``-delete``, ``sort -o`` overwrites its own input.
-Treating the executable name alone as read-only allowed all three through
-unprompted.
+``-exec`` and unlinks under ``-delete``, ``sort -o`` overwrites its own input,
+``sort --compress-program`` runs whatever it names and ``xxd -r`` turns a hex
+dump back into bytes - into a file, given one. Treating the executable name
+alone as read-only allowed them all through unprompted.
+"""
+
+OUTPUT_OPERAND_COMMANDS: dict[str, frozenset[str]] = {
+    # uniq [OPTION]... [INPUT [OUTPUT]]
+    "uniq": frozenset({"-f", "--skip-fields", "-s", "--skip-chars", "-w", "--check-chars"}),
+    # xxd [options] [infile [outfile]]
+    "xxd": frozenset(
+        {"-c", "-cols", "-g", "-groupsize", "-l", "-len", "-n", "-name", "-o", "-offset"}
+        | {"-s", "-seek", "-R"}
+    ),
+}
+"""Commands that write a file named by their second operand, with no flag at all.
+
+``uniq in out`` and ``xxd in out`` overwrite ``out``. The value is the options
+that take a separate argument, so ``uniq -f 1 in`` is read as one operand, not
+two.
 """
 
 GIT_READ_ONLY_SUBCOMMANDS = frozenset(
@@ -602,6 +621,8 @@ def is_read_only(segment: CommandSegment) -> bool:
         return not _env_runs_a_command(segment.args)
     if segment.executable in PROGRAM_TEXT_COMMANDS and _program_text_writes(segment):
         return False
+    if segment.executable in OUTPUT_OPERAND_COMMANDS and _names_an_output(segment):
+        return False
     return not _has_flag(
         segment.args,
         MUTATING_FLAGS.get(segment.executable, frozenset()),
@@ -638,6 +659,27 @@ Its text is not on the command line, so there is nothing here to read and no
 grounds to call the command read-only: ``awk -f prog.awk`` runs whatever
 ``prog.awk`` says, ``system()`` included.
 """
+
+
+def _names_an_output(segment: CommandSegment) -> bool:
+    """True when the command was given an output file as its second operand.
+
+    Counting errs towards two: an option this does not know to take a value
+    makes its value look like an operand, which prompts - never the reverse.
+    """
+    takes_value = OUTPUT_OPERAND_COMMANDS[segment.executable]
+    operands = 0
+    options_done = False
+    args = iter(segment.args)
+    for arg in args:
+        if not options_done and arg == "--":
+            options_done = True
+        elif not options_done and arg.startswith("-") and arg != "-":
+            if arg in takes_value:
+                next(args, None)
+        else:
+            operands += 1
+    return operands >= 2
 
 
 def _program_text_writes(segment: CommandSegment) -> bool:
@@ -745,12 +787,14 @@ def _option_values(args: tuple[str, ...], options: tuple[str, ...]) -> list[str]
     return values
 
 
-ATTACHED_VALUE_COMMANDS = frozenset({"date"})
+ATTACHED_VALUE_COMMANDS = frozenset({"date", "xxd"})
 """Commands whose short options swallow the rest of their word as a value.
 
 ``date -Iseconds`` is one option and its argument, not a cluster of five, so
 only its first letter may be read as a flag - otherwise the ``s`` of
 ``seconds`` matches ``date -s`` and a pure formatting call prompts every time.
+``xxd`` reads only the start of each word as well: ``-groupsize`` is not a
+``-r`` for the r inside it.
 """
 
 

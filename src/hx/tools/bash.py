@@ -9,10 +9,14 @@ policy requires :meth:`PersistentShell.restart`.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import os
 import secrets
+import shlex
+import shutil
 import signal
+import tempfile
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -20,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hx.auth.resolve import PROVIDER_ENV
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 from hx.tools.output import cap_output, summarize_for_ui
 
@@ -32,6 +37,20 @@ carry over. Prefer absolute paths. Use `timeout` for long commands, and
 DEFAULT_TIMEOUT = 120.0
 MAX_TIMEOUT = 600.0
 READ_CHUNK = 4096
+
+
+def command_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment a command runs with: HX's own, minus HX's credentials.
+
+    The keys HX signs in with are HX's, not the project's. Inherited, they were
+    one auto-approved ``env`` away from the model's context - and from there one
+    request away from anywhere - which made denying ``~/.hx/auth.json`` to the
+    sandbox beside the point. Every variable HX reads a credential from is
+    withheld, the unprefixed fallbacks included.
+    """
+    withheld = {name for names in PROVIDER_ENV.values() for name in names}
+    inherited = {key: value for key, value in os.environ.items() if key not in withheld}
+    return {**inherited, **(extra or {})}
 
 
 @dataclass(slots=True)
@@ -61,9 +80,11 @@ class PersistentShell:
     ) -> None:
         self._cwd = cwd
         self.shell = shell or os.environ.get("SHELL") or "/bin/bash"
-        self.env = {**os.environ, **(env or {}), "HX": "1", "TERM": "dumb"}
+        self.env = command_environment({**(env or {}), "HX": "1", "TERM": "dumb"})
         self.sandbox = sandbox
         self._process: asyncio.subprocess.Process | None = None
+        self._script_dir: Path | None = None
+        """Where each command is written before the shell sources it."""
         self._sentinel = f"__HX_DONE_{secrets.token_hex(8)}__"
         self._lock = asyncio.Lock()
         self._exit_code = 0
@@ -76,6 +97,10 @@ class PersistentShell:
         return self._exit_code
 
     async def start(self) -> None:
+        if self._script_dir is None:
+            # Private to this user: the file holds whatever the model is about
+            # to run, and nobody else gets to change it on the way.
+            self._script_dir = Path(tempfile.mkdtemp(prefix="hx-shell-"))
         argv = [self.shell, "-s"]
         if self.sandbox is not None:
             argv = self.sandbox.wrap(argv)
@@ -121,11 +146,24 @@ class PersistentShell:
 
             # stderr is merged into stdout so the model sees what a user would.
             #
+            # The command is sourced from a file, with stdin from /dev/null,
+            # rather than written into the shell's stdin. That stdin is the
+            # control channel: a command that read it - `cat`, `read`, `ssh
+            # host ls` - ate the trailer below, and `cat` echoed it back, so the
+            # call "finished" while cat went on swallowing every later command.
+            # Sourced, it still runs in this shell, so cd and exports persist;
+            # and an unclosed quote ends with the file instead of running on
+            # into the next command.
+            #
             # The trailer carries the working directory as well as the status,
             # because a `cd` is the main thing that persists between calls and
             # nothing outside the shell could otherwise see it. `$PWD` is last
             # so a directory with spaces in it needs no quoting to parse.
-            payload = f'{command}\nprintf \'\\n%s %s %s\\n\' {self._sentinel} "$?" "$PWD"\n'
+            script = self._write_command(command)
+            payload = (
+                f". {shlex.quote(str(script))} </dev/null\n"
+                f'printf \'\\n%s %s %s\\n\' {self._sentinel} "$?" "$PWD"\n'
+            )
             self._process.stdin.write(payload.encode())
             await self._process.stdin.drain()
 
@@ -153,9 +191,18 @@ class PersistentShell:
 
             self._duration_ms = (time.monotonic() - started) * 1000
 
+    def _write_command(self, command: str) -> Path:
+        assert self._script_dir is not None
+        script = self._script_dir / "command"
+        script.write_text(f"{command}\n", encoding="utf-8")
+        return script
+
     async def _read_until_sentinel(self, timeout_seconds: float) -> AsyncIterator[str]:
         assert self._process is not None and self._process.stdout is not None
         stdout = self._process.stdout
+        # Incremental, so a character split across two reads is decoded whole
+        # rather than as two replacement characters.
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         buffer = ""
         deadline = time.monotonic() + timeout_seconds
 
@@ -173,11 +220,12 @@ class PersistentShell:
                 self._exit_code = (
                     self._process.returncode if self._process.returncode is not None else 1
                 )
+                buffer += decoder.decode(b"", final=True)
                 if buffer:
                     yield buffer
                 return
 
-            buffer += data.decode(errors="replace")
+            buffer += decoder.decode(data)
             if self._sentinel in buffer:
                 head, _, tail = buffer.partition(self._sentinel)
                 self._exit_code, self._cwd = _parse_trailer(tail, self._cwd)
@@ -243,6 +291,9 @@ class PersistentShell:
         return True
 
     async def close(self) -> None:
+        if self._script_dir is not None:
+            shutil.rmtree(self._script_dir, ignore_errors=True)
+            self._script_dir = None
         if self._process is None:
             return
         with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -300,12 +351,18 @@ class BackgroundJobs:
         # the subprocess, so holding the parent's copy keeps one open per job
         # for the life of the session and buys nothing - the log is read back
         # by path.
+        #
+        # stdin is /dev/null, not HX's own: inherited, it is the terminal the
+        # prompt reads from, and a dev server with keyboard shortcuts would
+        # take keystrokes meant for HX - or put the terminal into raw mode.
         with log_path.open("wb") as handle:
             process = await asyncio.create_subprocess_exec(
                 *argv,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=handle,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                env=command_environment(),
                 start_new_session=True,
             )
         self._jobs[job_id] = BackgroundJob(job_id, command, process, log_path)

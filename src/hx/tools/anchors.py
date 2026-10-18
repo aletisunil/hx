@@ -112,13 +112,12 @@ def resolve(lines: list[str], anchor: str) -> int:
     return matches[0]
 
 
-def replace_span(lines: list[str], start: int, end: int, replacement: str) -> list[str]:
-    """Replace ``lines[start:end + 1]`` with ``replacement`` split into lines.
+def replace_span(lines: list[str], start: int, end: int, replacement: list[str]) -> list[str]:
+    """Replace ``lines[start:end + 1]`` with the ``replacement`` lines.
 
     An empty replacement deletes the span rather than inserting a blank line.
     """
-    new_lines = replacement.split("\n") if replacement else []
-    return lines[:start] + new_lines + lines[end + 1 :]
+    return lines[:start] + replacement + lines[end + 1 :]
 
 
 class AnchorError(Exception):

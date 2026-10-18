@@ -298,6 +298,7 @@ def render_diff(diff_text: str) -> list[str]:
     old_no = new_no = 0
     pending_removed: list[tuple[int, str]] = []
     pending_added: list[tuple[int, str]] = []
+    in_hunk = False
 
     def flush() -> None:
         if len(pending_removed) == 1 and len(pending_added) == 1:
@@ -314,10 +315,14 @@ def render_diff(diff_text: str) -> list[str]:
         pending_added.clear()
 
     for line in diff_text.splitlines():
-        if line.startswith(("+++", "---")):
-            continue
         hunk = _HUNK.match(line)
+        if not hunk and not in_hunk:
+            # The ``---``/``+++`` file headers. Skipped by position rather than
+            # by their doubled sign, which also hid every changed line whose own
+            # text starts with ``--`` or ``++`` - a SQL comment, ``++i``.
+            continue
         if hunk:
+            in_hunk = True
             flush()
             old_no, new_no = int(hunk.group(1)), int(hunk.group(3))
             if out:

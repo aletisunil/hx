@@ -56,6 +56,7 @@ from hx.tools.base import ToolContext, ToolResult
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
+    from pathlib import Path
 
     from hx.config import Settings
     from hx.core.compaction import Compactor
@@ -877,7 +878,7 @@ class AgentLoop:
         from hx.permissions.engine import PermissionRequest
 
         tool = self.tools.get(call.name)
-        detail, detail_kind = _permission_detail(call)
+        detail, detail_kind = _permission_detail(call, self.settings.cwd)
         request = PermissionRequest(
             tool_name=call.name,
             specifier=tool.permission_specifier(call.input),
@@ -1032,7 +1033,7 @@ def _parse_tool_input(raw: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _permission_detail(call: ToolUseBlock) -> tuple[str, str]:
+def _permission_detail(call: ToolUseBlock, cwd: Path) -> tuple[str, str]:
     """What the approval shows, and what kind of thing it is.
 
     For an edit this previews the change against the file on disk, so the user
@@ -1042,18 +1043,29 @@ def _permission_detail(call: ToolUseBlock) -> tuple[str, str]:
     the text meant a file whose first line was ``---`` - YAML front matter, a
     markdown rule - was treated as a diff and run through a painter that
     strips exactly those lines, leaving the user approving a blank space.
+
+    The path is resolved against the session's directory, the way the tool
+    resolves it. HX never changes its own working directory, so under
+    ``--cwd`` - or a session resumed from somewhere else - a relative path
+    read from the process directory previewed a different file, or none, and
+    the user approved "no change" for an edit that changed something.
     """
     if call.name == "Bash":
         return str(call.input.get("command", "")), "command"
 
     if call.name in {"Edit", "Write"} and (raw_path := call.input.get("file_path")):
-        from pathlib import Path
+        from hx.tools.edit import (
+            apply_edits,
+            apply_hashline,
+            parse_edits,
+            parse_hashline,
+            unified_diff,
+        )
+        from hx.tools.read import read_exact, resolve_path
 
-        from hx.tools.edit import apply_hashline, parse_edits, parse_hashline, unified_diff
-
-        path = Path(str(raw_path))
+        path = resolve_path(str(raw_path), cwd)
         try:
-            before = path.read_text(encoding="utf-8") if path.is_file() else ""
+            before = read_exact(path) if path.is_file() else ""
             if call.name == "Write":
                 after = str(call.input.get("content", ""))
             elif call.input.get("hashline"):
@@ -1062,11 +1074,7 @@ def _permission_detail(call: ToolUseBlock) -> tuple[str, str]:
                 # filename and the user approves an edit they never saw.
                 after = apply_hashline(before, parse_hashline(call.input))
             else:
-                after = before
-                for edit in parse_edits(call.input):
-                    after = after.replace(
-                        edit.old_string, edit.new_string, -1 if edit.replace_all else 1
-                    )
+                after = apply_edits(before, parse_edits(call.input))
             diff = unified_diff(before, after, str(path))
             return (diff, "diff") if diff else (f"{path} (no change)", "text")
         except Exception:

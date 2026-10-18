@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
+import stat
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
@@ -87,12 +90,37 @@ class WriteTool(Tool):
         )
 
 
-def write_atomic(path: Any, content: str) -> None:
+def write_atomic(path: Path, content: str) -> None:
     """Write via a temp file in the same directory, then rename.
 
     Same directory matters: a rename across filesystems is not atomic, and the
     point of this is that a crash never leaves a half-written file.
+
+    The rename replaces whatever sits at the name it lands on, so two things
+    are carried over by hand. A symlink is written through - the rename lands
+    on the file it points at, and the link stays a link - rather than replaced
+    by a regular file while its target goes unchanged. And the file's mode is
+    copied onto the temp file, which would otherwise turn an executable script
+    into one that no longer runs. A new file gets the mode the umask gives it.
+
+    Text is written as given, with no newline translation: the line endings
+    in ``content`` are the ones the caller chose.
     """
-    tmp = path.with_name(f".{path.name}.hx-tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
+    target = path.resolve() if path.is_symlink() else path
+    try:
+        mode: int | None = stat.S_IMODE(target.stat().st_mode)
+    except FileNotFoundError:
+        mode = None
+
+    tmp = target.with_name(f".{target.name}.{secrets.token_hex(4)}.hx-tmp")
+    # 0o666 through os.open, so the kernel applies the umask to a new file.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise

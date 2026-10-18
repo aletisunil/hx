@@ -26,6 +26,34 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- The API keys HX itself signs in with (`HX_OPENROUTER_API_KEY`, `OPENROUTER_API_KEY`, and the
+  Tavily and Devin keys) are no longer passed to the commands it runs. An auto-approved `env`
+  used to put them straight into the model's context.
+- `xxd -r`, `xxd in out`, `uniq in out` and `sort --compress-program` now ask before they run.
+  They write files or run a program, but they were auto-approved as read-only commands.
+
+### Fixed
+
+- A command that reads stdin (`cat`, `read`, `ssh host ls`) no longer breaks the shell. It used
+  to swallow every later command, which then reported success without running. Commands now
+  get end-of-file on stdin, and a command with an unclosed quote fails on its own.
+- Background jobs no longer read from the terminal, so a dev server cannot take keystrokes
+  from the prompt.
+- Non-ASCII command output no longer shows `�` where a read split a character.
+- An edit to a CRLF file keeps CRLF on every line. Each edit used to rewrite the whole file
+  with LF, and the diff did not show it. `old_string` with plain newlines now matches there.
+- A hashline replacement that ends with a newline no longer adds a blank line after it.
+- Edit and Write keep a file's mode, so a script stays executable, and write through a
+  symlink instead of replacing it with a regular file.
+- With `--cwd`, or `hx resume` from another directory, the approval shows the diff of the
+  file the edit will change. It used to read a relative path from the shell's directory.
+- An edit's `+N -M` and its diff now include changed lines that start with `--` or `++`,
+  such as SQL comments.
+- "Always allow" on a command HX cannot split into parts, such as a heredoc with an
+  apostrophe, is now honoured in later sessions instead of asking again.
+
 ---
 
 ## [0.2.16] - 2026-10-13

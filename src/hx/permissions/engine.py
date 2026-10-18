@@ -144,6 +144,12 @@ class PermissionEngine:
         if request.tool_name == "Bash" and request.specifier:
             parsed = parse(request.specifier)
             if parsed.unparseable:
+                # A rule holding the whole command verbatim grants exactly what it
+                # names, so it covers what cannot be decomposed - it is what "always
+                # allow" saves for such a command. Returning before looking made
+                # that saved rule ask again in every later session. Ask still wins.
+                if not self._match(request, Decision.ASK) and (exact := self._exact_allow(request)):
+                    return PermissionOutcome(Decision.ALLOW, "matched an allow rule", exact)
                 return PermissionOutcome(
                     Decision.ASK,
                     "command could not be decomposed; approving it blind is not safe",
@@ -219,11 +225,11 @@ class PermissionEngine:
             return None
 
         # A rule holding the whole command verbatim: exact, so it grants no more
-        # than the string it names. This is what covers a command that cannot be
-        # decomposed, and what keeps hand-written full-command rules working.
-        for rule in candidates:
-            if rule.specifier == request.specifier:
-                return rule
+        # than the string it names. This is what keeps hand-written full-command
+        # rules working; :meth:`evaluate` also consults it for a command that
+        # cannot be decomposed.
+        if exact := self._exact_allow(request):
+            return exact
 
         parsed = parse(request.specifier)
         if not parsed.segments or parsed.unparseable:
@@ -243,6 +249,26 @@ class PermissionEngine:
                 return None
             first = first or covering
         return first
+
+    def _exact_allow(self, request: PermissionRequest) -> Rule | None:
+        """An allow rule whose specifier is this request's, character for character.
+
+        Compared stripped, as both sides are by the time they mean anything: a
+        rule's specifier is stripped as it is parsed, and Bash strips a command
+        before running it.
+        """
+        specifier = (request.specifier or "").strip()
+        return next(
+            (
+                rule
+                for rule in self.rules
+                if rule.decision is Decision.ALLOW
+                and rule.tool in {request.tool_name, "*"}
+                and rule.specifier is not None
+                and rule.specifier == specifier
+            ),
+            None,
+        )
 
     def _match_allow_each(
         self,

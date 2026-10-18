@@ -74,7 +74,7 @@ class ReadTool(Tool):
         limit = int(params.get("limit") or DEFAULT_LINE_LIMIT)
 
         try:
-            content = path.read_text(encoding="utf-8", errors="replace")
+            content = read_exact(path, errors="replace")
         except OSError as exc:
             raise ToolError(f"{path}: {exc}") from exc
 
@@ -187,6 +187,18 @@ def hashline_enabled(ctx: ToolContext) -> bool:
     """
     tools = getattr(ctx.settings, "tools", None)
     return bool(getattr(tools, "hashline", True))
+
+
+def read_exact(path: Path, errors: str = "strict") -> str:
+    """A file's text with its line endings exactly as they are on disk.
+
+    ``Path.read_text`` reads with universal newlines, which turns every ``\r\n``
+    into ``\n``. Edit read that way and wrote the result back, so one edit to a
+    CRLF file rewrote every line ending in it - and the diff, computed from the
+    same normalised text, showed only the line that was asked for. Read and
+    Edit both read here, so an anchor hashes the same bytes on both sides.
+    """
+    return path.read_bytes().decode("utf-8", errors=errors)
 
 
 def resolve_path(raw: str, cwd: Path) -> Path:

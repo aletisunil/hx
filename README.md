@@ -830,6 +830,9 @@ temp dir, credential paths (`~/.ssh`, `~/.aws`, and HX's own `auth.json`) are
 unreadable and unwritable - even inside the project, and even before they
 exist - and outbound network is off. If neither backend is present the
 status bar says `no-sandbox` rather than implying protection that is not there.
+The API keys HX signs in with (`HX_OPENROUTER_API_KEY`, `OPENROUTER_API_KEY`,
+and the Tavily and Devin keys) are removed from the environment of every
+command it runs.
 
 Modes cycle with shift+tab: `plan` (read-only — mutating tools are not even
 offered to the model), `default`, `acceptEdits`, `bypass`.

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from hx.tools import anchors
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
-from hx.tools.read import FileTracker, hashline_enabled, resolve_path
+from hx.tools.read import FileTracker, hashline_enabled, read_exact, resolve_path
 from hx.tools.write import write_atomic
 
 if TYPE_CHECKING:
@@ -127,7 +127,13 @@ class EditTool(Tool):
         if self.tracker.changed_since_read(path):
             raise ToolError(f"{path} changed on disk since it was read. Read it again.")
 
-        before = path.read_text(encoding="utf-8")
+        try:
+            before = read_exact(path)
+        except UnicodeDecodeError as exc:
+            raise ToolError(
+                f"{path} is not UTF-8 text ({exc.reason} at byte {exc.start}). "
+                "Edit only changes UTF-8 files."
+            ) from exc
 
         if params.get("hashline"):
             if not hashline_enabled(ctx):
@@ -142,7 +148,7 @@ class EditTool(Tool):
             count = len(spans)
         else:
             edits = parse_edits(params)
-            after = self.apply(before, edits)
+            after = apply_edits(before, edits)
             count = len(edits)
 
         if self.checkpoints is not None:
@@ -160,31 +166,55 @@ class EditTool(Tool):
             metadata={"path": str(path), "diff": diff},
         )
 
-    def apply(self, content: str, edits: list[EditOp]) -> str:
-        """Pure function over file content. Raises :class:`ToolError`
-        when a match is missing or ambiguous."""
-        result = content
-        for index, edit in enumerate(edits, start=1):
-            if edit.old_string == edit.new_string:
-                raise ToolError(f"edit {index}: old_string and new_string are identical")
 
-            occurrences = result.count(edit.old_string)
-            if occurrences == 0:
-                raise ToolError(
-                    f"edit {index}: old_string not found in the file. "
-                    "It must match exactly, including whitespace and indentation."
-                )
-            if occurrences > 1 and not edit.replace_all:
-                raise ToolError(
-                    f"edit {index}: old_string appears {occurrences} times. "
-                    "Add surrounding context to make it unique, or set replace_all."
-                )
-            result = result.replace(
-                edit.old_string,
-                edit.new_string,
-                -1 if edit.replace_all else 1,
+def apply_edits(content: str, edits: list[EditOp]) -> str:
+    """Pure function over file content. Raises :class:`ToolError`
+    when a match is missing or ambiguous.
+
+    Shared with the approval preview, so the diff a user approves is computed
+    exactly the way the edit will be applied.
+
+    In a CRLF file the text arrives with bare newlines - Read shows lines
+    without their carriage returns - so a multi-line ``old_string`` is matched
+    in its CRLF spelling when the literal one is absent, and ``new_string``
+    is given CRLF endings either way. Otherwise the edited lines would be the
+    only LF ones in the file.
+    """
+    crlf = _uses_crlf(anchors.split(content)[0])
+    result = content
+    for index, edit in enumerate(edits, start=1):
+        if edit.old_string == edit.new_string:
+            raise ToolError(f"edit {index}: old_string and new_string are identical")
+
+        old, new = edit.old_string, edit.new_string
+        if crlf:
+            new = _crlf(new)
+            if result.count(old) == 0:
+                old = _crlf(old)
+
+        occurrences = result.count(old)
+        if occurrences == 0:
+            raise ToolError(
+                f"edit {index}: old_string not found in the file. "
+                "It must match exactly, including whitespace and indentation."
             )
-        return result
+        if occurrences > 1 and not edit.replace_all:
+            raise ToolError(
+                f"edit {index}: old_string appears {occurrences} times. "
+                "Add surrounding context to make it unique, or set replace_all."
+            )
+        result = result.replace(old, new, -1 if edit.replace_all else 1)
+    return result
+
+
+def _uses_crlf(lines: list[str]) -> bool:
+    """Whether most of a file's lines end in CRLF - the ending an edit should write."""
+    return sum(line.endswith("\r") for line in lines) * 2 > len(lines)
+
+
+def _crlf(text: str) -> str:
+    """``text`` with every line ending spelled CRLF."""
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
 
 
 def apply_hashline(content: str, spans: list[HashlineOp]) -> str:
@@ -199,7 +229,7 @@ def apply_hashline(content: str, spans: list[HashlineOp]) -> str:
     # Replacement text arrives with bare newlines. In a CRLF file that would
     # leave the edited lines as the only LF ones in it, which is a diff nobody
     # asked for.
-    crlf = sum(line.endswith("\r") for line in lines) * 2 > len(lines)
+    crlf = _uses_crlf(lines)
 
     for index, span in enumerate(spans, start=1):
         try:
@@ -213,19 +243,26 @@ def apply_hashline(content: str, spans: list[HashlineOp]) -> str:
                 f"hashline {index}: end anchor {span.end!r} is at line {end + 1}, "
                 f"before start anchor {span.start!r} at line {start + 1}"
             )
-        lines = anchors.replace_span(lines, start, end, _terminated(span.new_string, crlf))
+        lines = anchors.replace_span(lines, start, end, _replacement_lines(span.new_string, crlf))
 
     result = "\n".join(lines)
     return result + "\n" if trailing_newline and result else result
 
 
-def _terminated(replacement: str, crlf: bool) -> str:
-    """Give the replacement the line endings the rest of the file uses."""
-    if not crlf or not replacement:
-        return replacement
-    return "\n".join(
-        part if part.endswith("\r") else f"{part}\r" for part in replacement.split("\n")
-    )
+def _replacement_lines(replacement: str, crlf: bool) -> list[str]:
+    """The lines a span becomes, ending the way the rest of the file's lines do.
+
+    A newline at the end of the text closes its last line rather than opening
+    one more: models write ``"TWO\n"`` for "the line becomes TWO", and splitting
+    that literally added a blank line after every such edit. A lone newline is
+    still one blank line, and empty text still deletes the span.
+    """
+    if not replacement:
+        return []
+    parts = replacement.replace("\r\n", "\n").split("\n")
+    if len(parts) > 1 and parts[-1] == "":
+        parts.pop()
+    return [f"{part}\r" for part in parts] if crlf else parts
 
 
 def parse_hashline(params: dict[str, Any]) -> list[HashlineOp]:
@@ -272,9 +309,21 @@ def parse_edits(params: dict[str, Any]) -> list[EditOp]:
 
 
 def count_changes(diff_text: str) -> tuple[int, int]:
-    """Added and removed line counts, ignoring the ``+++``/``---`` file headers."""
-    added = sum(1 for line in diff_text.splitlines() if line.startswith("+") and line[1:2] != "+")
-    removed = sum(1 for line in diff_text.splitlines() if line.startswith("-") and line[1:2] != "-")
+    """Added and removed line counts, ignoring the ``+++``/``---`` file headers.
+
+    Only lines inside a hunk are counted. Telling the headers apart by their
+    doubled sign instead skipped every changed line whose own text starts with
+    ``-`` or ``+`` - a SQL or Lua comment, ``++i``, a markdown rule.
+    """
+    added = removed = 0
+    in_hunk = False
+    for line in diff_text.splitlines():
+        if line.startswith("@@"):
+            in_hunk = True
+        elif in_hunk and line.startswith("+"):
+            added += 1
+        elif in_hunk and line.startswith("-"):
+            removed += 1
     return added, removed
 
 

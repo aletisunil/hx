@@ -113,6 +113,31 @@ def test_always_allow_is_remembered(hx: HX, stub: Stub) -> None:
     assert target.read_text() == "second\n"
 
 
+def test_always_allow_covers_a_command_that_cannot_be_decomposed(hx: HX, stub: Stub) -> None:
+    """A heredoc whose body has an apostrophe cannot be split into segments, so `a` saves it
+    verbatim - and the next session honours that rule instead of asking again."""
+    command = "cat <<'EOF'\ndon't ship on fridays\nEOF"
+    stub.script(call("Bash", command=command), say("Printed once."))
+    term = hx.tui()
+    term.submit("print the notes")
+    term.wait_for("Permission needed")
+    term.type("a")
+    term.wait_for("Printed once.")
+    term.press("ctrl+d")
+    term.wait_exit()
+
+    (settings,) = hx.hx_home.glob("projects/*/settings.local.json")
+    assert json.loads(settings.read_text())["permissions"]["allow"] == [f"Bash({command})"]
+
+    stub.script(call("Bash", command=command), say("Printed again."))
+    term = hx.tui()
+    term.submit("print them again")
+    term.wait_for("Printed again.")
+    term.snapshot("the saved rule covers the heredoc")
+    assert "Permission needed" not in term.scrollback()
+    assert stub.requests[-1].tool_results()[-1] == "don't ship on fridays"
+
+
 def test_edit_shows_a_diff(hx: HX, stub: Stub) -> None:
     """An edit is approved against a diff of the change, and the transcript keeps the diff."""
     source = hx.project / "app.py"
