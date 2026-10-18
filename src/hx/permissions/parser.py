@@ -666,6 +666,9 @@ def _names_an_output(segment: CommandSegment) -> bool:
 
     Counting errs towards two: an option this does not know to take a value
     makes its value look like an operand, which prompts - never the reverse.
+    Options end at the first operand, as for xxd and BSD uniq: there ``xxd in
+    -p`` and ``uniq in -c`` write files named ``-p`` and ``-c``. GNU uniq reads
+    that ``-c`` as an option, and the command only prompts where it need not.
     """
     takes_value = OUTPUT_OPERAND_COMMANDS[segment.executable]
     operands = 0
@@ -679,6 +682,7 @@ def _names_an_output(segment: CommandSegment) -> bool:
                 next(args, None)
         else:
             operands += 1
+            options_done = True
     return operands >= 2
 
 
@@ -752,13 +756,15 @@ def _split_option(arg: str, options: tuple[str, ...]) -> tuple[str, str | None] 
     Three spellings reach the same option and a shell accepts all three:
     separate (``-e`` then the script), ``=``-attached (``--expression=…``) and,
     for short options, packed into the same word (``-e'w out'``). Missing the
-    last one let a writing script through unread.
+    last one let a writing script through unread. A long option may also be cut
+    short (``--expr=…``) - see :func:`_abbreviates`.
     """
     if arg in options:
         return arg, None
     name, sep, value = arg.partition("=")
-    if sep and name in options:
-        return name, value
+    option = next((o for o in options if name == o or _abbreviates(name, o)), None)
+    if option is not None:
+        return option, value if sep else None
     if len(arg) > 2 and arg.startswith("-") and not arg.startswith("--") and arg[:2] in options:
         return arg[:2], arg[2:]
     return None
@@ -808,7 +814,8 @@ def _has_flag(
     clustered (``sed -ni``). Only two-character flags take part in the attached
     and clustered readings - ``find``'s options are single-dash words, and
     scanning ``-depth`` for the letters of ``-delete`` would refuse commands that
-    write nothing.
+    write nothing. A long flag also matches when cut short, as
+    :func:`_abbreviates` describes.
 
     ``cluster_first_only`` narrows the clustered reading to the first letter, for
     commands where the rest of the word is that option's value rather than more
@@ -819,7 +826,8 @@ def _has_flag(
     for arg in args:
         if arg == "--":
             break  # everything after this is an operand, not an option
-        if arg.split("=", 1)[0] in flags:
+        name = arg.split("=", 1)[0]
+        if name in flags or any(_abbreviates(name, flag) for flag in flags):
             return True
         if not arg.startswith("-") or arg.startswith("--"):
             continue
@@ -829,6 +837,20 @@ def _has_flag(
         if any(len(flag) == 2 and flag[1] in cluster for flag in flags):
             return True
     return False
+
+
+def _abbreviates(name: str, option: str) -> bool:
+    """True when ``name`` is the long ``option`` cut short: ``--compress`` for
+    ``--compress-program``.
+
+    getopt_long and git's option parser take any unambiguous prefix of a long
+    option as the option itself, so matching only the full spelling let ``sort
+    --compress=sh`` and ``git grep --open-files-in=sh`` run a program unprompted.
+    Every prefix counts, ambiguous or not: an ambiguous one is an error, and one
+    that is itself another whole option only prompts where it need not - never
+    the reverse.
+    """
+    return len(name) > 2 and name.startswith("--") and option.startswith(name) and name != option
 
 
 def _leading_letters(text: str) -> str:

@@ -14,9 +14,7 @@ import contextlib
 import os
 import secrets
 import shlex
-import shutil
 import signal
-import tempfile
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -84,8 +82,6 @@ class PersistentShell:
         self.env = command_environment({**(env or {}), "HX": "1", "TERM": "dumb"})
         self.sandbox = sandbox
         self._process: asyncio.subprocess.Process | None = None
-        self._script_dir: Path | None = None
-        """Where each command is written before the shell sources it."""
         self._sentinel = f"__HX_DONE_{secrets.token_hex(8)}__"
         self._lock = asyncio.Lock()
         self._exit_code = 0
@@ -98,10 +94,6 @@ class PersistentShell:
         return self._exit_code
 
     async def start(self) -> None:
-        if self._script_dir is None:
-            # Private to this user: the file holds whatever the model is about
-            # to run, and nobody else gets to change it on the way.
-            self._script_dir = Path(tempfile.mkdtemp(prefix="hx-shell-"))
         argv = [self.shell, "-s"]
         if self.sandbox is not None:
             argv = self.sandbox.wrap(argv)
@@ -147,28 +139,29 @@ class PersistentShell:
 
             # stderr is merged into stdout so the model sees what a user would.
             #
-            # The command is read from a file and evaluated with stdin from
-            # /dev/null, rather than written into the shell's stdin. That stdin
-            # is the control channel: a command that read it - `cat`, `read`,
-            # `ssh host ls` - ate the trailer below, and `cat` echoed it back, so
-            # the call "finished" while cat went on swallowing every later
-            # command. Evaluated, it still runs in this shell, so cd and exports
-            # persist; and an unclosed quote ends with the text instead of
-            # running on into the next command.
+            # The command reaches the shell as one single-quoted word handed to
+            # `eval`, with stdin from /dev/null. Written bare, it shared the
+            # shell's stdin with the control channel: a command that read it -
+            # `cat`, `read`, `ssh host ls` - ate the trailer below, and `cat`
+            # echoed it back, so the call "finished" while cat went on
+            # swallowing every later command. Evaluated, it still runs in this
+            # shell, so cd and exports persist; and an unclosed quote ends with
+            # the word instead of running on into the next command.
             #
-            # `eval` of the text, not `.` of the file: a sourced file names
-            # itself in every error - a syntax error, a sandbox refusal - so the
-            # temp path became the first thing the model read about a failure.
-            # The text stays in the file and only `cat` is inside `$( )`, so
-            # bash 3.2 never has to parse a heredoc nested in a substitution.
+            # Inline, not read back from a temp file. Reading it back needed
+            # `cat`, found on the session's PATH, so `PATH=/nonexistent` or a
+            # function named `cat` broke every later command - the one that
+            # would repair it included - while each reported success. And the
+            # file sat in $TMPDIR, which the sandbox lets commands write, so a
+            # job could change what ran after it was approved. Only builtins
+            # run here: `eval`, the redirect and `printf`.
             #
             # The trailer carries the working directory as well as the status,
             # because a `cd` is the main thing that persists between calls and
             # nothing outside the shell could otherwise see it. `$PWD` is last
             # so a directory with spaces in it needs no quoting to parse.
-            script = self._write_command(command)
             payload = (
-                f'eval "$(cat {shlex.quote(str(script))})" </dev/null\n'
+                f"eval {shlex.quote(command)} </dev/null\n"
                 f'printf \'\\n%s %s %s\\n\' {self._sentinel} "$?" "$PWD"\n'
             )
             self._process.stdin.write(payload.encode())
@@ -197,12 +190,6 @@ class PersistentShell:
                 raise
 
             self._duration_ms = (time.monotonic() - started) * 1000
-
-    def _write_command(self, command: str) -> Path:
-        assert self._script_dir is not None
-        script = self._script_dir / "command"
-        script.write_text(f"{command}\n", encoding="utf-8")
-        return script
 
     async def _read_until_sentinel(self, timeout_seconds: float) -> AsyncIterator[str]:
         assert self._process is not None and self._process.stdout is not None
@@ -298,9 +285,6 @@ class PersistentShell:
         return True
 
     async def close(self) -> None:
-        if self._script_dir is not None:
-            shutil.rmtree(self._script_dir, ignore_errors=True)
-            self._script_dir = None
         if self._process is None:
             return
         with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -344,8 +328,16 @@ class BackgroundJobs:
         self.log_dir = log_dir
         self._jobs: dict[str, BackgroundJob] = {}
 
-    async def start(self, command: str, cwd: Path, sandbox: Any | None = None) -> str:
-        """Returns a job id the model can poll."""
+    async def start(
+        self, command: str, cwd: Path, env: dict[str, str], sandbox: Any | None = None
+    ) -> str:
+        """Returns a job id the model can poll.
+
+        ``env`` is the persistent shell's, so a command sees the same ``HX`` and
+        ``TERM`` whichever way it runs: with the terminal's own ``TERM``, a tool
+        coloured its output in the background and wrote the escapes into the
+        log the model reads back.
+        """
         job_id = f"bg_{uuid.uuid4().hex[:8]}"
         self.log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.log_dir / f"{job_id}.log"
@@ -369,7 +361,7 @@ class BackgroundJobs:
                 stdout=handle,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
-                env=command_environment(),
+                env=env,
                 start_new_session=True,
             )
         self._jobs[job_id] = BackgroundJob(job_id, command, process, log_path)
@@ -488,7 +480,9 @@ class BashTool(Tool):
             # The shell's directory, not the session's: `cd build && make` in
             # one call then a background `./run` in the next has to mean the
             # same thing it would in a terminal.
-            job_id = await self.jobs.start(command, self.shell.cwd, self.shell.sandbox)
+            job_id = await self.jobs.start(
+                command, self.shell.cwd, self.shell.env, self.shell.sandbox
+            )
             return ToolResult(
                 content=(
                     f"Started background job {job_id}.\n"

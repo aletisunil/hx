@@ -33,6 +33,10 @@ the project follows [semantic versioning](https://semver.org/).
   used to put them straight into the model's context.
 - `xxd -r`, `xxd in out`, `uniq in out` and `sort --compress-program` now ask before they run.
   They write files or run a program, but they were auto-approved as read-only commands.
+- A long option cut short now counts as the full option, as getopt_long and git read it.
+  `sort --compress=sh`, `sort --out=f`, `git grep --open-files-in=sh` and `git branch --del`
+  were auto-approved as read-only. So were `xxd in -p` and macOS `uniq in -c`, which write a
+  file named after the flag.
 
 ### Fixed
 
@@ -41,6 +45,8 @@ the project follows [semantic versioning](https://semver.org/).
   get end-of-file on stdin, and a command with an unclosed quote fails on its own.
 - Background jobs no longer read from the terminal, so a dev server cannot take keystrokes
   from the prompt.
+- Background jobs get `HX=1` and `TERM=dumb`, the same as other commands. A tool that colours
+  its output for a real terminal used to write escape codes into the job's log.
 - Non-ASCII command output no longer shows `�` where a read split a character.
 - An edit to a CRLF file keeps CRLF on every line. Each edit used to rewrite the whole file
   with LF, and the diff did not show it. `old_string` with plain newlines now matches there.

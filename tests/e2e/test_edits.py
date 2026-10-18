@@ -5,7 +5,7 @@ from __future__ import annotations
 import stat
 
 from hx.tools import anchors
-from tests.e2e.conftest import HX
+from tests.e2e.conftest import HX, git
 from tests.e2e.stub import Stub, ToolCall, call, calls, say
 
 
@@ -178,19 +178,35 @@ def test_edit_counts_lines_that_start_with_dashes(hx: HX, stub: Stub) -> None:
 
 def test_commands_that_write_through_an_operand_ask_first(hx: HX, stub: Stub) -> None:
     """``xxd`` and ``uniq`` write when given an output file, and ``xxd -r`` and ``sort
-    --compress-program`` write or execute through a flag. Those need approval; the reading
-    forms of the same commands still run without one."""
+    --compress-program`` write or execute through a flag. Those need approval - also when
+    the flag comes after the file, which xxd and BSD uniq read as the output's name, and
+    when a long option is cut short, which getopt_long and git accept. The reading forms
+    of the same commands still run without one."""
     (hx.project / "names.txt").write_text("ada\nada\nlin\n")
     (hx.project / "dump.hex").write_text("6869\n")
+    git(hx.project, "init", "-q", "-b", "main")
+    git(hx.project, "add", "names.txt")
+    git(hx.project, "commit", "-q", "-m", "names")
+    git(hx.project, "checkout", "-q", "-b", "topic")
     commands = [
         ("xxd -l 4 names.txt", True),
         ("uniq names.txt", True),
         ("uniq -c names.txt", True),
+        ("sort -r names.txt", True),
+        ("sort --reverse names.txt", True),
+        ("git grep --line-number ada", True),
         ("xxd -r -p dump.hex restored.bin", False),
         ("xxd names.txt names.hex", False),
         ("uniq names.txt deduped.txt", False),
         ("uniq -f 1 names.txt deduped.txt", False),
         ("sort --compress-program=sh names.txt", False),
+        ("sort --compress=sh names.txt", False),
+        ("sort --out=sorted.txt names.txt", False),
+        ("xxd names.txt -p", False),
+        ("uniq names.txt -c", False),
+        ("sed --expr='w sed-out.txt' names.txt", False),
+        ("git grep --open-files-in=true ada", False),
+        ("git branch --del main", False),
     ]
     stub.script(*(call("Bash", command=command) for command, _ in commands), say("Tried."))
     hx.run("-p", "try the commands", check=True)
@@ -199,5 +215,7 @@ def test_commands_that_write_through_an_operand_ask_first(hx: HX, stub: Stub) ->
         result = stub.requests[index].tool_results()[-1]
         refused = "needs approval" in result
         assert refused != runs, f"{command!r}: {result}"
-    for written in ("restored.bin", "names.hex", "deduped.txt"):
+    for written in ("restored.bin", "names.hex", "deduped.txt", "sorted.txt", "-p", "-c"):
         assert not (hx.project / written).exists(), written
+    assert not (hx.project / "sed-out.txt").exists()
+    assert git(hx.project, "branch", "--list", "main").strip(), "the branch was deleted"

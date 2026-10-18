@@ -6,6 +6,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from tests.e2e.conftest import API_KEY, HX
 from tests.e2e.stub import Stub, call, say
 
@@ -54,9 +56,50 @@ def test_a_command_reading_stdin_does_not_wedge_the_shell(hx: HX, stub: Stub) ->
     assert alive == "still-alive"
 
 
+@pytest.mark.parametrize(
+    "shell",
+    [
+        pytest.param(path, marks=pytest.mark.skipif(not Path(path).exists(), reason=f"no {path}"))
+        for path in ("/bin/bash", "/bin/zsh")
+    ],
+)
+def test_the_shell_survives_what_a_command_does_to_it(hx: HX, stub: Stub, shell: str) -> None:
+    """A command that empties PATH or shadows a common tool with a function breaks only
+    itself: the next commands fail visibly with their own exit code, and the one that puts
+    things back runs. The command text never sits in a temp file a sandboxed job could
+    rewrite before the shell reads it."""
+    commands = [
+        "export PATH=/nonexistent",
+        "ls",
+        "export PATH=/usr/bin:/bin",
+        "cat() { echo HIJACK; }",
+        "echo after-the-function",
+        "unset -f cat; printf 'kept\\n' | cat",
+        "find \"$TMPDIR\" -maxdepth 1 -name 'hx-shell-*'; echo scanned",
+    ]
+    settings = hx.project / ".hx" / "settings.json"
+    settings.parent.mkdir()
+    allow = [f"Bash({command})" for command in commands]
+    settings.write_text(json.dumps({"permissions": {"allow": allow}}))
+    stub.script(*(call("Bash", command=command) for command in commands), say("Done."))
+    hx.run("-p", "break the shell", "--mode", "bypass", env={"SHELL": shell}, check=True)
+
+    results = [request.tool_results()[-1] for request in stub.requests[1:]]
+    hx.note("tool results:\n" + "\n---\n".join(results))
+    _empty, broken_ls, _restore, _define, after, unset, scan = results
+
+    assert "command not found" in broken_ls and "[exit code 127]" in broken_ls, broken_ls
+    assert after == "after-the-function", after
+    assert "HIJACK" not in after
+    assert unset == "kept", unset
+    assert scan == "scanned", "the command was written to a temp file"
+
+
 def test_hx_credentials_stay_out_of_the_shell(hx: HX, stub: Stub) -> None:
     """The keys HX itself signs in with are not handed to the commands it runs - not to the
-    persistent shell, not to a background job - while the rest of the environment is."""
+    persistent shell, not to a background job - while the rest of the environment is. Both
+    get the same environment: HX=1 and a dumb terminal, so a tool that colours its output
+    for a real terminal writes plain text in the background too."""
     stub.script(
         call(
             "Bash", command='env; echo "unprefixed=[$OPENROUTER_API_KEY] tavily=[$TAVILY_API_KEY]"'
@@ -82,6 +125,7 @@ def test_hx_credentials_stay_out_of_the_shell(hx: HX, stub: Stub) -> None:
     assert "tvly-e2e-secret" not in shell
     assert "unprefixed=[] tavily=[]" in shell
     assert "E2E_PROJECT_SETTING=kept" in shell
+    assert "HX=1" in shell.splitlines() and "TERM=dumb" in shell.splitlines()
 
     background = hx.project / "background-env.txt"
     deadline = time.monotonic() + 10
@@ -89,6 +133,7 @@ def test_hx_credentials_stay_out_of_the_shell(hx: HX, stub: Stub) -> None:
         time.sleep(0.1)
     written = _read(background)
     assert "E2E_PROJECT_SETTING=kept" in written
+    assert "HX=1" in written.splitlines() and "TERM=dumb" in written.splitlines()
     assert API_KEY not in written
     assert "tvly-e2e-secret" not in written
 
