@@ -62,6 +62,8 @@ the project follows [semantic versioning](https://semver.org/).
 - Counts of one read in the singular: "read 1 line", "1 result", "1 match", "1 tool".
 - Write reports the number of lines the way Read numbers them. A file ending in a newline
   was reported one line longer.
+- The status bar shortens a long project path from its start, so the project's name and
+  branch stay visible. Before the first request, the cache field reads "no cache".
 
 ---
 

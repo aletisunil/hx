@@ -64,6 +64,27 @@ def justify(left: str, right: str, width: int, tail: str = "") -> str:
     return left + " " * max(0, width - cell_width(left) - right_width) + right
 
 
+def fit_path(path: str, width: int) -> str:
+    """``path`` cut from its start, at a separator, until it fits ``width``.
+
+    The end of a path is the part that names the project. Cut from the right,
+    a deep checkout showed ``/private/var/folders/…`` and lost the one thing
+    the field is there to say.
+    """
+    if cell_width(path) <= width:
+        return path
+    parts = path.split("/")
+    for start in range(1, len(parts)):
+        candidate = ELLIPSIS + "/" + "/".join(parts[start:])
+        if cell_width(candidate) <= width:
+            return candidate
+    # Even the last name alone is too long; it keeps its end, like the rest.
+    name = parts[-1]
+    while name and cell_width(ELLIPSIS + name) > width:
+        name = name[1:]
+    return ELLIPSIS + name if name else ""
+
+
 def meter(fraction: float, cells: int, role: str) -> str:
     """A ``cells``-wide gauge: the filled run in ``role``, the rest dim.
 
@@ -150,18 +171,32 @@ class StatusBar(Widget):
         from hx.term.ansi import fill_line
 
         inner = max(1, width - 2)
+        mode, queue = self._mode(), self._queue()
+        keeps_mode = inner - cell_width(mode) - GAP >= MIN_LEFT
+        room = inner - cell_width(queue) - (cell_width(mode) + GAP if keeps_mode else 0)
         return [
-            fill_line(" " + justify(self._location(), self._mode(), inner, self._queue()), width),
+            fill_line(" " + justify(self._location(room), mode, inner, queue), width),
             fill_line(" " + justify(self._stats(inner), self._model(), inner), width),
         ]
 
     # -- fields ------------------------------------------------------------
 
-    def _location(self) -> str:
-        field = fg("dim", self.cwd or "")
-        if self.branch:
-            field += fg("dim", f" ({self.branch})")
-        return field
+    def _location(self, room: int) -> str:
+        """The project path and its branch, the path shortened first.
+
+        ``room`` is what :func:`justify` will leave this half. The path is cut
+        here, from its start, so the cut lands where it costs least. When even
+        the project's own name and the branch do not fit side by side, the
+        branch goes: the name says where you are, the branch only which line
+        of work.
+        """
+        cwd = self.cwd or ""
+        branch = f" ({self.branch})" if self.branch else ""
+        name = cwd.rsplit("/", 1)[-1]
+        shortest = min(cell_width(cwd), cell_width(ELLIPSIS + "/" + name))
+        if branch and room - cell_width(branch) < shortest:
+            branch = ""
+        return fg("dim", fit_path(cwd, max(0, room - cell_width(branch))) + branch)
 
     def _queue(self) -> str:
         return fg("muted", f"  ⧗{self.queued} queued") if self.queued else ""
@@ -198,7 +233,7 @@ class StatusBar(Widget):
         edit is the visible symptom of a busted prefix.
         """
         if not self.cache_read and not self.cache_write:
-            return fg("dim", "cache -")
+            return fg("dim", "no cache")
         role = "success" if self.cache_hit_rate >= 0.5 else "warning"
         return (
             fg(role, f"R{format_tokens(self.cache_read)}")

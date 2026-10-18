@@ -6,7 +6,7 @@ import json
 import re
 import time
 
-from tests.e2e.conftest import HX
+from tests.e2e.conftest import HX, SANDBOX_STATUS, git
 from tests.e2e.stub import Stub, ToolCall, call, calls, say
 from tests.e2e.terminal import Terminal
 
@@ -302,6 +302,21 @@ def test_counts_of_one_are_singular(hx: HX, stub: Stub) -> None:
     assert "1 result" in screen and "1 results" not in screen
     assert "1 match" in screen and "1 matches" not in screen
     assert stub.requests[2].tool_results()[-1].endswith("(1 line)")
+
+
+def test_status_bar_keeps_the_project_name_of_a_deep_path(hx: HX, stub: Stub) -> None:
+    """A path too long for the status bar loses its start, not its end: the project's own
+    name and its branch stay on screen. Before any request, the cache field says so in words."""
+    deep = hx.root / "clients" / "acme-corporation" / "platform" / "services" / "billing-recon"
+    deep.mkdir(parents=True)
+    git(deep, "init", "-q", "-b", "feature/invoices")
+    term = hx.tui(cwd=deep)
+    term.snapshot("status bar for a deep project")
+    location, stats = term.text().rstrip("\n").splitlines()[-2:]
+    assert location.strip().startswith("…/"), location
+    assert "/billing-recon (feature/invoices)" in location
+    assert location.rstrip().endswith(f"default · {SANDBOX_STATUS}")
+    assert "no cache" in stats and "cache -" not in stats
 
 
 def test_read_only_commands_do_not_ask(hx: HX, stub: Stub) -> None:
