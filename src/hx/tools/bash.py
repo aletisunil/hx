@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from hx.auth.resolve import PROVIDER_ENV
+from hx.text import count
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 from hx.tools.output import cap_output, summarize_for_ui
 
@@ -146,14 +147,20 @@ class PersistentShell:
 
             # stderr is merged into stdout so the model sees what a user would.
             #
-            # The command is sourced from a file, with stdin from /dev/null,
-            # rather than written into the shell's stdin. That stdin is the
-            # control channel: a command that read it - `cat`, `read`, `ssh
-            # host ls` - ate the trailer below, and `cat` echoed it back, so the
-            # call "finished" while cat went on swallowing every later command.
-            # Sourced, it still runs in this shell, so cd and exports persist;
-            # and an unclosed quote ends with the file instead of running on
-            # into the next command.
+            # The command is read from a file and evaluated with stdin from
+            # /dev/null, rather than written into the shell's stdin. That stdin
+            # is the control channel: a command that read it - `cat`, `read`,
+            # `ssh host ls` - ate the trailer below, and `cat` echoed it back, so
+            # the call "finished" while cat went on swallowing every later
+            # command. Evaluated, it still runs in this shell, so cd and exports
+            # persist; and an unclosed quote ends with the text instead of
+            # running on into the next command.
+            #
+            # `eval` of the text, not `.` of the file: a sourced file names
+            # itself in every error - a syntax error, a sandbox refusal - so the
+            # temp path became the first thing the model read about a failure.
+            # The text stays in the file and only `cat` is inside `$( )`, so
+            # bash 3.2 never has to parse a heredoc nested in a substitution.
             #
             # The trailer carries the working directory as well as the status,
             # because a `cd` is the main thing that persists between calls and
@@ -161,7 +168,7 @@ class PersistentShell:
             # so a directory with spaces in it needs no quoting to parse.
             script = self._write_command(command)
             payload = (
-                f". {shlex.quote(str(script))} </dev/null\n"
+                f'eval "$(cat {shlex.quote(str(script))})" </dev/null\n'
                 f'printf \'\\n%s %s %s\\n\' {self._sentinel} "$?" "$PWD"\n'
             )
             self._process.stdin.write(payload.encode())
@@ -600,7 +607,7 @@ class BashOutputTool(Tool):
         return ToolResult(
             content=body,
             spilled_path=capped.spilled_path,
-            summary=f"{next_line} lines, {'running' if status['running'] else 'finished'}",
+            summary=f"{count(next_line, 'line')}, {'running' if status['running'] else 'finished'}",
             metadata={"next_line": next_line, **status},
         )
 

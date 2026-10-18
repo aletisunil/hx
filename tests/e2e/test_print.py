@@ -116,6 +116,7 @@ def test_sandbox_blocks_writes_outside_the_project(hx: HX, stub: Stub) -> None:
         outside.unlink(missing_ok=True)
     output = stub.requests[1].tool_results()[0]
     assert any(refusal in output for refusal in SANDBOX_REFUSALS), output
+    assert "hx-shell-" not in output, "the refusal names HX's temp file, not the command"
 
 
 @requires_sandbox

@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path, PurePath
 from typing import Any
 
+from hx.text import count
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 
 DESCRIPTION = """Find files by glob pattern (e.g. `**/*.py`, `src/**/*.ts`).
@@ -59,7 +60,7 @@ class GlobTool(Tool):
         body = "\n".join(str(path) for path in shown) or "(no matches)"
         if len(matches) > limit:
             body += f"\n\n... {len(matches) - limit} more matches (raise limit to see them)"
-        return ToolResult(content=body, summary=f"{len(matches)} matches")
+        return ToolResult(content=body, summary=count(len(matches), "match", "matches"))
 
 
 def _check_pattern(pattern: str) -> None:

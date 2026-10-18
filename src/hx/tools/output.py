@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hx.paths import session_outputs_dir
+from hx.text import count
 
 MIN_BODY_CHARS = 200
 """Floor on kept output. A cap so small the elision notice eats it whole would
@@ -130,4 +131,4 @@ def summarize_for_ui(text: str, max_len: int = 120) -> str:
     extra = len(stripped.splitlines()) - 1
     if len(first) > max_len:
         first = first[: max_len - 1] + "…"
-    return f"{first} (+{extra} lines)" if extra > 0 else first
+    return f"{first} (+{count(extra, 'line')})" if extra > 0 else first

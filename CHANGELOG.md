@@ -53,6 +53,9 @@ the project follows [semantic versioning](https://semver.org/).
   such as SQL comments.
 - "Always allow" on a command HX cannot split into parts, such as a heredoc with an
   apostrophe, is now honoured in later sessions instead of asking again.
+- Counts of one read in the singular: "read 1 line", "1 result", "1 match", "1 tool".
+- Write reports the number of lines the way Read numbers them. A file ending in a newline
+  was reported one line longer.
 
 ---
 

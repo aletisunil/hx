@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from hx.text import count
 from hx.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = """Launch a subagent to handle a multi-step task in its own context.
@@ -71,6 +72,6 @@ class TaskTool(Tool):
         return ToolResult(
             content=result.report,
             is_error=result.is_error,
-            summary=f"{result.agent_type}: {result.turns} turns",
+            summary=f"{result.agent_type}: {count(result.turns, 'turn')}",
             metadata={"subagent_id": result.subagent_id, "cost_usd": result.cost_usd},
         )

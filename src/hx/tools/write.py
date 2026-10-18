@@ -9,6 +9,8 @@ import stat
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hx.text import count
+from hx.tools import anchors
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 from hx.tools.read import FileTracker, resolve_path
 
@@ -82,9 +84,11 @@ class WriteTool(Tool):
             self.checkpoints.settle(path)
 
         verb = "updated" if existed else "created"
-        lines = content.count("\n") + 1 if content else 0
+        # Lines as Read numbers them: a final newline ends the last line rather
+        # than starting another, so "done\n" is one line, not two.
+        lines = len(anchors.split(content)[0])
         return ToolResult(
-            content=f"{verb} {path} ({lines} lines)",
+            content=f"{verb} {path} ({count(lines, 'line')})",
             summary=f"{verb} {path.name}",
             metadata={"path": str(path), "created": not existed},
         )

@@ -17,6 +17,7 @@ import difflib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from hx.text import count
 from hx.tools import anchors
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 from hx.tools.read import FileTracker, hashline_enabled, read_exact, resolve_path
@@ -145,11 +146,11 @@ class EditTool(Tool):
                 )
             spans = parse_hashline(params)
             after = apply_hashline(before, spans)
-            count = len(spans)
+            applied = len(spans)
         else:
             edits = parse_edits(params)
             after = apply_edits(before, edits)
-            count = len(edits)
+            applied = len(edits)
 
         if self.checkpoints is not None:
             self.checkpoints.capture(path)
@@ -161,7 +162,7 @@ class EditTool(Tool):
         diff = unified_diff(before, after, str(path))
         added, removed = count_changes(diff)
         return ToolResult(
-            content=f"Applied {count} edit(s) to {path}.\n\n{diff}",
+            content=f"Applied {count(applied, 'edit')} to {path}.\n\n{diff}",
             summary=f"{path.name} +{added} -{removed}",
             metadata={"path": str(path), "diff": diff},
         )

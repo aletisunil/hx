@@ -48,6 +48,8 @@ def test_a_command_reading_stdin_does_not_wedge_the_shell(hx: HX, stub: Stub) ->
     assert (hx.project / "sub" / "marker.txt").exists()
     assert heredoc == "first (line\nsecond 'line"
     assert "[exit code" in quote and "still-alive" not in quote
+    assert "unexpected EOF" in quote
+    assert not any("hx-shell-" in result for result in results), "the temp file leaks into errors"
     assert "[exit code 1]" in false
     assert alive == "still-alive"
 

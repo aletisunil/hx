@@ -277,6 +277,33 @@ def test_resuming_a_session_killed_mid_tool(hx: HX, stub: Stub) -> None:
     assert stub.requests[1].last_user_text().endswith("are you still there?")
 
 
+def test_counts_of_one_are_singular(hx: HX, stub: Stub) -> None:
+    """A tool that found or read one thing says so in the singular, and two stay plural."""
+    (hx.project / "one.txt").write_text("TODO: ship\n")
+    (hx.project / "two.txt").write_text("first\nsecond\n")
+    stub.script(
+        calls(
+            ToolCall("Read", {"file_path": str(hx.project / "one.txt")}, id="read_one"),
+            ToolCall("Read", {"file_path": str(hx.project / "two.txt")}, id="read_two"),
+            ToolCall("Grep", {"pattern": "TODO", "path": str(hx.project)}, id="grep"),
+            ToolCall("Glob", {"pattern": "one.*", "path": str(hx.project)}, id="glob"),
+        ),
+        call("Write", file_path=str(hx.project / "note.txt"), content="done\n"),
+        say("Counted."),
+    )
+    term = hx.tui("--mode", "acceptEdits")
+    term.submit("count things")
+    term.wait_for("Counted.")
+    term.settle()
+    term.snapshot("singular and plural counts")
+    screen = term.scrollback()
+    assert "read 1 line" in screen and "read 1 lines" not in screen
+    assert "read 2 lines" in screen
+    assert "1 result" in screen and "1 results" not in screen
+    assert "1 match" in screen and "1 matches" not in screen
+    assert stub.requests[2].tool_results()[-1].endswith("(1 line)")
+
+
 def test_read_only_commands_do_not_ask(hx: HX, stub: Stub) -> None:
     """Reads, searches and read-only shell commands run without an approval."""
     (hx.project / "a.py").write_text("TODO = 1\n")

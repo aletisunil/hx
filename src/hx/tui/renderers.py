@@ -29,6 +29,7 @@ from hx.term.ansi import fg as paint_fg
 from hx.term.sanitize import plain_text
 from hx.term.syntax import highlight as highlight_source
 from hx.term.width import cell_width, truncate_to_width
+from hx.text import count
 from hx.tools.edit import count_changes as _count_changes
 from hx.tui.glyphs import BASH, ELLIPSIS, TODO_ACTIVE, TODO_DONE, TODO_PENDING
 from hx.tui.limits import EXPANDED_MAX, PREVIEW_LINES, RECORD_WIDTH
@@ -720,7 +721,7 @@ def _brief(params: dict[str, Any], limit: int = RECORD_WIDTH) -> str:
     parts: list[str] = []
     for key, value in params.items():
         if isinstance(value, list):
-            rendered = f"[{len(value)} items]"
+            rendered = f"[{count(len(value), 'item')}]"
         elif isinstance(value, dict):
             rendered = "{…}"
         elif isinstance(value, str) and cell_width(value) > limit:

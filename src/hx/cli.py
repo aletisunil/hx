@@ -27,6 +27,7 @@ from typing import Any
 
 from hx import __version__
 from hx.paths import auth_file
+from hx.text import count
 
 USAGE = """\
 hx - an agent harness for the terminal
@@ -1033,7 +1034,9 @@ def run_mcp_command(args: list[str]) -> int:
                 print(f"{status.name:<20} {status.error} - run `hx mcp login {status.name}`")
                 continue
             mark = "ok" if status.connected else "unavailable"
-            detail = f" - {status.error}" if status.error else f" ({status.tool_count} tools)"
+            detail = (
+                f" - {status.error}" if status.error else f" ({count(status.tool_count, 'tool')})"
+            )
             print(f"{status.name:<20} {mark}{detail}")
         return 0
 
@@ -1118,7 +1121,7 @@ def _mcp_login(config: Any) -> int:
 
     status = asyncio.run(_probe_servers([config]))[0]
     if status.connected:
-        print(f"Signed in to {config.name}: {status.tool_count} tools available.")
+        print(f"Signed in to {config.name}: {count(status.tool_count, 'tool')} available.")
         return 0
     print(f"Signed in, but {config.name} is still unavailable: {status.error}", file=sys.stderr)
     return 1

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from hx.core.images import ImageError, describe, is_image_path, load_image_file, sniff_image
+from hx.text import count
 from hx.tools import anchors
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 
@@ -110,7 +111,7 @@ class ReadTool(Tool):
         if not window:
             rendered = "(empty file)" if not lines else f"(no lines at offset {offset})"
 
-        return ToolResult(content=rendered, summary=f"read {len(window)} lines")
+        return ToolResult(content=rendered, summary=f"read {count(len(window), 'line')}")
 
 
 class FileTracker:

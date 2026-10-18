@@ -52,6 +52,7 @@ from hx.core.session import Environment
 from hx.core.usage import TurnUsage, compute_cost
 from hx.hooks.spec import HookOutcome
 from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, StreamEnd
+from hx.text import count
 from hx.tools.base import ToolContext, ToolResult
 
 if TYPE_CHECKING:
@@ -1111,7 +1112,7 @@ scroll is a prompt they stop reading."""
 
 def _one_value(value: Any, limit: int) -> str:
     if isinstance(value, list):
-        return f"[{len(value)} items]"
+        return f"[{count(len(value), 'item')}]"
     if isinstance(value, dict):
         return "{…}"
     if isinstance(value, str) and len(value) > limit:

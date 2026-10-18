@@ -32,6 +32,7 @@ import httpx
 
 from hx import net
 from hx.auth.store import TAVILY
+from hx.text import count
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
 from hx.tools.output import cap_output
 
@@ -247,7 +248,7 @@ class WebSearchTool(_TavilyTool):
         rendered = "\n\n".join(_format_result(i, r) for i, r in enumerate(results, start=1))
         return ToolResult(
             content=f"{rendered}\n\n{footer}",
-            summary=f"{len(results)} results",
+            summary=count(len(results), "result"),
             metadata=self._meta(body, spent),
         )
 

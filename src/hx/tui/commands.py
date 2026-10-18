@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hx.core.usage import format_cost, format_tokens
+from hx.text import count
 
 if TYPE_CHECKING:
     from hx.providers.models import ModelRegistry
@@ -558,7 +559,7 @@ async def cmd_cost(ctx: CommandContext, args: str) -> None:
     # "calls" alone invited the question of why /resume reports a different,
     # larger number: these count provider requests, that counts wire-format
     # message records, and a single prompt produces many of both.
-    scale = f"{len(usage.turns)} API requests"
+    scale = count(len(usage.turns), "API request")
     if prompts:
         scale += f" across {prompts} prompt{'s' if prompts != 1 else ''}"
     lines = [
@@ -651,7 +652,7 @@ async def cmd_mcp(ctx: CommandContext, args: str) -> None:
     lines = ["MCP servers:"]
     for status in manager.status():
         if status.connected:
-            lines.append(f"  {status.name:<20} connected, {status.tool_count} tools")
+            lines.append(f"  {status.name:<20} connected, {count(status.tool_count, 'tool')}")
         elif status.needs_login:
             lines.append(f"  {status.name:<20} {status.error} - /mcp login {status.name}")
         else:
@@ -701,7 +702,7 @@ def _mcp_status_notice(
 ) -> None:
     prefix = f"Signed in to {name}" if signed_in else name
     if status.connected:
-        ctx.app.notice(f"{prefix}: {status.tool_count} tools available.", "success")
+        ctx.app.notice(f"{prefix}: {count(status.tool_count, 'tool')} available.", "success")
     elif status.needs_login:
         ctx.app.notice(f"{name} needs sign-in. Run /mcp login {name}.", "warning")
     else:
