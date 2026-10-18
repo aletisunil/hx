@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.18] - 2026-10-18
+
 ### Security
 
 - Edit and Write no longer leave a private file's new content readable by other users while
@@ -976,7 +980,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.17...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.18...HEAD
+[0.2.18]: https://github.com/aletisunil/hx/compare/v0.2.17...v0.2.18
 [0.2.17]: https://github.com/aletisunil/hx/compare/v0.2.16...v0.2.17
 [0.2.16]: https://github.com/aletisunil/hx/compare/v0.2.15...v0.2.16
 [0.2.15]: https://github.com/aletisunil/hx/compare/v0.2.14...v0.2.15
