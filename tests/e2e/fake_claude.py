@@ -404,6 +404,9 @@ class Session:
             sys.stderr.flush()
             log("exit", reason="crash")
             os._exit(1)
+        # One frame per window, as Claude Code sends them, ahead of the answer.
+        for info in turn.get("rate_limits") or []:
+            emit({"type": "rate_limit_event", "rate_limit_info": info})
         if turn.get("rate_limit"):
             emit(
                 {

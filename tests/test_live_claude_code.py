@@ -33,7 +33,6 @@ from hx.permissions.engine import Decision, PermissionEngine, parse_rule
 from hx.providers import claude_code_catalogue, registry
 from hx.providers.claude_code import ClaudeCodeProvider
 from hx.providers.claude_code_transcript import project_dir
-from hx.tools.read import FileTracker
 from hx.tools.registry import build_default_registry
 from tests.tls_proxy import InterceptingProxy
 
@@ -54,7 +53,7 @@ def _loop(tmp_path: Path, provider: ClaudeCodeProvider, session=None) -> AgentLo
     return AgentLoop(
         provider=provider,
         session=session,
-        tools=build_default_registry(None, None, FileTracker()),
+        tools=build_default_registry(None, None),
         permissions=PermissionEngine(
             PermissionMode.DEFAULT,
             [

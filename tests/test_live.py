@@ -26,7 +26,6 @@ from hx.core.session import new_session
 from hx.permissions.engine import Decision, PermissionEngine, parse_rule
 from hx.providers.models import ModelRegistry
 from hx.providers.openrouter import OpenRouterProvider
-from hx.tools.read import FileTracker
 from hx.tools.registry import build_default_registry
 
 pytestmark = pytest.mark.live
@@ -49,7 +48,7 @@ async def _build(tmp_path: Path) -> tuple[AgentLoop, OpenRouterProvider]:
     loop = AgentLoop(
         provider=provider,
         session=new_session(tmp_path, MODEL),
-        tools=build_default_registry(None, None, FileTracker()),
+        tools=build_default_registry(None, None),
         permissions=PermissionEngine(
             PermissionMode.DEFAULT, [parse_rule("Read(**)", "live", Decision.ALLOW)], tmp_path
         ),

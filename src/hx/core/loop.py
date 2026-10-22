@@ -24,6 +24,7 @@ from hx.core.events import (
     CompactionStarted,
     ErrorRaised,
     PermissionRequested,
+    PlanUsageUpdated,
     TextDelta,
     ThinkingDelta,
     ToolCallFinished,
@@ -48,8 +49,9 @@ from hx.core.messages import (
     tool_result_message,
     user_message,
 )
+from hx.core.reads import FileTracker
 from hx.core.session import Environment
-from hx.core.usage import TurnUsage, compute_cost
+from hx.core.usage import PlanWindow, TurnUsage, compute_cost
 from hx.hooks.spec import HookOutcome
 from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, StreamEnd
 from hx.text import count
@@ -169,6 +171,11 @@ class AgentLoop:
     def model(self) -> str:
         return self.session.meta.model
 
+    @property
+    def reads(self) -> FileTracker:
+        """The files this session has read - whichever session is current now."""
+        return FileTracker(self.session)
+
     def set_provider(self, provider: Provider) -> Provider:
         """Swap the provider mid-session, returning the one replaced.
 
@@ -260,6 +267,7 @@ class AgentLoop:
                 self.bus.publish(TurnFinished(self._turn_index, StopReason.CANCELLED))
                 raise
             except ProviderError as exc:
+                self._report_plan(exc.plan_windows)
                 self.bus.publish(ErrorRaised(message=str(exc), recoverable=True))
                 self.bus.publish(TurnFinished(self._turn_index, StopReason.ERROR))
                 return TurnResult(StopReason.ERROR, produced, error=str(exc))
@@ -494,6 +502,7 @@ class AgentLoop:
                     stop_reason = item.stop_reason
                     usage = item.usage
                     self._adopt_limits(item)
+                    self._report_plan(item.plan_windows)
                     continue
                 if not isinstance(item, StreamDelta):  # pragma: no cover - defensive
                     continue
@@ -644,6 +653,15 @@ class AgentLoop:
         self.session.usage.context_window = window
         if self.models is not None:
             self.models.adopt_limits(info.id, window, output)
+
+    def _report_plan(self, windows: tuple[PlanWindow, ...]) -> None:
+        """Pass on what the route said about its usage windows, if anything.
+
+        From a subagent too: the windows are the account's, and how much of
+        them a subagent spent is spent for everyone on it.
+        """
+        if windows:
+            self.bus.publish(PlanUsageUpdated(route=self.provider.name, windows=windows))
 
     def _record_usage(
         self,
@@ -827,6 +845,7 @@ class AgentLoop:
             cwd=self.settings.cwd,
             session_id=self.session.meta.session_id,
             tool_use_id=call.id,
+            reads=self.reads,
             settings=self.settings,
             emit_progress=progress,
         )
@@ -997,6 +1016,7 @@ class AgentLoop:
         try:
             result = await self.compactor.compact(self.session.active_messages(), instructions)
         except ProviderError as exc:
+            self._report_plan(exc.plan_windows)
             self.bus.publish(ErrorRaised(message=f"Compaction failed: {exc}", recoverable=True))
             return False
 

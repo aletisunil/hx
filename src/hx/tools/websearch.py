@@ -74,8 +74,8 @@ result in full, or directly when you already have the URL."""
 class CreditLedger:
     """Tavily credits spent this session.
 
-    Shared by both tools, the way ``FileTracker`` is shared by the file tools -
-    a per-tool counter would report two unrelated halves of one bill.
+    Shared by both tools: a per-tool counter would report two unrelated halves
+    of one bill.
     """
 
     credits: int = 0

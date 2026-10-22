@@ -9,7 +9,16 @@ that is the one field with a deadline attached.
 
 from __future__ import annotations
 
-from hx.core.usage import format_tokens
+import time
+from dataclasses import replace
+
+from hx.core.usage import (
+    RENEWAL_CLOCK_SECONDS,
+    PlanWindow,
+    format_percent,
+    format_renewal,
+    format_tokens,
+)
 from hx.term.component import Widget
 from hx.term.width import cell_width, truncate_to_width
 from hx.tui.format import meter_fill
@@ -109,6 +118,11 @@ class StatusBar(Widget):
         self.queued = 0
         self.model = ""
         self.subscription = False
+        self.route = ""
+        self.plans: dict[str, dict[tuple[int, str], PlanWindow]] = {}
+        """Each subscription route's usage windows, as last reported. Kept per
+        route, across model switches and /clear: they are the account's."""
+        self._redraw_at: float | None = None
         self.effort: str | None = None
         self.mode = "default"
         self.sandbox_active = True
@@ -134,8 +148,46 @@ class StatusBar(Widget):
     def set_location(self, cwd: str, branch: str | None) -> None:
         self.update(cwd=cwd, branch=branch)
 
-    def set_model(self, model_id: str, *, subscription: bool = False) -> None:
-        self.update(model=model_id, subscription=subscription)
+    def set_model(self, model_id: str, *, subscription: bool = False, route: str = "") -> None:
+        self.update(model=model_id, subscription=subscription, route=route)
+
+    def set_plan(self, route: str, windows: tuple[PlanWindow, ...]) -> None:
+        """Take a route's report of its windows over what it said before.
+
+        Window by window: Claude reports one per frame, and a frame about the
+        week says nothing about the five hours. Nor does a report without a
+        figure undo one for the same window and renewal: an older Claude Code
+        gives the figure only past its warning, and it is still true.
+        """
+        known = self.plans.setdefault(route, {})
+        for window in windows:
+            before = known.get(window.key)
+            if (
+                window.used_percent is None
+                and before is not None
+                and before.used_percent is not None
+                and before.resets_at == window.resets_at
+            ):
+                window = replace(window, used_percent=before.used_percent)
+            known[window.key] = window
+        self.invalidate()
+
+    def plan_windows(self, now: float | None = None) -> list[PlanWindow]:
+        """The shown route's windows as they stand now, shortest first."""
+        if not self.subscription:
+            return []
+        current = (w.at(now) for w in self.plans.get(self.route, {}).values())
+        return sorted((w for w in current if w is not None), key=lambda w: w.key)
+
+    def redraw_due(self, now: float | None = None) -> bool:
+        """Whether a window shown on the last frame has reset since, or come
+        within a day of it - where its renewal is given as a clock time.
+
+        Nothing else redraws an idle screen, and a figure that reset an hour
+        ago reads as an hour-old warning.
+        """
+        now = time.time() if now is None else now
+        return self._redraw_at is not None and now >= self._redraw_at
 
     def set_context(self, used: int, window: int) -> None:
         self.update(context_used=used, context_window=window)
@@ -174,10 +226,28 @@ class StatusBar(Widget):
         mode, queue = self._mode(), self._queue()
         keeps_mode = inner - cell_width(mode) - GAP >= MIN_LEFT
         room = inner - cell_width(queue) - (cell_width(mode) + GAP if keeps_mode else 0)
-        return [
-            fill_line(" " + justify(self._location(room), mode, inner, queue), width),
-            fill_line(" " + justify(self._stats(inner), self._model(), inner), width),
+        model = self._model()
+        keeps_model = inner - cell_width(model) - GAP >= MIN_LEFT
+        stats_room = inner - (cell_width(model) + GAP if keeps_model else 0)
+        windows = self.plan_windows()
+        now = time.time()
+        changes = [
+            moment
+            for w in windows
+            if w.resets_at is not None
+            for moment in (w.resets_at - RENEWAL_CLOCK_SECONDS, w.resets_at)
+            if moment > now
         ]
+        self._redraw_at = min(changes) if changes else None
+        lines = [fill_line(" " + justify(self._location(room), mode, inner, queue), width)]
+        if windows:
+            lines.append(fill_line(" " + self._plan(windows, inner), width))
+        lines.append(
+            fill_line(
+                " " + justify(self._stats(inner, stats_room, bool(windows)), model, inner), width
+            )
+        )
+        return lines
 
     # -- fields ------------------------------------------------------------
 
@@ -209,22 +279,61 @@ class StatusBar(Widget):
             field += fg("dim", f" · sandbox {self.sandbox_backend}")
         return field
 
-    def _stats(self, width: int) -> str:
-        parts: list[str] = []
+    def _stats(self, width: int, room: int, has_plan: bool) -> str:
+        """What this is costing, in fields dropped whole to fit ``room``.
+
+        Cut from the right, a narrow pane lost the context gauge and the
+        usage windows - the two fields with a deadline - to token counts
+        that have none. So the counts go first, then the cache, and a field
+        is never left cut mid-number.
+        """
+        # (priority, field): the lowest number is the last to go.
+        fields: list[tuple[int, str]] = []
         if self.input_tokens:
-            parts.append(fg("dim", f"↑{format_tokens(self.input_tokens)}"))
+            fields.append((4, fg("dim", f"↑{format_tokens(self.input_tokens)}")))
         if self.output_tokens:
-            parts.append(fg("dim", f"↓{format_tokens(self.output_tokens)}"))
-        parts.append(self._cache_field())
+            fields.append((5, fg("dim", f"↓{format_tokens(self.output_tokens)}")))
+        fields.append((3, self._cache_field()))
         # A subscription turn has no per-token price, so "$0.00" would be a
-        # claim about spend rather than the absence of one.
-        parts.append(
-            fg("muted", "sub") if self.subscription else fg("muted", format_cost(self.cost_usd))
-        )
+        # claim about spend rather than the absence of one. What it has is a
+        # share of the plan's windows, on a line of its own once the route
+        # has said how much.
+        if not self.subscription:
+            fields.append((2, fg("muted", format_cost(self.cost_usd))))
+        elif not has_plan:
+            fields.append((2, fg("muted", "sub")))
         if self.latency_ms >= 100:
-            parts.append(fg("dim", f"{self.latency_ms / 1000:.1f}s"))
-        parts.append(self._context(width))
-        return " ".join(parts)
+            fields.append((6, fg("dim", f"{self.latency_ms / 1000:.1f}s")))
+        fields.append((0, self._context(width)))
+
+        def joined() -> str:
+            return " ".join(field for _, field in fields)
+
+        while len(fields) > 1 and cell_width(joined()) > room:
+            fields.remove(max(fields, key=lambda item: item[0]))
+        return joined()
+
+    def _plan(self, windows: list[PlanWindow], width: int) -> str:
+        """``5h 16% (renews 06:30 am) | 7d 14% (renews Mon Oct 26 04:00 am)``.
+
+        How much of each usage window is spent, and when it renews. The
+        figure is coloured as the context gauge is, by how near the limit: a
+        window at nine tenths is the one that ends a session. A window the
+        route gave no figure for shows only when it renews, since a number
+        would be a guess.
+
+        Too narrow for all of it, the line gives up the least first: the
+        clock time of a renewal days away, then the renewals, then every
+        window but the one nearest its limit. Never a cut mid-number.
+        """
+        now = time.time()
+        fullest = max(windows, key=lambda w: (_used(w), -w.minutes))
+        for level in range(4):
+            shown = [fullest] if level == 3 else windows
+            line = fg("dim", " | ").join(_window(w, level, now) for w in shown)
+            if cell_width(line) <= width:
+                return line
+        return truncate_to_width(line, width)
 
     def _cache_field(self) -> str:
         """Cache tokens read and written, plus the hit rate.
@@ -282,6 +391,33 @@ class StatusBar(Widget):
         if self.effort:
             field += fg("dim", f"{SEPARATOR}{self.effort}")
         return field
+
+
+def _window(window: PlanWindow, level: int, now: float) -> str:
+    """One window at a level of detail: 0 is everything, 1 drops the clock
+    from a renewal days away, 2 and up drop renewals - except for a window
+    without a figure, whose renewal is all it has to say."""
+    renewal = ""
+    if window.resets_at is not None:
+        when = format_renewal(window.resets_at, short=level >= 1, now=now)
+        if level == 0:
+            renewal = f" (renews {when})"
+        elif level == 1 or window.used_percent is None:
+            renewal = f" ({when})"
+    if window.used_percent is None:
+        return fg("muted", window.label) + fg("dim", renewal)
+    role = "muted"
+    if window.used_percent >= DANGER_FRACTION * 100:
+        role = "error"
+    elif window.used_percent >= WARN_FRACTION * 100:
+        role = "warning"
+    return fg(role, f"{window.label} {format_percent(window.used_percent)}") + fg("dim", renewal)
+
+
+def _used(window: PlanWindow) -> float:
+    """How spent a window is, for choosing between them: one with no figure
+    loses to one with any."""
+    return window.used_percent if window.used_percent is not None else -1.0
 
 
 class HintsBar(Widget):

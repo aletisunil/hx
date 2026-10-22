@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -24,12 +25,23 @@ import httpx
 from hx import __version__
 from hx.auth.oauth.codex import ORIGINATOR
 from hx.auth.resolve import ResolvedAuth
+from hx.core.usage import PlanWindow, format_renewal
 from hx.net import async_client
 from hx.providers.base import ProviderError, ProviderRequest, StreamItem
 from hx.providers.responses_codec import StreamState, build_body, stream_end
 
 API_BASE = "https://chatgpt.com/backend-api"
 RESPONSES_PATH = "/codex/responses"
+
+BASE_URL_VAR = "HX_CODEX_BASE_URL"
+"""Points the Codex route at another backend - the local stand-in the
+end-to-end suite runs, so a test's stored login never reaches chatgpt.com."""
+
+
+def api_base() -> str:
+    """``HX_CODEX_BASE_URL`` when set, otherwise ChatGPT's backend."""
+    return (os.environ.get(BASE_URL_VAR) or "").strip().rstrip("/") or API_BASE
+
 
 MODEL_PREFIX = "openai-codex/"
 """HX namespaces model ids by provider; the wire wants the bare id."""
@@ -58,14 +70,14 @@ class CodexProvider:
         self,
         auth: TokenSource,
         *,
-        base_url: str = API_BASE,
+        base_url: str | None = None,
         session_id: str | None = None,
         effort: EffortSource | None = None,
         timeout: float = 600.0,
         max_retries: int = 3,
     ) -> None:
         self._auth = auth
-        self.base_url = base_url.rstrip("/")
+        self.base_url = (base_url or api_base()).rstrip("/")
         self.session_id = session_id
         self.effort: EffortSource = effort if effort is not None else _default_effort
         self.max_retries = max_retries
@@ -111,12 +123,19 @@ class CodexProvider:
         state = StreamState()
         try:
             async with self._client.stream("POST", url, json=body, headers=headers) as response:
+                windows = plan_windows(response.headers)
                 if response.status_code >= 400:
                     raw = (await response.aread()).decode(errors="replace")
+                    limit = _usage_limit(raw)
                     raise ProviderError(
-                        _error_message(response.status_code, raw),
+                        _limit_message(limit, windows)
+                        if limit is not None
+                        else _error_message(response.status_code, raw),
                         status=response.status_code,
-                        retryable=response.status_code in self.RETRY_STATUSES,
+                        # A spent window stays spent until it resets: asking
+                        # again only adds requests to the one that was refused.
+                        retryable=limit is None and response.status_code in self.RETRY_STATUSES,
+                        plan_windows=windows,
                     )
                 async for event in _iter_sse(response):
                     for item in state.consume(event):
@@ -124,7 +143,9 @@ class CodexProvider:
         except httpx.HTTPError as exc:
             raise ProviderError(str(exc), retryable=True) from exc
 
-        yield stream_end(state, (time.monotonic() - started) * 1000)
+        end = stream_end(state, (time.monotonic() - started) * 1000)
+        end.plan_windows = windows
+        yield end
 
     async def _headers(self) -> dict[str, str]:
         """Built per request so a token refreshed mid-session takes effect."""
@@ -216,6 +237,73 @@ def _error_message(status: int, body: str) -> str:
     except (json.JSONDecodeError, AttributeError):
         message = None
     return f"Codex {status}: {message or body[:400]}"
+
+
+_WINDOWS = ("primary", "secondary")
+"""The two windows ChatGPT reports, by the names its headers use. On a Plus
+plan, seen live on 2026-10-22, the primary is five hours and the secondary
+seven days; the lengths come from the headers, not from here."""
+
+
+def plan_windows(headers: httpx.Headers | dict[str, str]) -> tuple[PlanWindow, ...]:
+    """The usage windows a Codex response reports in its ``x-codex-*`` headers.
+
+    ChatGPT sends every figure on every response. A window whose percentage
+    is missing or not a number is left out rather than reported as unknown:
+    it is a garbled reply, and the figure from the last good one is closer
+    to the truth than no figure at all.
+    """
+    windows: list[PlanWindow] = []
+    for name in _WINDOWS:
+        used = _number(headers.get(f"x-codex-{name}-used-percent"))
+        minutes = _number(headers.get(f"x-codex-{name}-window-minutes"))
+        if used is None or minutes is None or minutes <= 0:
+            continue
+        resets_at = _number(headers.get(f"x-codex-{name}-reset-at"))
+        if (
+            resets_at is None
+            and (after := _number(headers.get(f"x-codex-{name}-reset-after-seconds"))) is not None
+        ):
+            resets_at = time.time() + after
+        windows.append(
+            PlanWindow(
+                minutes=int(minutes),
+                used_percent=used,
+                resets_at=resets_at,
+            )
+        )
+    return tuple(windows)
+
+
+def _number(value: str | None) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def _usage_limit(body: str) -> dict[str, Any] | None:
+    """The refusal's error when it is a spent window, ``usage_limit_reached``."""
+    try:
+        error = json.loads(body).get("error")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if isinstance(error, dict) and error.get("type") == "usage_limit_reached":
+        return error
+    return None
+
+
+def _limit_message(error: dict[str, Any], windows: tuple[PlanWindow, ...]) -> str:
+    """Which window is spent and when it comes back, in HX's words."""
+    spent = next((w for w in windows if (w.used_percent or 0) >= 100), None)
+    which = f"{spent.title} usage limit" if spent is not None else "usage limit"
+    resets_at = spent.resets_at if spent is not None else None
+    if resets_at is None:
+        resets_at = _number(str(error.get("resets_at"))) if error.get("resets_at") else None
+    when = ""
+    if resets_at:
+        when = f" It resets at {format_renewal(resets_at)}."
+    return f"Your ChatGPT plan's {which} is reached.{when}"
 
 
 def _backoff(attempt: int) -> float:

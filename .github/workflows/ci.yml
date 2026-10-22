@@ -76,9 +76,43 @@ jobs:
     environment: pypi
     permissions:
       id-token: write
+      contents: write # the GitHub release
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv build
-      # Trusted publishing: no long-lived token stored in the repo.
+      # The wheel about to ship, not the checkout: it is what `hx --version`
+      # and `hx changelog` will answer from once installed. Both are checked
+      # before PyPI, which cannot be undone: a tag without its CHANGELOG
+      # section stops here. The notes are that section without its heading -
+      # the release title already says which version it is.
+      - name: the tag names the version being built
+        run: |
+          wheel=$(ls dist/*.whl)
+          built=$(uvx --from "$wheel" hx --version)
+          test "$built" = "hx ${GITHUB_REF_NAME#v}" || {
+            echo "::error::tag $GITHUB_REF_NAME builds $built"
+            exit 1
+          }
+          uvx --from "$wheel" hx changelog "$GITHUB_REF_NAME" | tail -n +3 > "$RUNNER_TEMP/notes.md"
+          test -s "$RUNNER_TEMP/notes.md" || {
+            echo "::error::CHANGELOG.md has no section for $GITHUB_REF_NAME"
+            exit 1
+          }
+      # Trusted publishing: no long-lived token stored in the repo. A rerun
+      # finds the files already there and goes on to the release.
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+      # After PyPI, so a release on GitHub always has a package behind it. A
+      # rerun keeps the release that is already there.
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists"
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "hx ${GITHUB_REF_NAME#v}" --notes-file "$RUNNER_TEMP/notes.md"

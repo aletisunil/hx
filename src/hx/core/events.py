@@ -13,6 +13,8 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
+from hx.core.usage import PlanWindow
+
 
 @dataclass(slots=True)
 class Event:
@@ -91,6 +93,19 @@ class UsageUpdated(Event):
     context_tokens: int
     context_window: int
     cost_usd: float
+
+
+@dataclass(slots=True)
+class PlanUsageUpdated(Event):
+    """A subscription route reported how much of its usage windows is spent.
+
+    Tagged with the route because the figures belong to an account, not to a
+    session or a model: a subagent on another route reports its own, and the
+    status bar shows whichever matches the model it is showing.
+    """
+
+    route: str
+    windows: tuple[PlanWindow, ...]
 
 
 @dataclass(slots=True)

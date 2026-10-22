@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from hx.text import count
 from hx.tools import anchors
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
-from hx.tools.read import FileTracker, resolve_path
+from hx.tools.read import resolve_path
 
 if TYPE_CHECKING:
     from hx.core.checkpoints import CheckpointStore
@@ -22,20 +22,25 @@ DESCRIPTION = """Write a file, overwriting it if it exists.
 Overwriting a file that has not been read in this session is refused - use Read
 first, or Edit for partial changes."""
 
+READ_FIRST = "Read it with the Read tool first - output from a shell command does not count."
+"""How Edit and Write say what to do about an unread file.
+
+A model that looked at the file through ``cat`` in Bash has seen it, and is
+told it has not; without the second half it reads the refusal as a glitch and
+tries the same edit again."""
+
 
 class WriteTool(Tool):
     name = "Write"
     description = DESCRIPTION
     mutating = True
 
-    def __init__(self, tracker: FileTracker, checkpoints: CheckpointStore | None = None) -> None:
+    def __init__(self, checkpoints: CheckpointStore | None = None) -> None:
         """Args:
-        tracker: ``hx.tools.read.FileTracker``, used to enforce read-before-write.
         checkpoints: ``hx.core.checkpoints.CheckpointStore``, given the file's
             previous bytes so ``/rewind`` can put them back. Optional: a
             headless caller with no session has nothing to rewind to.
         """
-        self.tracker = tracker
         self.checkpoints = checkpoints
 
     def schema(self) -> dict[str, Any]:
@@ -64,12 +69,12 @@ class WriteTool(Tool):
         if path.exists():
             if path.is_dir():
                 raise ToolError(f"{path} is a directory")
-            if not self.tracker.was_read(path):
+            if not ctx.reads.was_read(path):
                 raise ToolError(
-                    f"{path} exists but has not been read in this session. "
-                    "Read it first so the overwrite is deliberate."
+                    f"{path} exists but has not been read in this session, so the "
+                    f"overwrite would not be deliberate. {READ_FIRST}"
                 )
-            if self.tracker.changed_since_read(path):
+            if ctx.reads.changed_since_read(path):
                 raise ToolError(
                     f"{path} changed on disk since it was read. Read it again before writing."
                 )
@@ -79,7 +84,7 @@ class WriteTool(Tool):
         if self.checkpoints is not None:
             self.checkpoints.capture(path)
         write_atomic(path, content)
-        self.tracker.mark_read(path)
+        ctx.reads.mark_read(path)
         if self.checkpoints is not None:
             self.checkpoints.settle(path)
 

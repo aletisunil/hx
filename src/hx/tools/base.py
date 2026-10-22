@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from hx.core.messages import ImageBlock
+    from hx.core.reads import FileTracker
 
 
 @dataclass(slots=True)
@@ -25,6 +26,8 @@ class ToolContext:
     cwd: Path
     session_id: str
     tool_use_id: str
+    reads: FileTracker
+    """The files this session has read. Edit and Write refuse any other."""
     settings: Any
     """``hx.config.Settings`` - untyped here to avoid an import cycle."""
     emit_progress: Callable[[str], None]

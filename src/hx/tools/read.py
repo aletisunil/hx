@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -34,9 +33,6 @@ class ReadTool(Tool):
     name = "Read"
     description = DESCRIPTION
     mutating = False
-
-    def __init__(self, tracker: FileTracker) -> None:
-        self.tracker = tracker
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -100,7 +96,7 @@ class ReadTool(Tool):
                 for number, line in enumerate(window, start=offset)
             )
 
-        self.tracker.mark_read(path)
+        ctx.reads.mark_read(path)
 
         remaining = len(lines) - (offset - 1 + len(window))
         if remaining > 0:
@@ -113,40 +109,6 @@ class ReadTool(Tool):
             rendered = "(empty file)" if not lines else f"(no lines at offset {offset})"
 
         return ToolResult(content=rendered, summary=f"read {count(len(window), 'line')}")
-
-
-class FileTracker:
-    """Records which files were read and their content hash at read time.
-
-    Edit refuses to touch a file that was never read, and warns when a file
-    changed underneath us. The set of stale files is surfaced through late
-    injection, not the system prompt.
-    """
-
-    def __init__(self) -> None:
-        self._hashes: dict[Path, str] = {}
-
-    def mark_read(self, path: Path) -> None:
-        self._hashes[path.resolve()] = _digest(path)
-
-    def was_read(self, path: Path) -> bool:
-        return path.resolve() in self._hashes
-
-    def changed_since_read(self, path: Path) -> bool:
-        resolved = path.resolve()
-        known = self._hashes.get(resolved)
-        return known is not None and known != _digest(path)
-
-    def forget(self, path: Path) -> None:
-        """Drop the record of a read.
-
-        Used after a rewind puts a file back: the read that justified editing
-        it may itself have been rewound away, so the model has to look again.
-        """
-        self._hashes.pop(path.resolve(), None)
-
-    def stale_files(self) -> list[Path]:
-        return [path for path in self._hashes if self.changed_since_read(path)]
 
 
 def _read_image(path: Path) -> ToolResult:
@@ -219,13 +181,6 @@ def is_binary(path: Path) -> bool:
     except OSError:
         return False
     return b"\x00" in chunk
-
-
-def _digest(path: Path) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return ""
 
 
 def _clip(line: str) -> str:

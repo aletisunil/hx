@@ -161,6 +161,8 @@ class HX:
             "TMPDIR": str(self.root),
             "HX_OPENROUTER_API_KEY": API_KEY,
             "HX_OPENROUTER_BASE_URL": self.stub.url,
+            # Never chatgpt.com: a stored ChatGPT login talks to the stub's stand-in.
+            "HX_CODEX_BASE_URL": self.stub.codex_url,
             # Never the real npm registry: which Claude Code is current is the stub's to say.
             "HX_CLAUDE_CODE_RELEASES_URL": self.stub.url + RELEASES_PATH,
             "HX_MODEL": SONNET,
@@ -184,6 +186,25 @@ class HX:
         env.update(self.extra_env)
         env.update(overrides)
         return env
+
+    def sign_in_codex(self) -> None:
+        """A stored ChatGPT login, as ``hx auth login openai-codex`` leaves it."""
+        auth = self.hx_home / "auth.json"
+        auth.write_text(
+            json.dumps(
+                {
+                    "openai-codex": {
+                        "type": "oauth",
+                        "access": "e2e-access",
+                        "refresh": "e2e-refresh",
+                        "expires": time.time() + 30 * 86_400,
+                        "account_id": "acct-e2e",
+                        "plan": "plus",
+                    }
+                }
+            )
+        )
+        auth.chmod(0o600)
 
     # -- the TUI -----------------------------------------------------------
 

@@ -65,8 +65,10 @@ class ToolRegistry:
         """A registry exposing only ``names``, sharing the same tool instances.
 
         Used for subagent allowlists. Sharing instances matters: the persistent
-        shell and the file tracker must be the same objects, or a subagent
-        would get a second shell with none of the session's state.
+        shell must be the same object, or a subagent would get a second shell
+        with none of the session's state. What a subagent has read is not
+        shared - it comes from the subagent's own session, through
+        :attr:`~hx.tools.base.ToolContext.reads`.
         """
         restricted = ToolRegistry()
         for name in names:
@@ -112,7 +114,6 @@ def _sort_key(name: str) -> tuple[bool, str]:
 def build_default_registry(
     shell: Any | None = None,
     jobs: Any | None = None,
-    tracker: Any | None = None,
     todos: Any | None = None,
     bus: Any | None = None,
     auth: Any | None = None,
@@ -130,20 +131,18 @@ def build_default_registry(
     from hx.tools.edit import EditTool
     from hx.tools.glob import GlobTool
     from hx.tools.grep import GrepTool
-    from hx.tools.read import FileTracker, ReadTool
+    from hx.tools.read import ReadTool
     from hx.tools.todo import TodoWriteTool
     from hx.tools.write import WriteTool
-
-    file_tracker = tracker if tracker is not None else FileTracker()
 
     registry = ToolRegistry()
     if shell is not None and jobs is not None:
         registry.register(BashTool(shell, jobs))
         registry.register(BashOutputTool(jobs))
         registry.register(KillShellTool(jobs))
-    registry.register(ReadTool(file_tracker))
-    registry.register(WriteTool(file_tracker, checkpoints))
-    registry.register(EditTool(file_tracker, checkpoints))
+    registry.register(ReadTool())
+    registry.register(WriteTool(checkpoints))
+    registry.register(EditTool(checkpoints))
     registry.register(GlobTool())
     registry.register(GrepTool())
 

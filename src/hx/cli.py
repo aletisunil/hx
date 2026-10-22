@@ -241,7 +241,6 @@ class Runtime:
     tools: Any = None
     checkpoints: Any = None
     """:class:`~hx.core.checkpoints.CheckpointStore` - pre-images for ``/rewind``."""
-    tracker: Any = None
     hooks: Any = None
     """:class:`~hx.hooks.engine.HookEngine` - what ``/hooks`` reports on."""
     notices: list[str] = field(default_factory=list)
@@ -368,7 +367,6 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     from hx.skills.loader import discover as discover_skills
     from hx.skills.runtime import ActiveSkills, SkillTool
     from hx.tools.bash import BackgroundJobs, PersistentShell
-    from hx.tools.read import FileTracker
     from hx.tools.registry import build_default_registry
     from hx.tools.task import TaskTool
     from hx.tools.todo import TodoList, todo_injector
@@ -403,17 +401,10 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     )
     shell = PersistentShell(settings.cwd, shell=settings.bash.shell, sandbox=sandbox)
     jobs = BackgroundJobs(session_outputs_dir(session.meta.session_id) / "jobs")
-    tracker = FileTracker()
 
     todos = TodoList()
     injections = InjectionRegistry()
     injections.register("todos", todo_injector(todos))
-    injections.register("stale_files", _stale_files_injector(tracker, Injection))
-    if settings.context.git_notices:
-        # Registered even outside a repository: the watcher disables itself on
-        # its first call, which costs one subprocess rather than a check here
-        # that would have to run git anyway to be right.
-        injections.register("git", git_injector(GitWatcher(settings.cwd), seen=tracker.was_read))
 
     # Rules come from the settings files only, read once here: `settings`
     # already merges those same files, and loading both would list and match
@@ -437,7 +428,7 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
     project_context = build_project_context(settings.cwd, instructions)
 
     checkpoints = CheckpointStore(session, session_checkpoints_dir(session.meta.session_id))
-    tools = build_default_registry(shell, jobs, tracker, todos, bus_holder, auth, checkpoints)
+    tools = build_default_registry(shell, jobs, todos, bus_holder, auth, checkpoints)
 
     skills = {skill.name: skill for skill in discover_skills(settings.cwd)}
     if skills:
@@ -489,6 +480,17 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         hooks=hooks,
         models=models,
     )
+    # After the loop, because both ask it: what counts as read belongs to
+    # whichever session it holds now, and /clear and /resume swap that.
+    injections.register("stale_files", _stale_files_injector(loop, Injection))
+    if settings.context.git_notices:
+        # Registered even outside a repository: the watcher disables itself on
+        # its first call, which costs one subprocess rather than a check here
+        # that would have to run git anyway to be right.
+        injections.register(
+            "git",
+            git_injector(GitWatcher(settings.cwd), seen=lambda path: loop.reads.was_read(path)),
+        )
 
     return Runtime(
         settings=settings,
@@ -506,13 +508,12 @@ def build_runtime(parsed: ParsedArgs, *, resume: str | None = None) -> Runtime:
         mcp=MCPManager(load_mcp_configs(settings.cwd)),
         tools=tools,
         checkpoints=checkpoints,
-        tracker=tracker,
         hooks=hooks,
         notices=notices,
     )
 
 
-def _stale_files_injector(tracker: Any, injection_cls: Any) -> Any:
+def _stale_files_injector(loop: Any, injection_cls: Any) -> Any:
     """Warn when a file changed on disk after HX last read it.
 
     This belongs in late injection, not the system prompt: the set changes
@@ -521,7 +522,7 @@ def _stale_files_injector(tracker: Any, injection_cls: Any) -> Any:
     """
 
     def inject() -> Any:
-        stale = tracker.stale_files()
+        stale = loop.reads.stale_files()
         if not stale:
             return None
         listed = "\n".join(f"- {path}" for path in stale[:20])
@@ -648,7 +649,6 @@ def run_tui_command(parsed: ParsedArgs) -> int:
                 mcp=runtime.mcp,
                 notices=runtime.notices,
                 checkpoints=runtime.checkpoints,
-                tracker=runtime.tracker,
                 rename_left=rename_left,
             )
         finally:

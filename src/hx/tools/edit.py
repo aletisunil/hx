@@ -22,8 +22,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from hx.text import count
 from hx.tools import anchors
 from hx.tools.base import Tool, ToolContext, ToolError, ToolResult
-from hx.tools.read import FileTracker, hashline_enabled, read_exact, resolve_path
-from hx.tools.write import through_link, write_atomic
+from hx.tools.read import hashline_enabled, read_exact, resolve_path
+from hx.tools.write import READ_FIRST, through_link, write_atomic
 
 if TYPE_CHECKING:
     from hx.core.checkpoints import CheckpointStore
@@ -63,8 +63,7 @@ class EditTool(Tool):
     description = DESCRIPTION
     mutating = True
 
-    def __init__(self, tracker: FileTracker, checkpoints: CheckpointStore | None = None) -> None:
-        self.tracker = tracker
+    def __init__(self, checkpoints: CheckpointStore | None = None) -> None:
         self.checkpoints = checkpoints
         """See :class:`hx.tools.write.WriteTool` - the pre-image ``/rewind`` restores."""
 
@@ -125,9 +124,9 @@ class EditTool(Tool):
 
         if not path.is_file():
             raise ToolError(f"{path}: no such file")
-        if not self.tracker.was_read(path):
-            raise ToolError(f"{path} has not been read in this session. Read it first.")
-        if self.tracker.changed_since_read(path):
+        if not ctx.reads.was_read(path):
+            raise ToolError(f"{path} has not been read in this session. {READ_FIRST}")
+        if ctx.reads.changed_since_read(path):
             raise ToolError(f"{path} changed on disk since it was read. Read it again.")
 
         try:
@@ -157,7 +156,7 @@ class EditTool(Tool):
         if self.checkpoints is not None:
             self.checkpoints.capture(path)
         write_atomic(path, after)
-        self.tracker.mark_read(path)
+        ctx.reads.mark_read(path)
         if self.checkpoints is not None:
             self.checkpoints.settle(path)
 

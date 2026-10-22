@@ -30,7 +30,6 @@ async def run_tui(
     mcp: Any = None,
     notices: list[str] | None = None,
     checkpoints: Any = None,
-    tracker: Any = None,
     rename_left: str | None = None,
 ) -> str | None:
     """Run the interactive session.
@@ -56,6 +55,5 @@ async def run_tui(
         mcp=mcp,
         notices=notices,
         checkpoints=checkpoints,
-        tracker=tracker,
         rename_left=rename_left,
     )

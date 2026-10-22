@@ -18,12 +18,14 @@ from hx import __version__
 from hx.auth.oauth.codex import ORIGINATOR
 from hx.net import async_client
 from hx.providers.base import ProviderError
+from hx.providers.codex import api_base
 
 if TYPE_CHECKING:
     from hx.auth.resolve import ResolvedAuth
     from hx.providers.models import ModelInfo
 
-CATALOGUE_URL = "https://chatgpt.com/backend-api/codex/models"
+CATALOGUE_PATH = "/codex/models"
+"""Under the same backend the turns go to - ``HX_CODEX_BASE_URL`` moves both."""
 
 CLIENT_VERSION = "0.160.0"
 """The Codex client version HX presents itself as, *not* HX's own version.
@@ -97,7 +99,7 @@ async def fetch_raw(auth: ResolvedAuth) -> list[dict[str, Any]]:
     }
     async with async_client(timeout=HTTP_TIMEOUT) as client:
         response = await client.get(
-            CATALOGUE_URL,
+            api_base() + CATALOGUE_PATH,
             params={"client_version": CLIENT_VERSION},
             headers=headers,
         )

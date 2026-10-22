@@ -14,7 +14,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from hx.core.context import AssembledContext
 from hx.core.messages import StopReason
-from hx.core.usage import TurnUsage
+from hx.core.usage import PlanWindow, TurnUsage
 
 
 @dataclass(slots=True)
@@ -43,6 +43,9 @@ class StreamEnd:
     it does. Truer than the catalogue's figure, which for some routes is a
     guess: Claude Code lists its models without their sizes."""
     max_output_tokens: int | None = None
+    plan_windows: tuple[PlanWindow, ...] = ()
+    """The subscription's usage windows as the backend reported them with this
+    turn. Empty when it said nothing, which leaves what was known standing."""
 
 
 StreamItem = StreamDelta | StreamEnd
@@ -79,9 +82,19 @@ class ProviderError(Exception):
     Attributes:
         retryable: Whether the loop should retry with backoff (429, 5xx,
             connection resets) rather than surfacing to the user.
+        plan_windows: The subscription's usage windows, when the refusal
+            reported them - a limit reached is the moment they matter most.
     """
 
-    def __init__(self, message: str, *, status: int | None = None, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        retryable: bool = False,
+        plan_windows: tuple[PlanWindow, ...] = (),
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.retryable = retryable
+        self.plan_windows = plan_windows

@@ -26,6 +26,34 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- On a ChatGPT or Claude subscription, the status bar has a usage line: how much of each usage
+  window is spent and when it renews, for example
+  `5h 16% (renews 06:30 am) | 7d 14% (renews Mon Oct 26 04:00 am)`. A window turns yellow at 75%
+  and red at 90%, and drops to 0% by itself when it renews. `/cost` lists the same windows.
+- With an older Claude Code, which gives no percentage below its warning level, a window shows
+  only when it renews, for example `5h (renews 06:30 am)`.
+
+### Fixed
+
+- A ChatGPT plan that is out of usage is no longer retried three times. HX says which window
+  is spent and when it resets.
+- On a narrow terminal, the status bar drops the token counts and the cache field before the
+  context gauge. It no longer cuts a field in the middle of a number.
+- A Claude usage limit message gives its reset time in the same form as the usage line.
+- A resumed session can edit the files it read before. `hx resume` and `/resume` used to
+  forget every read, so the model saw a file in its history and still had its edit refused
+  with "has not been read in this session". A file changed since that read is still refused
+  until the model reads it again.
+- After `/clear`, the new session can no longer edit a file that only the previous session read.
+- `/rewind` keeps the reads from before the prompt it goes back to. An edit to a file that was
+  read earlier and then restored is no longer refused.
+- A subagent's reads count for the subagent only. The main session must read a file itself
+  before it edits it.
+- The refusal of an edit to an unread file tells the model to use the Read tool, because a
+  file shown by a shell command does not count.
+
 ---
 
 ## [0.2.18] - 2026-10-18

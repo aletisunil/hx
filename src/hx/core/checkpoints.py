@@ -30,7 +30,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from hx.core.session import Session
-    from hx.tools.read import FileTracker
 
 MAX_BLOB_BYTES = 8 * 1024 * 1024
 """Files above this are recorded but not snapshotted. A build artefact or a
@@ -169,13 +168,11 @@ class CheckpointStore:
         entry.after = digest_of(path)
         self.session.record_checkpoint(entry)
 
-    def restore_to(self, index: int, tracker: FileTracker | None = None) -> RestoreReport:
+    def restore_to(self, index: int) -> RestoreReport:
         """Put every file back the way it was before message ``index``.
 
-        ``tracker`` is forgotten for each file actually put back: the read that
-        justified editing it may itself have been rewound away, and a model
-        allowed to edit a file it has not read in the surviving transcript is
-        editing blind.
+        What the model may edit afterwards is the session's business: rewinding
+        the session drops the reads it cuts away (:attr:`Session.reads`).
         """
         report = RestoreReport()
         first: dict[str, Checkpoint] = {}
@@ -192,40 +189,35 @@ class CheckpointStore:
                 report.conflicted.append(key)
                 continue
             if not entry.existed:
-                changed = self._remove(path, key, report)
+                self._remove(path, key, report)
             elif not entry.captured or entry.before is None:
                 report.skipped.append((key, "no snapshot was taken"))
-                changed = False
             else:
-                changed = self._put_back(path, key, entry.before, report)
-            if changed and tracker is not None:
-                tracker.forget(path)
+                self._put_back(path, key, entry.before, report)
         return report
 
-    def _put_back(self, path: Path, key: str, digest: str, report: RestoreReport) -> bool:
+    def _put_back(self, path: Path, key: str, digest: str, report: RestoreReport) -> None:
         blob = self.blob_path(digest)
         try:
             data = blob.read_bytes()
         except OSError:
             report.skipped.append((key, "the snapshot is gone"))
-            return False
+            return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         except OSError as exc:
             report.skipped.append((key, str(exc)))
-            return False
+            return
         report.restored.append(key)
-        return True
 
-    def _remove(self, path: Path, key: str, report: RestoreReport) -> bool:
+    def _remove(self, path: Path, key: str, report: RestoreReport) -> None:
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
             report.skipped.append((key, str(exc)))
-            return False
+            return
         report.removed.append(key)
-        return True
 
     def blob_path(self, digest: str) -> Path:
         return self.root / digest
@@ -251,7 +243,7 @@ class CheckpointStore:
 def store_key(path: Path) -> str:
     """The identity of a file, as the store records it.
 
-    Resolved, the way :class:`~hx.tools.read.FileTracker` keys its hashes:
+    Resolved, the way :class:`~hx.core.reads.FileTracker` keys its reads:
     ``resolve_path`` normalises neither ``..`` nor a symlinked working
     directory, so the same file can arrive spelled two ways. Keyed on the raw
     string those become two independent chains, and a restore then puts back

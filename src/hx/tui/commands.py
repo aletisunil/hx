@@ -218,7 +218,7 @@ async def _switch_model(ctx: CommandContext, model_id: str) -> None:
         ctx.app.notice(str(exc), "error")
         return
     ctx.app.loop.set_model(model_id, info)
-    ctx.app.status.set_model(model_id, subscription=info.is_subscription)
+    ctx.app.status.set_model(model_id, subscription=info.is_subscription, route=info.provider_id)
     # Resolved per model, so the depth can change without the user asking: the
     # bar has to say so at the moment it happens.
     ctx.app.status.set_effort(ctx.app.models.displayed_effort(model_id))
@@ -570,7 +570,30 @@ async def cmd_cost(ctx: CommandContext, args: str) -> None:
         f"Cache write:   {format_tokens(usage.total_cache_write)}",
         f"Output:        {format_tokens(usage.total_output)}",
     ]
+    lines += _plan_lines(ctx.app.status)
     ctx.app.notice("\n".join(lines))
+
+
+PLAN_NAMES = {"openai-codex": "ChatGPT plan", "claude-code": "Claude plan"}
+
+
+def _plan_lines(status: Any) -> list[str]:
+    """The shown subscription's windows, spelled out: the status bar has room
+    for how much, and this is where it says when each comes back."""
+    windows = status.plan_windows()
+    if not windows:
+        return []
+    from hx.core.usage import format_percent, format_renewal
+
+    lines = ["", f"{PLAN_NAMES.get(status.route, 'Subscription')}:"]
+    for window in windows:
+        parts = []
+        if window.used_percent is not None:
+            parts.append(f"{format_percent(window.used_percent)} used")
+        if window.resets_at is not None:
+            parts.append(f"renews {format_renewal(window.resets_at)}")
+        lines.append(f"  {window.title} window: {', '.join(parts)}")
+    return lines
 
 
 async def cmd_context(ctx: CommandContext, args: str) -> None:

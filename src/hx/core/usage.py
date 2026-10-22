@@ -8,7 +8,8 @@ own arithmetic and only compute locally as a fallback.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # avoids a providers -> core import cycle at runtime
@@ -91,6 +92,103 @@ class UsageLedger:
         if self.context_window <= 0:
             return 0.0
         return min(1.0, max(0.0, self.context_tokens / self.context_window))
+
+
+@dataclass(frozen=True, slots=True)
+class PlanWindow:
+    """One of a subscription's usage windows, as its route last reported it.
+
+    A subscription has no per-token price; what it has instead is a share of a
+    window - five hours, seven days - and a time when that share comes back.
+    The route says how much is spent when it chooses to: ChatGPT on every
+    response, Claude only once a window nears its limit.
+    """
+
+    minutes: int
+    """How long the window is: 300 for five hours, 10080 for seven days."""
+    used_percent: float | None = None
+    """How much of it is spent, 0-100. ``None`` when the route did not say,
+    which is not the same as nothing spent."""
+    resets_at: float | None = None
+    """When it is empty again, in epoch seconds."""
+    scope: str = ""
+    """What the window is limited to, when not every model: Claude keeps a
+    separate weekly window for ``opus``."""
+
+    def __post_init__(self) -> None:
+        # Held to 0-100 here rather than by each route: the colours and
+        # format_percent assume it, whoever reported the figure.
+        if self.used_percent is not None:
+            object.__setattr__(self, "used_percent", min(max(self.used_percent, 0.0), 100.0))
+
+    @property
+    def key(self) -> tuple[int, str]:
+        """Which window this is. A newer report of the same key replaces it."""
+        return self.minutes, self.scope
+
+    @property
+    def label(self) -> str:
+        """``5h``, ``7d``, ``7d opus`` - short, for the status bar."""
+        amount, unit = self._length()
+        length = f"{amount}{unit[0]}"
+        return f"{length} {self.scope}" if self.scope else length
+
+    @property
+    def title(self) -> str:
+        """``5-hour``, ``7-day opus`` - spelled out, for /cost."""
+        amount, unit = self._length()
+        length = f"{amount}-{unit}"
+        return f"{length} {self.scope}" if self.scope else length
+
+    def _length(self) -> tuple[int, str]:
+        """The window's length in the largest whole unit: ``(5, "hour")``."""
+        if self.minutes % 1440 == 0:
+            return self.minutes // 1440, "day"
+        if self.minutes % 60 == 0:
+            return self.minutes // 60, "hour"
+        return self.minutes, "minute"
+
+    def at(self, now: float | None = None) -> PlanWindow | None:
+        """The window as it stands at ``now``.
+
+        Past its reset a window is empty again, which is known whether or not
+        a figure was: one that had a figure is at 0%. One that had none had
+        only its reset to show, and that is gone - so there is nothing left
+        to show, rather than a guess. Nor is there for one with neither.
+        """
+        now = time.time() if now is None else now
+        if self.used_percent is None and self.resets_at is None:
+            return None
+        if self.resets_at is None or now < self.resets_at:
+            return self
+        if self.used_percent is None:
+            return None
+        return replace(self, used_percent=0.0, resets_at=None)
+
+
+def format_percent(used_percent: float) -> str:
+    """``95%``. Never ``100%`` short of the limit: a window rounded up to full
+    reads as one that refuses the next turn."""
+    shown = 100 if used_percent >= 100 else min(round(used_percent), 99)
+    return f"{max(shown, 0)}%"
+
+
+RENEWAL_CLOCK_SECONDS = 86_400
+"""Closer than this, a renewal is given as a clock time alone."""
+
+
+def format_renewal(resets_at: float, *, short: bool = False, now: float | None = None) -> str:
+    """When a window renews, in local time: ``06:30 am`` within a day, and
+    ``Mon Oct 26 04:00 am`` beyond it. ``short`` drops the clock from a date -
+    ``Mon Oct 26`` - where room is scarce: days away, the day is what counts.
+    """
+    now = time.time() if now is None else now
+    when = time.localtime(resets_at)
+    clock = time.strftime("%I:%M %p", when).lower()
+    if resets_at - now < RENEWAL_CLOCK_SECONDS:
+        return clock
+    day = f"{time.strftime('%a %b', when)} {when.tm_mday}"
+    return day if short else f"{day} {clock}"
 
 
 def compute_cost(usage: TurnUsage, pricing: ModelPricing) -> float:

@@ -188,7 +188,7 @@ class HXSession:
 
         events = asyncio.create_task(self._consume_events())
         spinner = asyncio.create_task(self._spin())
-        branch = asyncio.create_task(self._watch_branch())
+        branch = asyncio.create_task(self._watch_status())
         if left := self.extra.get("rename_left"):
             self._detach(self._rename_left_behind(left))
         try:
@@ -216,8 +216,9 @@ class HXSession:
             if moved:
                 self.runner.request_render()
 
-    async def _watch_branch(self) -> None:
-        """Keep the branch in the status bar current across external checkouts."""
+    async def _watch_status(self) -> None:
+        """Keep the status bar current while nothing else redraws it: the
+        branch across external checkouts, and a usage window that resets."""
         while True:
             await asyncio.sleep(BRANCH_POLL_SECONDS)
             previous = self._branch.branch
@@ -225,6 +226,9 @@ class HXSession:
             status = self.view.dock.status
             if current != previous or status.branch != current:
                 status.set_location(tilde(self.settings.cwd), current)
+                self.runner.request_render()
+            elif status.redraw_due():
+                status.invalidate()
                 self.runner.request_render()
 
     # -- the surface the slash commands expect -----------------------------
@@ -441,10 +445,6 @@ class HXSession:
     def checkpoints(self) -> Any:
         return self.extra.get("checkpoints")
 
-    @property
-    def tracker(self) -> Any:
-        return self.extra.get("tracker")
-
     def set_api_key(self, key: str) -> None:
         """Apply a new credential to the running provider.
 
@@ -588,7 +588,7 @@ class HXSession:
         prompt = cut.text() if cut is not None else ""
         report = None
         if self.checkpoints is not None:
-            report = self.checkpoints.restore_to(index, self.tracker)
+            report = self.checkpoints.restore_to(index)
         session.rewind_to(index)
         self._replay_transcript()
         if prompt:
@@ -1093,6 +1093,7 @@ class HXSession:
             cwd=self.settings.cwd,
             session_id=self.loop.session.meta.session_id,
             tool_use_id=f"shell_{id(command):x}",
+            reads=self.loop.reads,
             settings=self.settings,
             emit_progress=lambda chunk: self._append_output(block, chunk),
         )
@@ -1380,6 +1381,8 @@ class HXSession:
                         cost_usd=event.cost_usd,
                         latency_ms=self.loop.session.usage.last_latency_ms,
                     )
+                case ev.PlanUsageUpdated():
+                    status.set_plan(event.route, event.windows)
                 case ev.TodosUpdated():
                     transcript.append(TodoBlock(event.todos))
                 case ev.CompactionStarted():
@@ -1413,7 +1416,11 @@ class HXSession:
         model = getattr(self.loop, "model_info", None)
         if model is not None:
             model_id = getattr(model, "id", "") or ""
-            status.set_model(model_id, subscription=bool(getattr(model, "is_subscription", False)))
+            status.set_model(
+                model_id,
+                subscription=bool(getattr(model, "is_subscription", False)),
+                route=str(getattr(model, "provider_id", "") or ""),
+            )
             status.set_context(0, getattr(model, "context_window", 0) or 0)
             # The saved effort is in force from the first turn; a bar that only
             # shows it once /effort is run again reads as the choice not sticking.

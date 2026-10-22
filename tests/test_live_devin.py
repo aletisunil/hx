@@ -29,7 +29,6 @@ from hx.permissions.engine import Decision, PermissionEngine, parse_rule
 from hx.providers import devin_catalogue, registry
 from hx.providers.base import Provider
 from hx.providers.models import ModelRegistry
-from hx.tools.read import FileTracker
 from hx.tools.registry import build_default_registry
 from tests.conftest import REAL_AUTH_FILE
 
@@ -65,7 +64,7 @@ async def _build(tmp_path: Path) -> tuple[AgentLoop, Provider]:
     loop = AgentLoop(
         provider=provider,
         session=session,
-        tools=build_default_registry(None, None, FileTracker()),
+        tools=build_default_registry(None, None),
         permissions=PermissionEngine(
             PermissionMode.DEFAULT, [parse_rule("Read(**)", "live", Decision.ALLOW)], tmp_path
         ),

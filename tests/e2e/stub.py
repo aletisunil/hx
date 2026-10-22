@@ -9,6 +9,10 @@ are answered without the script, because they are HX's own bookkeeping and
 not part of the conversation a test is describing: the catalogue
 (``GET /models``) and the one-off request that names a session.
 
+It also stands in for ChatGPT's Codex backend (``HX_CODEX_BASE_URL``), with
+its own script of :class:`CodexReply` - a Responses stream, and the
+``x-codex-*`` usage headers the real one sends.
+
 Anything the script did not expect is answered with a 500 and recorded in
 :attr:`Stub.unexpected`; the suite fails the test on it, so a turn that ran
 more model calls than the test described cannot pass by accident.
@@ -124,6 +128,69 @@ def fail(status: int, message: str) -> Reply:
     return Reply(status=status, error=message)
 
 
+CODEX_PATH = "/backend-api"
+"""Where the ChatGPT stand-in is mounted; HX is pointed at it with ``HX_CODEX_BASE_URL``."""
+
+CODEX_CATALOGUE: list[dict[str, Any]] = [
+    {
+        "slug": "gpt-5.6-terra",
+        "display_name": "GPT-5.6 Terra",
+        "visibility": "list",
+        "context_window": 272_000,
+        "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "high"}],
+        "default_reasoning_level": "medium",
+        "input_modalities": ["text", "image"],
+    }
+]
+
+
+@dataclass(slots=True)
+class CodexReply:
+    """One scripted answer from the ChatGPT backend.
+
+    ``limits`` are the response's ``x-codex-*`` headers - see :func:`codex_limits`.
+    ``status`` other than 200 answers with ``error`` as the JSON body's error.
+    """
+
+    text: str = ""
+    limits: dict[str, str] = field(default_factory=dict)
+    status: int = 200
+    error: dict[str, Any] = field(default_factory=dict)
+
+
+def codex_limits(
+    *,
+    primary: int,
+    secondary: int,
+    primary_resets_at: int | None = None,
+    secondary_resets_at: int | None = None,
+) -> dict[str, str]:
+    """The headers ChatGPT sends on a Plus plan: a 5-hour and a 7-day window.
+
+    Every header a real response carries, so a parser that leans on one the
+    real service sends is exercised by it. Seen live on 2026-10-22.
+    """
+    now = int(time.time())
+    primary_at = primary_resets_at if primary_resets_at is not None else now + 18_000
+    secondary_at = secondary_resets_at if secondary_resets_at is not None else now + 604_800
+    return {
+        "x-codex-active-limit": "premium",
+        "x-codex-plan-type": "plus",
+        "x-codex-primary-used-percent": str(primary),
+        "x-codex-secondary-used-percent": str(secondary),
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-secondary-window-minutes": "10080",
+        "x-codex-primary-over-secondary-limit-percent": "0",
+        "x-codex-primary-reset-after-seconds": str(max(0, primary_at - now)),
+        "x-codex-secondary-reset-after-seconds": str(max(0, secondary_at - now)),
+        "x-codex-primary-reset-at": str(primary_at),
+        "x-codex-secondary-reset-at": str(secondary_at),
+        "x-codex-credits-has-credits": "False",
+        "x-codex-credits-balance": "0",
+        "x-codex-credits-unlimited": "False",
+    }
+
+
 @dataclass(slots=True)
 class Request:
     """One completion request HX sent, as it arrived on the wire."""
@@ -211,6 +278,10 @@ class Stub:
         pointed here with ``HX_CLAUDE_CODE_RELEASES_URL``; ``None`` answers 503,
         an npm registry the network cannot reach."""
         self.release_fetches = 0
+        self._codex_script: deque[CodexReply] = deque()
+        self.codex_requests: list[dict[str, Any]] = []
+        """Every conversation request to the ChatGPT stand-in (not titles)."""
+        self.codex_title_requests: list[dict[str, Any]] = []
         self._closing = threading.Event()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
@@ -220,6 +291,16 @@ class Stub:
     def url(self) -> str:
         port = self._server.server_address[1]
         return f"http://127.0.0.1:{port}/api/v1"
+
+    @property
+    def codex_url(self) -> str:
+        port = self._server.server_address[1]
+        return f"http://127.0.0.1:{port}{CODEX_PATH}"
+
+    def codex_script(self, *replies: CodexReply) -> None:
+        """Queue answers from the ChatGPT backend, answered in order."""
+        with self._lock:
+            self._codex_script.extend(replies)
 
     def start(self) -> Stub:
         self._thread.start()
@@ -295,6 +376,9 @@ class Stub:
                 return
 
             def do_GET(self) -> None:
+                if self.path.rstrip("/").split("?")[0].endswith(CODEX_PATH + "/codex/models"):
+                    self._json(200, {"models": CODEX_CATALOGUE})
+                    return
                 if self.path.rstrip("/").endswith("/models"):
                     stub.model_fetches += 1
                     if stub.models_hold is not None:
@@ -317,6 +401,9 @@ class Stub:
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
+                if self.path.rstrip("/").endswith(CODEX_PATH + "/codex/responses"):
+                    self._codex(body)
+                    return
                 if not self.path.rstrip("/").endswith("/chat/completions"):
                     self._json(404, {"error": {"message": f"no route {self.path}"}})
                     return
@@ -368,9 +455,65 @@ class Stub:
                     return
                 self._stream(reply)
 
-            def _json(self, status: int, payload: dict[str, Any]) -> None:
+            def _codex(self, body: dict[str, Any]) -> None:
+                if str(body.get("instructions") or "").strip() == TITLE_SYSTEM:
+                    with stub._arrived:
+                        stub.codex_title_requests.append(body)
+                        stub._arrived.notify_all()
+                    self._codex_stream(CodexReply(text=stub.title))
+                    return
+                with stub._arrived:
+                    stub.codex_requests.append(body)
+                    reply = stub._codex_script.popleft() if stub._codex_script else None
+                    if reply is None:
+                        stub.unexpected.append(
+                            f"Codex request #{len(stub.codex_requests)} with no scripted reply"
+                        )
+                    stub._arrived.notify_all()
+                if reply is None:
+                    self._json(500, {"error": {"message": "stub: no scripted reply"}})
+                elif reply.status != 200:
+                    self._json(reply.status, {"error": reply.error}, reply.limits)
+                else:
+                    self._codex_stream(reply)
+
+            def _codex_stream(self, reply: CodexReply) -> None:
+                """A Responses stream: the text in deltas, then the completed response."""
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                for name, value in reply.limits.items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self._event({"type": "response.created", "sequence_number": 0})
+                for start in range(0, len(reply.text), 24):
+                    self._event(
+                        {
+                            "type": "response.output_text.delta",
+                            "output_index": 0,
+                            "delta": reply.text[start : start + 24],
+                        }
+                    )
+                self._event(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "output": [],
+                            "usage": {
+                                "input_tokens": 1_200,
+                                "output_tokens": 40,
+                                "input_tokens_details": {"cached_tokens": 0},
+                            },
+                        },
+                    }
+                )
+
+            def _json(
+                self, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None
+            ) -> None:
                 data = json.dumps(payload).encode()
                 self.send_response(status)
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()

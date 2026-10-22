@@ -304,7 +304,8 @@ def test_a_usage_limit_is_explained(hx: HX, claude: FakeClaude) -> None:
     result = hx.run("-p", "hello")
     assert result.returncode != 0
     assert "five hour usage limit is reached. It resets at" in result.stderr
-    assert time.strftime("%H:%M", time.localtime(resets)) in result.stderr
+    # The time in the form the status bar's usage line gives it.
+    assert time.strftime("%I:%M %p", time.localtime(resets)).lower() in result.stderr
 
     # The same limit in the words Claude Code uses once Extra Usage is spent
     # too: still the plan's limit, because the rejection says so.

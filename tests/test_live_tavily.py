@@ -20,6 +20,8 @@ import pytest
 from hx.auth.resolve import AuthResolver
 from hx.auth.store import TAVILY, ApiKeyCredential, AuthStore
 from hx.config import load_settings
+from hx.core.reads import FileTracker
+from hx.core.session import Session, SessionMeta
 from hx.tools.base import ToolContext
 from hx.tools.websearch import CreditLedger, WebFetchTool, WebSearchTool
 
@@ -51,6 +53,7 @@ def ctx(tmp_path: Path) -> ToolContext:
         cwd=tmp_path,
         session_id="live-tavily",
         tool_use_id="t1",
+        reads=FileTracker(Session(SessionMeta("live-tavily", str(tmp_path), 0.0, 0.0, "live"))),
         settings=load_settings(tmp_path),
         emit_progress=lambda chunk: print(chunk, end=""),
     )

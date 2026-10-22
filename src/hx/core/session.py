@@ -1,8 +1,8 @@
 """Session persistence: append-only JSONL transcripts.
 
-Every message, tool result, usage record, file checkpoint and compaction
-boundary is appended as it happens, so a crashed session is fully resumable and
-a compaction can be inspected or undone after the fact.
+Every message, tool result, usage record, file checkpoint, file read and
+compaction boundary is appended as it happens, so a crashed session is fully
+resumable and a compaction can be inspected or undone after the fact.
 
 Nothing is ever rewritten or removed - a rewind is one more record, and the
 state it produces is whatever replaying the file yields. That is what keeps
@@ -22,6 +22,7 @@ from typing import Any
 
 from hx.core.checkpoints import Checkpoint
 from hx.core.messages import Message, ToolResultBlock, from_dict, to_dict
+from hx.core.reads import FileRead
 from hx.core.usage import TurnUsage, UsageLedger
 from hx.paths import (
     session_dir,
@@ -103,6 +104,9 @@ class Session:
     usage: UsageLedger = field(default_factory=UsageLedger)
     checkpoints: list[Checkpoint] = field(default_factory=list)
     """Pre-images of the files HX changed, in the order they were changed."""
+    reads: list[FileRead] = field(default_factory=list)
+    """The files the model has seen, in the order it saw them. What Edit and
+    Write check through :class:`~hx.core.reads.FileTracker`."""
     environment: Environment | None = None
     """The prompt and tools this session ran with. ``None`` until the first
     provider call, and for sessions recorded before it was written down."""
@@ -114,6 +118,13 @@ class Session:
     kept: the same prompt is appended a second time, verbatim, and a counter
     would read that as the user having asked twice.
     """
+    _read_digests: dict[str, str | None] = field(default_factory=dict, repr=False)
+    """Each read path's digest at its latest read, maintained as reads arrive."""
+
+    @property
+    def read_digests(self) -> dict[str, str | None]:
+        """Each file read so far, with its content hash at the latest read."""
+        return self._read_digests
 
     def append(self, message: Message) -> None:
         """Add to memory and flush the JSONL line. Ephemeral messages are recorded
@@ -198,6 +209,19 @@ class Session:
         self._pending.append({"kind": "checkpoint", "data": checkpoint.as_dict()})
         self.flush()
 
+    def record_read(self, path: str, digest: str | None) -> None:
+        """Record that the model has seen ``path`` with content ``digest``.
+
+        Not flushed here: Reads in one turn run concurrently on worker threads,
+        and the tool-result message that follows them flushes every record at
+        once. A process that dies before then loses the read along with the
+        result that showed the file, which is what the transcript then says.
+        """
+        read = FileRead(index=len(self.messages), path=path, digest=digest)
+        self.reads.append(read)
+        self._read_digests[path] = digest
+        self._pending.append({"kind": "read", "data": read.as_dict()})
+
     def rewind_points(self) -> list[RewindPoint]:
         """The prompts in this session, oldest first.
 
@@ -255,7 +279,9 @@ class Session:
         replayed = load_session(self.meta.session_id)
         self.messages = replayed.messages
         self.checkpoints = replayed.checkpoints
+        self.reads = replayed.reads
         self._recount_prompts()
+        self._index_reads()
         self.meta.message_count = len(self.messages)
         self.meta.updated_at = time.time()
         self._write_meta()
@@ -270,6 +296,10 @@ class Session:
             _prompt_identity(message) for message in self.messages if _is_prompt(message)
         }
         self.meta.prompt_count = len(self._prompt_keys)
+
+    def _index_reads(self) -> None:
+        """Rebuild :attr:`read_digests` from :attr:`reads`, latest read winning."""
+        self._read_digests = {read.path: read.digest for read in self.reads}
 
     def active_messages(self) -> list[Message]:
         """Messages eligible for context: not ``compacted``, not ``ephemeral``."""
@@ -420,6 +450,8 @@ def load_session(session_id: str) -> Session:
                 session.usage.record(TurnUsage(**record["data"]))
             elif kind == "checkpoint":
                 session.checkpoints.append(Checkpoint.from_dict(record["data"]))
+            elif kind == "read":
+                session.reads.append(FileRead.from_dict(record["data"]))
             elif kind == "environment":
                 session.environment = _environment_from_json(record["data"])
             elif kind == "compaction":
@@ -440,6 +472,7 @@ def load_session(session_id: str) -> Session:
                 _rewind(session, int(record["data"]["to"]), compactions)
     session.meta.message_count = len(session.messages)
     session._recount_prompts()
+    session._index_reads()
     return session
 
 
@@ -452,6 +485,7 @@ def _rewind(session: Session, to: int, compactions: list[tuple[int, list[int]]])
     """
     del session.messages[to:]
     session.checkpoints = [c for c in session.checkpoints if c.index < to]
+    session.reads = [r for r in session.reads if r.index < to]
     while compactions and compactions[-1][0] >= to:
         _, flagged = compactions.pop()
         for index in flagged:

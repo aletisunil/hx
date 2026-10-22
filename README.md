@@ -604,6 +604,27 @@ read/write with hit rate, spend, last-turn latency, context gauge and model
 below. The cache and cost fields are the point of it — a hit rate that
 collapses after an edit is the visible symptom of a broken prefix.
 
+On a subscription there is no per-token price. Once the route reports its
+usage windows, a line above the stats shows them instead:
+
+```
+5h 16% (renews 06:30 am) | 7d 14% (renews Mon Oct 26 04:00 am)
+```
+
+That is 16% of the five-hour window and 14% of the week spent, and when each
+renews. A window turns yellow at 75% and red at 90%, and drops to 0% by itself
+when it renews. ChatGPT and Claude Code report both windows on every answer.
+A Claude Code older than the field HX reads reports a percentage only near a
+limit, so until then its window shows only when it renews:
+`5h (renews 06:30 am)`. Before the first answer there is
+no usage line and the cost field says `sub`, because nothing has been
+reported yet. `/cost` lists the same windows. Devin reports no usage.
+
+On a narrow terminal the usage line gives up detail in steps: the clock time
+of a renewal days away, then the renewals, then every window but the one
+nearest its limit. The stats line drops whole fields, least important first:
+the latency, the token counts, the cache. The context gauge stays.
+
 ---
 
 ## Configuration
@@ -697,6 +718,7 @@ Environment overrides: `HX_MODEL`, `HX_SUBAGENT_MODEL`, `HX_MAX_TOKENS`,
 for web search, `HX_CA_BUNDLE` / `HX_SSL_NO_VERIFY` for TLS (see
 [Credentials](#credentials)), and `HX_OPENROUTER_BASE_URL` to point the OpenRouter
 route at another OpenAI-compatible endpoint - a gateway, or a recording proxy.
+`HX_CODEX_BASE_URL` does the same for the ChatGPT route's backend.
 `HX_MODIFIER_PROBE=0` stops HX asking macOS whether shift is held when an
 `enter` arrives (see [Keys](#keys)).
 
@@ -1177,7 +1199,8 @@ uv run hx                    # run from the checkout
 The suite is end-to-end. Each test in `tests/e2e/` starts the installed `hx`
 binary - on a real pseudo-terminal for the TUI, or as a plain subprocess for
 print mode and the other commands - in a private `$HOME` and `$HX_HOME`, and
-points it at a local OpenRouter stand-in with `HX_OPENROUTER_BASE_URL`.
+points it at a local OpenRouter stand-in with `HX_OPENROUTER_BASE_URL`, and
+at a ChatGPT stand-in with `HX_CODEX_BASE_URL`.
 Everything between the keyboard and the socket is the shipped code; only the
 model's replies are scripted. The screen is read back through a VT emulator,
 so assertions are on the cells a terminal shows, not on the bytes HX meant to
@@ -1266,7 +1289,9 @@ users as a blank release.
 
 The `publish` job runs only on `refs/tags/v*` and only after lint, the test
 suite and an install-script run in a clean Debian container have passed. It builds with
-`uv build` and uploads via OIDC.
+`uv build`, checks that the wheel's version matches the tag and has a `CHANGELOG.md`
+section, uploads via OIDC, and then creates the GitHub release with that section
+as its notes.
 
 To check a build before tagging:
 

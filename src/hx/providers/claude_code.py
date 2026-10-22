@@ -47,7 +47,7 @@ from typing import Any
 from hx.auth import claude_code as cc_auth
 from hx.core.context import SYSTEM_PROMPT
 from hx.core.messages import Message, StopReason, ToolResultBlock
-from hx.core.usage import TurnUsage
+from hx.core.usage import PlanWindow, TurnUsage, format_renewal
 from hx.net import with_tls_hint
 from hx.providers import claude_code_transcript as transcript
 from hx.providers.base import ProviderError, ProviderRequest, StreamDelta, StreamEnd, StreamItem
@@ -436,7 +436,10 @@ class ClaudeCodeProvider:
             frame = await frames.get()
             if isinstance(frame, Exit):
                 conversation.state = State.DEAD
-                raise ProviderError(_exit_message(frame, turn.rate_limit, request.model))
+                raise ProviderError(
+                    _exit_message(frame, turn.rate_limit, request.model),
+                    plan_windows=tuple(turn.plan_windows),
+                )
             kind = frame.get("type")
             if kind == "stream_event" and frame.get("parent_tool_use_id") is None:
                 for item in turn.consume(frame.get("event") or {}):
@@ -447,7 +450,11 @@ class ClaudeCodeProvider:
                     payload = from_payload(turn)
                     if payload is not None:
                         yield payload
-                    yield StreamEnd(StopReason.TOOL_USE, turn.finish_usage(started))
+                    yield StreamEnd(
+                        StopReason.TOOL_USE,
+                        turn.finish_usage(started),
+                        plan_windows=tuple(turn.plan_windows),
+                    )
                     return
             elif kind == "user":
                 self._note_results(conversation, frame)
@@ -457,10 +464,14 @@ class ClaudeCodeProvider:
                 info = frame.get("rate_limit_info") or {}
                 if info.get("status") == "rejected":
                     turn.rate_limit = info
+                turn.plan_windows.extend(plan_windows(info))
             elif kind == "result":
                 if frame.get("is_error"):
                     conversation.diverged = True
-                    raise ProviderError(_result_error(frame, turn.rate_limit, request))
+                    raise ProviderError(
+                        _result_error(frame, turn.rate_limit, request),
+                        plan_windows=tuple(turn.plan_windows),
+                    )
                 conversation.state = State.IDLE
                 self._remember(conversation, turn)
                 payload = from_payload(turn)
@@ -472,6 +483,7 @@ class ClaudeCodeProvider:
                     turn.finish_usage(started),
                     context_window=window,
                     max_output_tokens=output,
+                    plan_windows=tuple(turn.plan_windows),
                 )
                 return
 
@@ -573,6 +585,8 @@ class _Turn:
         self.outputs: dict[int, int] = {}
         """Output tokens per API message; ``message_delta`` reports a running total."""
         self.rate_limit: dict[str, Any] | None = None
+        self.plan_windows: list[PlanWindow] = []
+        """Each ``rate_limit_event`` of the turn, as a usage window."""
 
     def consume(self, event: dict[str, Any]) -> list[StreamItem]:
         kind = event.get("type")
@@ -957,11 +971,61 @@ def _extra_usage_message(request: ProviderRequest, detail: str) -> str:
     )
 
 
+LIMIT_WINDOWS: dict[str, tuple[int, str]] = {
+    "five_hour": (300, ""),
+    "seven_day": (10_080, ""),
+    "seven_day_opus": (10_080, "opus"),
+    "seven_day_sonnet": (10_080, "sonnet"),
+}
+"""Claude Code's ``rateLimitType`` as a window's length and scope. ``overage``
+is not here: it is Extra Usage, billed past the plan, not a share of it."""
+
+
+def plan_windows(info: dict[str, Any]) -> tuple[PlanWindow, ...]:
+    """The usage windows a ``rate_limit_event`` reports.
+
+    Current Claude Code puts every window's figure in ``unifiedWindows``, as a
+    fraction - ``{"five_hour": {"utilization": 0.29, "resetsAt": ...}}``, seen
+    live on 2026-10-22 - whatever window the frame itself is about. An older
+    one reports only that window, with a figure only past its warning, and
+    the window is then reported without one rather than as 0%. A rejected
+    window is full whatever either says.
+    """
+    windows: dict[tuple[int, str], PlanWindow] = {}
+    unified = info.get("unifiedWindows")
+    for name, entry in (unified if isinstance(unified, dict) else {}).items():
+        if isinstance(entry, dict) and (window := _window(name, entry)) is not None:
+            windows[window.key] = window
+    own = _window(str(info.get("rateLimitType") or ""), info)
+    if own is not None and (own.key not in windows or own.used_percent == 100.0):
+        windows[own.key] = own
+    return tuple(windows.values())
+
+
+def _window(name: str, entry: dict[str, Any]) -> PlanWindow | None:
+    """One window from its ``rateLimitType`` name and what was said about it."""
+    length = LIMIT_WINDOWS.get(name)
+    if length is None:
+        return None
+    used: float | None = None
+    if entry.get("status") == "rejected":
+        used = 100.0
+    elif isinstance(utilization := entry.get("utilization"), int | float):
+        used = utilization * 100
+    resets = entry.get("resetsAt")
+    return PlanWindow(
+        minutes=length[0],
+        used_percent=used,
+        resets_at=float(resets) if isinstance(resets, int | float) and resets > 0 else None,
+        scope=length[1],
+    )
+
+
 def _limit_message(info: dict[str, Any], detail: str = "") -> str:
     resets = info.get("resetsAt")
     when = ""
     if isinstance(resets, int | float) and resets > 0:
-        when = " It resets at " + time.strftime("%H:%M on %b %d", time.localtime(resets)) + "."
+        when = f" It resets at {format_renewal(resets)}."
     window = str(info.get("rateLimitType") or "").replace("_", " ")
     base = (
         f"Your Claude subscription's {window} usage limit is reached."
