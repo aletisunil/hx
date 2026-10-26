@@ -793,6 +793,11 @@ mapping semantic roles onto them. Drop one in `~/.hx/themes/mine.json` and
 
 The role names are pi's, so [pi](https://github.com/earendil-works/pi) theme
 files load here unchanged. `src/hx/tui/themes/dark.json` is the reference.
+A few roles pi has no concept of may be left out, and borrow another role:
+`toolArgs`, the colour of a tool call's paths and patterns, borrows `accent`;
+`panel` and `mdCodeBlockBg` borrow `surface`; `userText` borrows `text`; and
+`diffHunk` borrows `mdLink`. `background` and `surface` may come from pi's
+`export` instead. pi's `toolPendingBg` is accepted and ignored.
 
 ### Where things live
 

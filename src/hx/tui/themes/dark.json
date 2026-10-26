@@ -17,11 +17,13 @@
 		"panelBg": "#26262e",
 		"selectedBg": "#3a3a4a",
 		"userMsgBg": "#343541",
-		"toolPendingBg": "#282832",
 		"toolSuccessBg": "#283228",
 		"toolErrorBg": "#3c2828",
 		"customMsgBg": "#2d2838",
-		"codeBg": "#22222a"
+		"codeBg": "#22222a",
+		"toolTitle": "#a6a6a6",
+		"toolArgs": "#7a9e99",
+		"toolOutput": "#7a7a7a"
 	},
 	"colors": {
 		"background": "pageBg",
@@ -50,11 +52,11 @@
 		"customMessageBg": "customMsgBg",
 		"customMessageText": "text",
 		"customMessageLabel": "#9575cd",
-		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",
-		"toolTitle": "text",
-		"toolOutput": "gray",
+		"toolTitle": "toolTitle",
+		"toolArgs": "toolArgs",
+		"toolOutput": "toolOutput",
 
 		"mdHeading": "yellow",
 		"mdLink": "#81a2be",

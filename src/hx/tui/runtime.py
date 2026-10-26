@@ -102,6 +102,11 @@ class HXSession:
         self._branch = BranchWatcher(Path(settings.cwd))
 
         from hx import __version__
+        from hx.tui.theme import THEME
+
+        # The configured palette, before anything is drawn. Only ``/theme``
+        # switched it, so ``"theme"`` in settings and ``HX_THEME`` did nothing.
+        THEME.use(settings.theme)
 
         self.prompt = Prompt(
             Path(settings.cwd),

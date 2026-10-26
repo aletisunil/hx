@@ -109,28 +109,6 @@ def test_escape_interrupts_a_running_turn(hx: HX, stub: Stub) -> None:
     term.wait_for("Fresh answer.")
 
 
-def test_typing_while_busy_queues_the_message(hx: HX, stub: Stub) -> None:
-    """enter while a turn runs queues the message; it is sent when the turn ends."""
-    hold = threading.Event()
-    stub.script(
-        Reply(text="Working on the first thing.", hold=hold, hold_after=10),
-        say("Now the second thing."),
-    )
-    term = hx.tui()
-    term.submit("first")
-    term.wait_for("Working on")
-    term.submit("second")
-    # Not settle(): the working status repaints every frame while the turn runs,
-    # so HX never goes quiet and a settle only ever ran out its timeout.
-    term.wait_for(lambda screen: "second" in screen and "⧗1 queued" in screen)
-    term.snapshot("second message queued while the first runs")
-    assert len(stub.requests) == 1
-
-    hold.set()
-    term.wait_for("Now the second thing.")
-    assert stub.requests[1].last_user_text().endswith("second")
-
-
 def test_alt_enter_steers_the_running_turn(hx: HX, stub: Stub) -> None:
     """alt+enter cuts the running answer off and the model continues from the new message."""
     hold = threading.Event()

@@ -26,6 +26,27 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- A tool call is one row with no background: a coloured marker shows how it ended, and what came
+  back hangs under it from a `⎿`, for example `● grep TODO` over `⎿  3 results`. A call that
+  gave nothing back takes half the rows it did, one with a summary a row less, and a failed call
+  is still the red `✗`. Output too long for the row wraps on that edge rather than being cut at
+  the side of the screen.
+- Tool calls are a step quieter than the answer, and what they gave back a step quieter again,
+  so the answer is what you read first. A shell command is no longer bold. An approval still
+  shows the command at full strength. A theme sets the new levels with `toolTitle`,
+  `toolArgs` and `toolOutput`; a theme without `toolArgs` keeps its `accent` for them. The
+  `ansi` theme has only the terminal's own two greys, so there a tool header stays at the
+  answer's strength and only its arguments and output step down.
+- `toolPendingBg` no longer colours anything, and a theme no longer needs it. A pi theme that
+  sets it still loads.
+
+### Fixed
+
+- `"theme"` in settings and `HX_THEME` choose the palette at startup again. Every session
+  opened in `dark` until `/theme` was run.
+
 ---
 
 ## [0.2.19] - 2026-10-22

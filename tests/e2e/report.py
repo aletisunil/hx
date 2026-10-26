@@ -196,6 +196,9 @@ pre { overflow-x: auto; max-width: 100%; }
 pre.term { position: relative; margin:0; padding: 0; background:var(--bg); color:var(--fg);
   font: 13px/1.25 ui-monospace, "SF Mono", Menlo, monospace; width: max-content;
   border: 1px solid var(--line); border-radius: 4px; --bg:#16181d; --fg:#dcdfe4; }
+/* A whole row tall, so a tinted run is one band rather than stripes with the
+   page showing between them. */
+pre.term span { display:inline-block; height:1.25em; vertical-align:top; }
 .cursor { position:absolute; left: calc(var(--x) * 1ch); top: calc(var(--y) * 1.25em);
   width: 1ch; height: 1.25em; outline: 1px solid #f0c674; pointer-events:none; }
 pre.out, pre.failure, details pre { background: var(--bg); color: var(--fg); padding: 8px;

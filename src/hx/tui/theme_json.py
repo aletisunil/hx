@@ -45,7 +45,14 @@ _DERIVED = {
     "diff_hunk": "md_link",
     "user_text": "text",
     "md_code_block_bg": "surface",
+    # Added after themes were being written. Tool arguments were the accent
+    # until then, so a file from before keeps painting them that way.
+    "tool_args": "accent",
 }
+
+#: Roles pi defines that nothing here reads any more. Accepted so its files
+#: still load, and dropped.
+_RETIRED = frozenset({"tool_pending_bg"})
 
 _FIELDS = frozenset(f.name for f in fields(Palette)) - {"name", "dark"}
 
@@ -92,6 +99,8 @@ def parse(data: dict[str, Any], *, name: str | None = None, source: str = "<memo
     resolved: dict[str, str] = {}
     for key, value in colors.items():
         field = _snake(key)
+        if field in _RETIRED:
+            continue
         if field not in _FIELDS:
             raise ValueError(f"{source}: unknown theme role {key!r}")
         resolved[field] = resolve(value, key)

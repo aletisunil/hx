@@ -2,8 +2,8 @@
 
 Four kinds, and the difference between them is carried by weight rather than
 by labels: the user's turn is a tinted block, the model's reply is bare text,
-a tool call is a block tinted by how it ended, and a notice is one line with a
-bullet.
+a tool call is a marker coloured by how it ended with its result hung under it,
+and a notice is one line with a bullet.
 
 That asymmetry between the user's block and the model's is the speaker
 distinction. It does not need a ``You:`` prefix, and a prefix would cost a
@@ -21,7 +21,16 @@ from hx.term.component import Widget
 from hx.term.markdown import render_markdown
 from hx.term.primitives import Box, HangingText, Lines
 from hx.term.sanitize import plain_text
-from hx.tui.glyphs import IMAGE, NOTICE, SPINNER, TOOL_AWAITING, TOOL_DONE, TOOL_FAILED
+from hx.term.width import cell_width
+from hx.tui.glyphs import (
+    IMAGE,
+    NOTICE,
+    SPINNER,
+    TOOL_AWAITING,
+    TOOL_DONE,
+    TOOL_FAILED,
+    TOOL_RESULT,
+)
 from hx.tui.limits import PREVIEW_LINES, STREAM_TAIL
 from hx.tui.paint import ThemePainter, fg, tint
 from hx.tui.renderers import (
@@ -156,16 +165,21 @@ def _stream_tail(text: str) -> str:
     return tail[tail.find("\n") + 1 :]
 
 
-BODY_INDENT = 2
-"""Cells a tool block's body sits in from its marker, under the header's text."""
+RESULT_INDENT = 2
+"""Cells the ``⎿`` sits in from the marker, under the header's text."""
+
+BODY_INDENT = RESULT_INDENT + cell_width(TOOL_RESULT)
+"""Cells a tool call's result sits in: past the ``⎿``, one left edge for every row."""
 
 
 class ToolBlock(Widget):
-    """One tool call: a header, optionally some output, tinted by its state.
+    """One tool call: a header behind a marker, and what came back hung under it.
 
-    The tint is the state machine. Running, succeeded and failed are three
-    backgrounds rather than three labels, so a long transcript can be skimmed
-    for the red one without reading any of it.
+    The marker is the state machine. Running, succeeded and failed are three
+    glyphs in three colours rather than three labels, so a long transcript can
+    be skimmed for the red one without reading any of it. There is no
+    background: a band the width of the terminal, three rows tall, for one
+    line of information made a run of calls the loudest thing on screen.
     """
 
     __slots__ = ("_awaiting", "_call", "_frame", "_stream", "_stream_dirty", "_streamed")
@@ -265,35 +279,35 @@ class ToolBlock(Widget):
     def draw(self, width: int) -> list[str]:
         self._fold_stream()
         state = self._state
-        marker, marker_role, background = {
-            "running": (SPINNER[self._frame], "accent", "tool_pending_bg"),
-            "awaiting": (TOOL_AWAITING, "warning", "tool_pending_bg"),
-            "done": (TOOL_DONE, "success", "tool_success_bg"),
-            "error": (TOOL_FAILED, "error", "tool_error_bg"),
+        marker, marker_role = {
+            "running": (SPINNER[self._frame], "accent"),
+            "awaiting": (TOOL_AWAITING, "warning"),
+            "done": (TOOL_DONE, "success"),
+            "error": (TOOL_FAILED, "error"),
             # Stopped, not failed: the warning the "Interrupted" line is drawn in.
-            "interrupted": (TOOL_FAILED, "warning", "tool_pending_bg"),
+            "interrupted": (TOOL_FAILED, "warning"),
         }[state]
 
         renderer = renderer_for(self._call.name)
-        lines = [fg(marker_role, f"{marker} ") + renderer.header(self._call)]
-        body = renderer.body(self._call)
-        if state == "error":
-            # An error is prose, and wraps like prose. Cut at the edge the way
-            # code is, "<long path> is a link to <long path>, and ... does not
-            # exist" lost exactly the part that said what was wrong.
-            room = max(1, width - 2 - BODY_INDENT)  # the box's padding, then the indent
-            body = [piece for line in body for piece in wrap(line, room)]
-        # The body is indented to sit under the header's text rather than under
-        # its marker, so the block has one left edge instead of two.
-        lines += [" " * BODY_INDENT + line for line in body]
+        # Wrapped, not cut at the edge. The end of a row is often the part that
+        # matters - the line a TODO is on, the "== 3" an assertion expected, the
+        # "does not exist" of an error - and the result starts 6 cells in.
+        room = max(1, width - 2 - BODY_INDENT)  # the padding, then the indent
+        result = [piece for line in renderer.result(self._call) for piece in wrap(line, room)]
         if self._call.interrupted:
             took = self._call.duration_ms
-            lines.append(
-                "  "
-                + fg("warning", f"Interrupted{f' after {format_duration(took)}' if took else ''}")
+            result.append(
+                fg("warning", f"Interrupted{f' after {format_duration(took)}' if took else ''}")
             )
 
-        return Box(1, 1, tint(background), Lines(lines, padding_x=0)).render(width)
+        lines = [fg(marker_role, f"{marker} ") + renderer.header(self._call)]
+        # Hung from the header's text rather than its marker, and every row of
+        # it on the same edge, so the result reads as one thing under one call.
+        for row, line in enumerate(result):
+            gutter = fg("dim", TOOL_RESULT) if row == 0 else " " * cell_width(TOOL_RESULT)
+            lines.append(" " * RESULT_INDENT + gutter + line)
+
+        return Lines(lines, padding_x=1).render(width)
 
 
 class Notice(Widget):

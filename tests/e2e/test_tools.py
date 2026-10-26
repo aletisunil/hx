@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from pathlib import Path
 
 from tests.e2e.conftest import HX, SANDBOX_STATUS, git
 from tests.e2e.stub import Stub, ToolCall, call, calls, say
@@ -177,14 +178,14 @@ def test_bash_output_in_the_transcript(hx: HX, stub: Stub) -> None:
     collapsed = term.text()
     # Collapsed to its tail: a command's answer is at the end of it.
     assert "… (32 more lines, ctrl+o to expand)" in collapsed
-    assert "\n   33\n" in collapsed and "\n   40\n" in collapsed
-    assert "\n   1\n" not in collapsed
+    assert "\n      33\n" in collapsed and "\n      40\n" in collapsed
+    assert "\n      1\n" not in collapsed
 
     term.press("ctrl+o")
     term.wait_for(lambda screen: "more lines" not in screen)
     term.snapshot("expanded shell output")
     expanded = term.scrollback()
-    assert "\n   1\n" in expanded and "\n   40\n" in expanded
+    assert "\n   ⎿  1\n" in expanded and "\n      40\n" in expanded
 
 
 def test_escape_during_a_tool_answers_every_call(hx: HX, stub: Stub) -> None:
@@ -523,3 +524,203 @@ def test_working_status_animates_while_tools_run(hx: HX, stub: Stub) -> None:
     term.settle(quiet=0.5)
     term.snapshot("after an approved ! command")
     assert "Working…" not in term.text(), "a shell line is not a turn"
+
+
+def _tool_block(lines: list[str], header: str) -> tuple[int, list[str]]:
+    """Where the call whose header starts with ``header`` is, and its rows up to the blank."""
+    start = next(y for y, line in enumerate(lines) if line.startswith(header))
+    end = lines.index("", start)
+    return start, lines[start:end]
+
+
+def test_long_output_wraps_on_the_result_edge(hx: HX, stub: Stub) -> None:
+    """Output too long for the row wraps under the ``⎿`` rather than being cut at the screen
+    edge, so the end of a row - often the part that matters - stays on screen. A word too long
+    for the row is broken, and a wrapped piece keeps the output's colour."""
+    report = [
+        "FAILED tests/test_invoices.py::test_retry_on_timeout - assert attempts == 3",
+        "src/app/api/routes.py:7:# TODO: rate limit by API key, not by IP - office NAT puts"
+        " everyone behind one address",
+        "see https://ci.example.com/builds/8412/artifacts/coverage/htmlcov/"
+        "src_app_services_invoices_py.html",
+        "1 failed, 41 passed in 0.92s",
+    ]
+    (hx.project / "report.txt").write_text("\n".join(report) + "\n")
+    stub.script(call("Bash", "Reading the report.", command="cat report.txt"), say("Read it."))
+    term = hx.tui(columns=80, rows=30)
+    term.submit("what failed?")
+    term.wait_for("Read it.")
+    term.settle()
+    term.snapshot("long output wrapped under the call, nothing cut at the edge")
+
+    _, block = _tool_block(term.lines(), " ● $ cat report.txt")
+    rows = block[1:-1]  # under the header, before "Took"
+    assert rows[0].startswith("   ⎿  ") and all(row.startswith("      ") for row in rows[1:])
+    assert all(len(row) < 80 for row in rows), "nothing reaches the edge, so nothing is cut"
+    assert len(rows) > len(report), "the long rows wrapped"
+    shown = "".join(row[6:] for row in rows).replace(" ", "")
+    assert shown == "".join(report).replace(" ", ""), "every character is on screen, in order"
+    assert _colours(_cells(term, "== 3")) == {TOOL_OUTPUT}, "the wrapped piece keeps its colour"
+
+
+def test_a_tool_call_hangs_its_result_under_its_header(hx: HX, stub: Stub) -> None:
+    """A tool call has no background. Its header is one row behind the marker, and what came
+    back hangs under it from a ``⎿``: the summary first, then any output, all on one left
+    edge. Calls are one blank row apart, and an error too long for the row wraps on that
+    same edge rather than off the screen."""
+    (hx.project / "a.py").write_text("TODO = 1\nTODO = 2\n")
+    (hx.project / "notes.txt").write_text("one\ntwo\nthree\n")
+    (hx.project / "listing").mkdir()
+    for name in ("alpha", "beta", "gamma"):
+        (hx.project / "listing" / name).write_text("")
+    missing = hx.project / "a-directory-with-a-name-long-enough-to-wrap" / "missing.txt"
+    stub.script(
+        calls(
+            ToolCall("Grep", {"pattern": "TODO", "path": str(hx.project)}),
+            ToolCall("Read", {"file_path": str(hx.project / "notes.txt")}),
+            ToolCall("Bash", {"command": "ls listing"}),
+            ToolCall("Read", {"file_path": str(missing)}),
+            text="Looking.",
+        ),
+        say("Looked."),
+    )
+    term = hx.tui(columns=80, rows=40)
+    term.submit("look around")
+    term.wait_for("Looked.")
+    term.settle()
+    term.snapshot("results hang under each call, with no background")
+    lines = term.lines()
+
+    grep_at, grep = _tool_block(lines, " ● grep TODO")
+    assert grep == [" ● grep TODO", "   ⎿  1 result"], "the summary moved off the header"
+    read_at, read = _tool_block(lines, " ● read notes.txt")
+    assert read == [" ● read notes.txt", "   ⎿  read 3 lines"]
+    bash_at, bash = _tool_block(lines, " ● $ ls listing")
+    assert bash[1:4] == ["   ⎿  alpha", "      beta", "      gamma"], "one left edge"
+    assert re.fullmatch(r"      Took [\d.]+m?s", bash[4]) and len(bash) == 5
+    error_at, error = _tool_block(lines, " ✗ read ")
+    assert error[1].startswith("   ⎿  ") and len(error) > 2, "the error wraps"
+    assert all(row.startswith("      ") and len(row) <= 80 for row in error[2:])
+    assert "missing.txt" in "".join(row.strip() for row in error[1:])
+
+    # One blank row between calls, not the padding rows a tinted band had.
+    assert read_at == grep_at + len(grep) + 1
+    assert bash_at == read_at + len(read) + 1
+    assert error_at == bash_at + len(bash) + 1
+    with term._lock:
+        painted = {
+            term.screen.buffer[y][x].bg
+            for y in range(grep_at, error_at + len(error))
+            for x in range(term.columns)
+        }
+    assert painted == {"default"}, "a tool call is drawn on the terminal's own background"
+
+
+DARK_THEME = Path(__file__).parents[2] / "src" / "hx" / "tui" / "themes" / "dark.json"
+
+
+def _dark(role: str) -> str:
+    """A dark theme role's colour, as pyte reports it: hex, without the ``#``."""
+    theme = json.loads(DARK_THEME.read_text())
+    value = theme["colors"][role]
+    return str(theme["vars"].get(value, value)).removeprefix("#").lower()
+
+
+ANSWER = "default"
+"""The model's prose is the terminal's own foreground, not the theme's ``text``."""
+TEXT, TOOL_TITLE, TOOL_ARGS, TOOL_OUTPUT, DIM = map(
+    _dark, ("text", "toolTitle", "toolArgs", "toolOutput", "dim")
+)
+
+
+def _cells(term: Terminal, text: str, *, last: bool = False) -> list:
+    """The screen cells showing ``text``: its first occurrence, or its last."""
+    with term._lock:
+        rows = range(term.rows - 1, -1, -1) if last else range(term.rows)
+        for y in rows:
+            line = term.screen.buffer[y]
+            row = "".join(line[x].data for x in range(term.columns))
+            if (x := row.find(text)) >= 0:
+                return [line[x + i] for i in range(len(text))]
+    raise AssertionError(f"{text!r} is not on screen:\n{term.text()}")
+
+
+def _colours(cells: list) -> set[str]:
+    return {cell.fg for cell in cells if cell.data.strip()}
+
+
+def test_a_tool_call_is_quieter_than_the_answer(hx: HX, stub: Stub) -> None:
+    """The answer is the brightest text on screen. A tool header is one step down, with the
+    shell command no longer bold, and what the call gave back is two steps down. The marker
+    keeps its colour, so a failed call still stands out."""
+    (hx.project / "src").mkdir()
+    (hx.project / "src" / "a.py").write_text("TODO = 1\n")
+    (hx.project / "listing").mkdir()
+    for name in ("alpha", "beta"):
+        (hx.project / "listing" / name).write_text("")
+    stub.script(
+        calls(
+            ToolCall("Grep", {"pattern": "TODO", "path": str(hx.project / "src")}),
+            ToolCall("Bash", {"command": "ls listing"}),
+            text="Looking first.",
+        ),
+        say("The answer is in src."),
+    )
+    term = hx.tui()
+    term.submit("look around")
+    term.wait_for("The answer is in src.")
+    term.settle()
+    term.snapshot("tool calls one step quieter than the answer")
+
+    assert _colours(_cells(term, "The answer is in src.")) == {ANSWER}
+    assert _colours(_cells(term, "Looking first.")) == {ANSWER}
+    verb = _cells(term, "grep TODO")[:4]
+    assert _colours(verb) == {TOOL_TITLE} and all(cell.bold for cell in verb)
+    assert _colours(_cells(term, "grep TODO")[5:]) == {TOOL_ARGS}
+    assert _colours(_cells(term, "1 result")) == {DIM}
+    command = _cells(term, "ls listing")
+    assert _colours(command) == {TOOL_TITLE}
+    assert not any(cell.bold for cell in command), "a shell command is not bold"
+    assert _colours(_cells(term, "$ ls")[:1]) == {TOOL_ARGS}
+    assert _colours(_cells(term, "alpha")) == {TOOL_OUTPUT}
+    assert _colours(_cells(term, "Took")) == {DIM}
+
+
+def test_an_approval_shows_the_command_at_full_strength(hx: HX, stub: Stub) -> None:
+    """The approval is where the command has to be read, so it keeps the answer's colour and
+    its bold. The same call in the transcript above it is the quieter tool header."""
+    stub.script(call("Bash", command="touch made.txt"), say("Made it."))
+    term = hx.tui()
+    term.submit("make a file")
+    term.wait_for("Permission needed")
+    term.settle()
+    term.snapshot("the approval at full strength, the call above it quieter")
+    # The approval is drawn above the held call, which waits at the foot of the transcript.
+    assert term.text().count("touch made.txt") == 2, "in the approval and in the transcript"
+    asked = _cells(term, "touch made.txt")
+    assert _colours(asked) == {TEXT} and all(cell.bold for cell in asked if cell.data.strip())
+    held = _cells(term, "touch made.txt", last=True)
+    assert _colours(held) == {TOOL_TITLE} and not any(cell.bold for cell in held)
+
+    term.type("y")
+    term.wait_for("Made it.")
+    assert (hx.project / "made.txt").exists()
+
+
+def test_a_theme_without_tool_args_borrows_its_accent(hx: HX, stub: Stub) -> None:
+    """A theme file written before ``toolArgs`` existed still loads, and paints a tool's
+    arguments in its accent, the way every theme did before. Its ``toolPendingBg``, which
+    nothing reads any more, does not stop it loading."""
+    theme = json.loads(DARK_THEME.read_text())
+    del theme["colors"]["toolArgs"]
+    theme["colors"]["toolPendingBg"] = "#282832"
+    theme["vars"]["accent"] = "#ff8800"
+    (hx.hx_home / "themes").mkdir(parents=True, exist_ok=True)
+    (hx.hx_home / "themes" / "older.json").write_text(json.dumps(theme))
+    stub.script(call("Grep", pattern="TODO"), say("Nothing to do."))
+    term = hx.tui(env={"HX_THEME": "older"})
+    term.submit("find the todos")
+    term.wait_for("Nothing to do.")
+    term.settle()
+    term.snapshot("an older theme file, arguments in its accent")
+    assert _colours(_cells(term, "grep TODO")[5:]) == {"ff8800"}

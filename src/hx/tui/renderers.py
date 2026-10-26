@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -91,8 +92,8 @@ def sanitized_fields(changes: dict[str, Any]) -> dict[str, Any]:
                 for key, item in (value or {}).items()
             }
         elif name == "summary" and isinstance(value, str):
-            # Drawn only into a header, which is one row: a raw break there
-            # splits the row, and the screen refuses the frame.
+            # Drawn as the one row under a header: a raw break there splits
+            # the row, and the screen refuses the frame.
             out[name] = single_row(plain_text(value))
         elif isinstance(value, str):
             out[name] = plain_text(value)
@@ -383,15 +384,50 @@ class ToolRenderer:
     that genuinely needs more room says so here, where it can be found.
     """
 
+    loud: bool = False
+    """Drawn for an approval rather than for the transcript.
+
+    In the transcript a call is a step quieter than the answer around it, so
+    the answer is what the eye lands on. An approval is the one place the call
+    is what has to be read, so there it is drawn at the answer's strength.
+    """
+
+    def for_approval(self) -> ToolRenderer:
+        """This renderer, drawing at full strength. The shape is the same."""
+        louder = copy(self)
+        louder.loud = True
+        return louder
+
+    @property
+    def _title(self) -> str:
+        return "text" if self.loud else "tool_title"
+
+    @property
+    def _args(self) -> str:
+        return "accent" if self.loud else "tool_args"
+
     def header(self, call: ToolCall) -> str:
         """The single line always on screen, collapsed or not."""
-        return fg("tool_title", self.verb or call.name.lower(), bold=True) + fg(
+        return fg(self._title, self.verb or call.name.lower(), bold=True) + fg(
             "muted", f" {_brief(call.params)}"
         )
 
+    def summary(self, call: ToolCall) -> str:
+        """One line on what came back, such as ``3 results``. Empty for none."""
+        return ""
+
     def body(self, call: ToolCall) -> list[str]:
-        """What sits under the header."""
+        """What the call gave back, shown under the summary."""
         return _plain_output(call, self.preview_lines)
+
+    def result(self, call: ToolCall) -> list[str]:
+        """Everything hung under the header: the summary first, then the body.
+
+        The summary used to end the header. It is what came back, not what was
+        asked, so it sits with the rest of what came back.
+        """
+        summary = self.summary(call)
+        return [fg("dim", summary), *self.body(call)] if summary else self.body(call)
 
     def detail(self, call: ToolCall) -> list[str]:
         """What an approval shows when asked to permit this call.
@@ -407,15 +443,16 @@ class ReadRenderer(ToolRenderer):
 
     def header(self, call: ToolCall) -> str:
         path = display_path(call.params.get("file_path") or call.params.get("path"), call.cwd)
-        header = fg("tool_title", "read ", bold=True) + fg("accent", path)
+        header = fg(self._title, "read ", bold=True) + fg(self._args, path)
         offset, limit = call.params.get("offset"), call.params.get("limit")
         if offset or limit:
             start = int(offset or 1)
             end = start + int(limit) - 1 if limit else ""
             header += fg("warning", f":{start}{f'-{end}' if end else ''}")
-        if call.finished and not call.is_error and call.summary:
-            header += fg("dim", f"  {call.summary}")
         return header
+
+    def summary(self, call: ToolCall) -> str:
+        return call.summary if call.finished and not call.is_error else ""
 
     def body(self, call: ToolCall) -> list[str]:
         """Collapsed reads show nothing: the model read the file, the user did not.
@@ -438,7 +475,7 @@ class WriteRenderer(ToolRenderer):
 
     def header(self, call: ToolCall) -> str:
         path = display_path(call.params.get("file_path"), call.cwd)
-        header = fg("tool_title", "write ", bold=True) + fg("accent", path)
+        header = fg(self._title, "write ", bold=True) + fg(self._args, path)
         content = str(call.params.get("content") or "")
         if content:
             header += fg("dim", f"  {count(len(content.splitlines()), 'line')}")
@@ -464,7 +501,7 @@ class EditRenderer(ToolRenderer):
 
     def header(self, call: ToolCall) -> str:
         path = display_path(call.params.get("file_path"), call.cwd)
-        header = fg("tool_title", "edit ", bold=True) + fg("accent", path)
+        header = fg(self._title, "edit ", bold=True) + fg(self._args, path)
         diff = self._diff(call)
         if diff:
             added, removed = count_changes(diff)
@@ -504,7 +541,11 @@ class BashRenderer(ToolRenderer):
         wrong place.
         """
         first, rest = self._command_lines(call)
-        header = fg("accent", BASH, bold=True) + fg("tool_title", first or ELLIPSIS, bold=True)
+        # Not bold in the transcript: a whole command in bold was the loudest
+        # thing on screen, louder than the answer it was run to find.
+        header = fg(self._args, BASH, bold=True) + fg(
+            self._title, first or ELLIPSIS, bold=self.loud
+        )
         if rest:
             header += fg("muted", f"  +{count(len(rest), 'line')}")
         if timeout := call.params.get("timeout"):
@@ -521,7 +562,7 @@ class BashRenderer(ToolRenderer):
     def _continuation(self, rest: list[str]) -> list[str]:
         # Under the first line's text, not under the `$`: one left edge.
         indent = " " * cell_width(BASH)
-        return [fg("tool_title", f"{indent}{line}", bold=True) for line in rest]
+        return [fg(self._title, f"{indent}{line}", bold=self.loud) for line in rest]
 
     def body(self, call: ToolCall) -> list[str]:
         """The tail, not the head: a command's answer is at the end of it.
@@ -556,30 +597,32 @@ class GrepRenderer(ToolRenderer):
     verb = "grep"
 
     def header(self, call: ToolCall) -> str:
-        header = fg("tool_title", "grep ", bold=True) + fg(
-            "accent", single_row(call.params.get("pattern"))
+        header = fg(self._title, "grep ", bold=True) + fg(
+            self._args, single_row(call.params.get("pattern"))
         )
         if shown := _elsewhere(call.params.get("path"), call.cwd):
             header += fg("muted", f" in {shown}")
         if glob := single_row(call.params.get("glob")):
             header += fg("muted", f" ({glob})")
-        if call.finished and call.summary:
-            header += fg("dim", f"  {call.summary}")
         return header
+
+    def summary(self, call: ToolCall) -> str:
+        return call.summary if call.finished else ""
 
 
 class GlobRenderer(ToolRenderer):
     verb = "glob"
 
     def header(self, call: ToolCall) -> str:
-        header = fg("tool_title", "glob ", bold=True) + fg(
-            "accent", single_row(call.params.get("pattern"))
+        header = fg(self._title, "glob ", bold=True) + fg(
+            self._args, single_row(call.params.get("pattern"))
         )
         if shown := _elsewhere(call.params.get("path"), call.cwd):
             header += fg("muted", f" in {shown}")
-        if call.finished and call.summary:
-            header += fg("dim", f"  {call.summary}")
         return header
+
+    def summary(self, call: ToolCall) -> str:
+        return call.summary if call.finished else ""
 
 
 class TodoRenderer(ToolRenderer):
@@ -592,10 +635,10 @@ class TodoRenderer(ToolRenderer):
     }
 
     def header(self, call: ToolCall) -> str:
-        header = fg("tool_title", "todos", bold=True)
-        if call.summary:
-            header += fg("dim", f"  {call.summary}")
-        return header
+        return fg(self._title, "todos", bold=True)
+
+    def summary(self, call: ToolCall) -> str:
+        return call.summary
 
     def body(self, call: ToolCall) -> list[str]:
         """The list itself, not ``todos=[3 items]``. A plan is worth reading.
@@ -647,20 +690,21 @@ class SymbolsRenderer(ToolRenderer):
         # The subject is the symbol for a search and the file for an outline -
         # whichever one the user would name if they described the call.
         subject = single_row(call.params.get("symbol"))
-        header = fg("tool_title", f"symbols {mode} ", bold=True) + fg("accent", subject)
+        header = fg(self._title, f"symbols {mode} ", bold=True) + fg(self._args, subject)
         if shown := _elsewhere(call.params.get("file_path") or call.params.get("path"), call.cwd):
             header += fg("muted", f"{' in ' if subject else ''}{shown}")
-        if call.finished and call.summary:
-            header += fg("dim", f"  {call.summary}")
         return header
+
+    def summary(self, call: ToolCall) -> str:
+        return call.summary if call.finished else ""
 
 
 class TaskRenderer(ToolRenderer):
     verb = "task"
 
     def header(self, call: ToolCall) -> str:
-        header = fg("tool_title", "task ", bold=True) + fg(
-            "accent", single_row(call.params.get("subagent_type")) or "agent"
+        header = fg(self._title, "task ", bold=True) + fg(
+            self._args, single_row(call.params.get("subagent_type")) or "agent"
         )
         if description := single_row(call.params.get("description")):
             header += fg("muted", f"  {description}")

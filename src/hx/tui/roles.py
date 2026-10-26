@@ -29,7 +29,8 @@ class Palette:
     custom_message_bg: str
     custom_message_text: str
     custom_message_label: str
-    tool_pending_bg: str
+    # pi's names. Tool calls have no background now; these mark the words an
+    # edit added and removed.
     tool_success_bg: str
     tool_error_bg: str
     selected_bg: str
@@ -56,8 +57,9 @@ class Palette:
     scrollbar_track: str
     scrollbar_thumb: str
 
-    # Tool blocks.
+    # Tool blocks. A step below the answer, and what came back a step below that.
     tool_title: str
+    tool_args: str
     tool_output: str
 
     # Markdown.

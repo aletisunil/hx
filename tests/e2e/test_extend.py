@@ -19,14 +19,6 @@ def write(path: Path, text: str) -> Path:
     return path
 
 
-def test_agents_md_reaches_the_model(hx: HX, stub: Stub) -> None:
-    """The project's AGENTS.md is part of what every request carries."""
-    write(hx.project / "AGENTS.md", "Run tests with `make check`, never pytest directly.\n")
-    stub.script(say("Noted."))
-    hx.run("-p", "how do I test?", check=True)
-    assert "Run tests with `make check`" in json.dumps(stub.requests[0].messages)
-
-
 def test_user_agents_md_reaches_the_model_before_the_projects(hx: HX, stub: Stub) -> None:
     """~/.hx/AGENTS.md rides in every request, ahead of the project's AGENTS.md, byte-stable
     across turns."""

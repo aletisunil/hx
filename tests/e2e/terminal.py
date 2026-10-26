@@ -482,6 +482,17 @@ def _row_html(line: Any, columns: int) -> str:
         if char.strikethrough:
             parts.append("text-decoration:line-through")
         cell_style = ";".join(parts)
+        if char.data == "":
+            continue  # the right half of a wide character, drawn with its left
+        if not char.data.isascii():
+            # Pinned to its cells. A glyph the monospace font lacks, ``⎿`` or
+            # ``●``, comes from a fallback font at its own width, and drawn in
+            # a run it pushed the rest of the row off the terminal's grid.
+            flush()
+            cells = 2 if x + 1 < columns and line[x + 1].data == "" else 1
+            pinned = f"display:inline-block;width:{cells}ch;{cell_style}"
+            out.append(f'<span style="{pinned}">{html.escape(char.data)}</span>')
+            continue
         if cell_style != style:
             flush()
             style = cell_style

@@ -32,10 +32,10 @@
 		"customMessageBg": "default",
 		"customMessageText": "default",
 		"customMessageLabel": "ansi_magenta",
-		"toolPendingBg": "default",
 		"toolSuccessBg": "default",
 		"toolErrorBg": "default",
 		"toolTitle": "default",
+		"toolArgs": "ansi_cyan",
 		"toolOutput": "faint",
 
 		"mdHeading": "ansi_yellow",

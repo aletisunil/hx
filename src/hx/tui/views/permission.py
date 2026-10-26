@@ -218,7 +218,7 @@ class PermissionPrompt(Widget, Framed):
             )
         )
         if kind == "command":
-            return renderer_for(self.request.tool_name).detail(call)
+            return renderer_for(self.request.tool_name).for_approval().detail(call)
         return [fg("text", line) for line in detail.split("\n")]
 
     def _target(self) -> str:
