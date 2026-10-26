@@ -26,6 +26,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.2.20] - 2026-10-26
+
 ### Changed
 
 - A tool call is one row with no background: a coloured marker shows how it ended, and what came
@@ -1033,7 +1037,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.19...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.20...HEAD
+[0.2.20]: https://github.com/aletisunil/hx/compare/v0.2.19...v0.2.20
 [0.2.19]: https://github.com/aletisunil/hx/compare/v0.2.18...v0.2.19
 [0.2.18]: https://github.com/aletisunil/hx/compare/v0.2.17...v0.2.18
 [0.2.17]: https://github.com/aletisunil/hx/compare/v0.2.16...v0.2.17
