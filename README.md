@@ -1285,30 +1285,39 @@ imports `tui/`.
 ## Releasing
 
 For maintainers. HX is published to npm as **`@sunilaleti/hx`**, on the
-`latest` tag. Every version is a stable release; there is no beta channel.
+`latest` tag, by CI. Every version is a stable release; there is no beta
+channel.
+
+A push to `main` whose `package.json` version is not on npm yet is a release:
+once lint, the test suite and the install script pass, CI's `release` job
+publishes it to npm, tags it `vX.Y.Z` and makes the GitHub release, with the
+version's `CHANGELOG.md` section as its notes. A push that leaves the version
+alone publishes nothing.
 
 ```sh
 # 1. move CHANGELOG.md's [Unreleased] entries under the new version, dated,
 #    and leave a fresh empty [Unreleased] behind
-# 2. bump "version" in package.json (npm version X.Y.Z --no-git-tag-version)
-# 3. npm run e2e        # the whole suite; the version must have a section
+# 2. bump "version" in package.json
+npm version X.Y.Z --no-git-tag-version
+# 3. the whole suite; the version must have a CHANGELOG section
+npm run e2e
 git commit -am "chore(release): X.Y.Z"
-npm login             # once, as sunilaleti
-npm publish           # runs check and build first (prepublishOnly)
-git tag vX.Y.Z && git push origin main --tags
+git push origin main
 ```
 
 Step 1 is not optional and is not a convention: `tests/e2e/test_cli.py` fails the
-whole suite when the version has no `CHANGELOG.md` section. The file ships
-inside the bundle and `hx changelog` prints it, so a version with no section
-there reaches users as a blank release.
+whole suite when the version has no `CHANGELOG.md` section, and the `release`
+job checks again before it publishes. The file ships inside the bundle and
+`hx changelog` prints it, so a version with no section there would reach users
+as a blank release.
 
-The tag starts CI's `release` job, after lint, the test suite and an
-install-script run in a clean container have passed. It builds the bundle,
-checks that its version matches the tag and has a `CHANGELOG.md` section, and
-creates the GitHub release with that section as its notes.
+One-time setup: CI publishes with npm's
+[trusted publishing](https://docs.npmjs.com/trusted-publishers), so no npm
+token is stored anywhere. On npmjs.com, open `@sunilaleti/hx` → Settings →
+Trusted Publisher, choose GitHub Actions, and enter owner `aletisunil`,
+repository `hx` and workflow `ci.yml`, with no environment.
 
-To see what npm would ship before publishing:
+To see what npm would ship before releasing:
 
 ```sh
 npm pack --dry-run

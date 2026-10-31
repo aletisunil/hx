@@ -38,8 +38,9 @@ wherever the result reaches a user or a file.
 
 ## Publishing
 
-See [Releasing](../README.md#releasing) in the README. Every version is a
-stable release on npm's `latest` tag. The `next` tag was the beta channel up to
+See [Releasing](../README.md#releasing) in the README: CI publishes every
+version bump that reaches `main`. Every version is a stable release on npm's
+`latest` tag. The `next` tag was the beta channel up to
 `0.3.0-beta.1`; once 1.0.0 is out, remove it, so nothing points at the beta:
 
 ```sh
