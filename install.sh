@@ -136,8 +136,9 @@ banner() {
 }
 
 ensure_node() {
-    have node && have npm ||
+    if ! have node || ! have npm; then
         die "HX needs Node.js $HX_NODE_MAJOR.$HX_NODE_MINOR or newer, with npm. Install it from https://nodejs.org/ and re-run."
+    fi
     version=$(node --version)
     major=$(printf '%s' "$version" | sed 's/^v\([0-9]*\)\..*/\1/')
     minor=$(printf '%s' "$version" | sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/')
