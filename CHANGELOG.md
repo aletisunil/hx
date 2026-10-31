@@ -3,14 +3,14 @@
 What shipped in each released version of HX, newest first.
 
 This file is the release record and part of the product: it ships inside the
-wheel, `hx changelog` prints it, and a session can answer "what's new?" or
+package, `hx changelog` prints it, and a session can answer "what's new?" or
 "which version added web search?" from it rather than from a guess. `hx docs`
 prints the manual next to it.
 
 The rules, enforced by `tests/e2e/test_cli.py` so a release cannot forget them:
 
 - Every released version has a `## [x.y.z] - YYYY-MM-DD` section here, and the
-  version in `src/hx/__init__.py` always has one. Bumping the version without
+  version in `package.json` always has one. Bumping the version without
   writing the section fails the suite before the tag exists.
 - Work that has landed but is not tagged lives under `## [Unreleased]`. At
   release time that heading is renamed to the new version and dated, and a
@@ -25,6 +25,23 @@ the project follows [semantic versioning](https://semver.org/).
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.3.0-beta.1] - 2026-10-31
+
+### Changed
+
+- HX is rewritten in TypeScript and runs on Node.js 22.15 or newer. Install it with
+  `npm install --global @sunilaleti/hx@next`, and `hx upgrade` updates it through npm. The
+  commands, keys, screens, settings and `~/.hx` are the same, so a session started on the Python
+  build resumes here and the other way round.
+- The Symbols tool takes its grammars from `npm install --global @vscode/tree-sitter-wasm`.
+
+### Fixed
+
+- An OpenRouter reply that broke off after its first words is no longer retried from the start,
+  which showed those words twice.
 
 ---
 
@@ -1037,7 +1054,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.2.20...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v0.3.0-beta.1...HEAD
+[0.3.0-beta.1]: https://github.com/aletisunil/hx/compare/v0.2.20...v0.3.0-beta.1
 [0.2.20]: https://github.com/aletisunil/hx/compare/v0.2.19...v0.2.20
 [0.2.19]: https://github.com/aletisunil/hx/compare/v0.2.18...v0.2.19
 [0.2.18]: https://github.com/aletisunil/hx/compare/v0.2.17...v0.2.18

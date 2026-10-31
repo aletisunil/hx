@@ -1,6 +1,6 @@
 {
-  "name": "@aletisunil/hx",
-  "version": "0.2.20",
+  "name": "@sunilaleti/hx",
+  "version": "0.3.0-beta.1",
   "description": "HX - an agent harness for the terminal",
   "license": "MIT",
   "author": "Sunil Aleti",
@@ -30,11 +30,15 @@
   "engines": {
     "node": ">=22.15"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "check": "tsc --noEmit && biome check . && node scripts/check-literals.mjs",
     "format": "biome format --write .",
-    "e2e": "npm run build && HX_E2E_BIN=dist/hx.js HX_E2E_REPORT=e2e-report-ts uv run pytest $(cat tests/e2e/typescript.txt)"
+    "e2e": "npm run build && HX_E2E_BIN=dist/hx.js HX_E2E_REPORT=e2e-report-ts uv run pytest $(cat tests/e2e/typescript.txt)",
+    "prepublishOnly": "npm run check && npm run build"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.4",

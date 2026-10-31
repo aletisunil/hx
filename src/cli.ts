@@ -9,7 +9,7 @@
  * `hx mcp ...`         manage MCP servers
  * `hx docs [section]`  print the shipped manual
  * `hx changelog [ver]` print what shipped in each version
- * `hx upgrade`         self-update
+ * `hx upgrade`         self-update via npm
  *
  * Print mode exists so the harness is scriptable and E2E-testable without
  * driving a terminal UI.
@@ -59,7 +59,7 @@ import { buildRuntime, type Runtime } from "./runtime.ts";
 import { count } from "./text.ts";
 import { buildTrace, defaultTracePath, TRACE_FILENAME, writeTrace } from "./trace.ts";
 import { runSession } from "./tui/runtime.ts";
-import { VERSION } from "./version.ts";
+import { PACKAGE, VERSION } from "./version.ts";
 
 export const USAGE = `\
 hx - an agent harness for the terminal
@@ -168,21 +168,29 @@ async function dispatch(args: string[]): Promise<number> {
       return runMcpCommand(parsed.rest);
     case "trace":
       return runTraceCommand(parsed);
-    case "tui":
-    case "resume":
-      return runTuiCommand(parsed);
+    case "upgrade":
+      return runUpgradeCommand();
     default:
-      return notPorted(parsed.command);
+      return runTuiCommand(parsed);
   }
 }
 
 /**
- * The commands still to come across from the Python build. Said plainly, so a
- * half-finished build can never be mistaken for a working one.
+ * `hx upgrade`: install the newest release with npm, on the channel this one
+ * came from - a beta follows `next`, a release follows `latest`.
  */
-function notPorted(command: string): number {
-  print(`error: \`hx ${command}\` is not ported to the TypeScript build yet`, process.stderr);
-  return 70;
+function runUpgradeCommand(): number {
+  const channel = VERSION.includes("-") ? "next" : "latest";
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const result = spawnSync(npm, ["install", "--global", `${PACKAGE}@${channel}`], {
+    stdio: "inherit",
+  });
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+    print("npm is not installed. See https://nodejs.org/", process.stderr);
+    return 1;
+  }
+  if (result.error) throw result.error;
+  return result.status ?? 1;
 }
 
 export function parseArgs(args: string[]): ParsedArgs {

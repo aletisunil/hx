@@ -11,42 +11,35 @@ a sandboxed shell, and shows you what every turn costs.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/aletisunil/hx/main/install.sh | sh
+npm install --global @sunilaleti/hx@next
 ```
 
-The script bootstraps [uv](https://docs.astral.sh/uv/) if you don't have it,
-then installs HX as an isolated tool with a pinned Python. Re-running it
-upgrades in place.
+HX runs on [Node.js](https://nodejs.org/) 22.15 or newer, on macOS and Linux.
+Update with `hx upgrade`. The `@next` tag is the beta channel while the
+TypeScript build is being tested; a beta upgrades to the next beta.
 
-If you'd rather not pipe a script into a shell:
+### `@sunilaleti/hx` on npm, `hx` in your terminal
 
-```sh
-uv tool install hx-cli      # or: pipx install hx-cli
-```
-
-### `hx-cli` on PyPI, `hx` in your terminal
-
-The package is published as **`hx-cli`**. The command it installs is **`hx`**,
-and that is what you type — the longer name never appears again after install.
-
-The plain name `hx` on PyPI is registered by someone else and has no releases,
-so `uv tool install hx` fails with "no versions of hx". Install `hx-cli`.
+The package is published as **`@sunilaleti/hx`**. The command it installs is
+**`hx`**, and that is what you type - the longer name never appears again
+after install. The plain name `hx` on npm belongs to another package.
 
 | | Name |
 |---|---|
-| PyPI package | `hx-cli` |
+| npm package | `@sunilaleti/hx` |
 | Command | `hx` |
-| Python import | `hx` |
 | Config directory | `~/.hx` |
 
-If the command isn't found after installing, add uv's bin directory to your
-`PATH`:
+If the command isn't found after installing, add npm's global bin directory
+to your `PATH`:
 
 ```sh
-export PATH="$(uv tool dir --bin):$PATH"
+export PATH="$(npm prefix --global)/bin:$PATH"
 ```
 
-Requires Python 3.11+. macOS and Linux. Update with `hx upgrade`.
+The Python build, `hx-cli` on PyPI, keeps working on the same `~/.hx`:
+sessions, sign-ins and settings carry over in both directions. Install one or
+the other - both put a command named `hx` on your `PATH`.
 
 ### Credentials
 
@@ -1033,7 +1026,7 @@ registered without them — its schema never enters the cached prefix advertisin
 something that cannot run:
 
 ```sh
-uv tool install "hx-cli[symbols]"
+npm install --global @vscode/tree-sitter-wasm
 ```
 
 ---
