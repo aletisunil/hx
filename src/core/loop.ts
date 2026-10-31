@@ -436,15 +436,17 @@ export class AgentLoop {
   /**
    * Rename a session for what it turned into, as the user leaves it - only
    * when the conversation changed since the name was written, never over a
-   * name the user chose.
+   * name the user chose. Detached from any turn, so it takes a signal of its
+   * own: an interrupted turn must not cancel the rename that follows it.
    */
-  async retitleSession(target: Session): Promise<void> {
+  async retitleSession(target: Session, signal: AbortSignal = this.signal): Promise<void> {
     if (this.origin !== null || target.meta.titlePinned) return;
     const messages = this.nameableMessages(target);
     if (messages === null) return;
     const promptCount = target.meta.promptCount;
     if (promptCount === target.meta.titlePromptCount) return;
-    const title = await this.askForTitle(messages, target);
+    const title = await this.askForTitle(messages, target, signal);
+    // The user may have named it while the call was out; their name stands.
     if (title && !target.meta.titlePinned) target.setTitle(title, { promptCount });
   }
 
@@ -455,14 +457,18 @@ export class AgentLoop {
 
   /** One tiny provider call. `null` if it produced nothing usable. Billed to
    * the session being named, which is not always the live one. */
-  private async askForTitle(messages: Message[], session: Session): Promise<string | null> {
+  private async askForTitle(
+    messages: Message[],
+    session: Session,
+    signal: AbortSignal = this.signal,
+  ): Promise<string | null> {
     let title: string | null;
     let usage: TurnUsage;
     try {
       const model = this.settings.models.titleModel || this.model;
-      [title, usage] = await generateTitle(this.provider, model, messages, this.signal);
+      [title, usage] = await generateTitle(this.provider, model, messages, signal);
     } catch (error) {
-      if (this.signal.aborted) throw error;
+      if (signal.aborted) throw error;
       return null;
     }
     if (usage.inputTokens + usage.cacheReadTokens || usage.outputTokens)

@@ -125,3 +125,13 @@ export function readText(path: string): string {
   );
   return text.replace(/\r\n?/g, "\n");
 }
+
+/**
+ * `PurePath.relative_to(base)` for two normalised absolute paths, or `null`
+ * where Python raises `ValueError`. The same path is `.`.
+ */
+export function relativeTo(path: string, base: string): string | null {
+  if (path === base) return ".";
+  if (base === "/") return path.startsWith("/") ? path.slice(1) : null;
+  return path.startsWith(`${base}/`) ? path.slice(base.length + 1) : null;
+}

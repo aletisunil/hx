@@ -15,6 +15,8 @@
  * driving a terminal UI.
  */
 
+import { spawnSync } from "node:child_process";
+import { constants } from "node:os";
 import * as claudeCode from "./auth/claude_code.ts";
 import { CallbackError, type LoginInteraction, OAuthError } from "./auth/oauth/browser.ts";
 import * as codexOAuth from "./auth/oauth/codex.ts";
@@ -25,16 +27,17 @@ import { EndOfInput, getpass, Interrupted, input, stdinIsTty } from "./console.t
 import { loadInstructions, resolveSystemPrompt } from "./core/context.ts";
 import { ImageError, loadImageFile } from "./core/images.ts";
 import type { ImageBlock } from "./core/messages.ts";
-import { latestSession } from "./core/session.ts";
+import { latestSession, readMeta, SessionNotFound } from "./core/session.ts";
 import { changelog, DocsUnavailable, docText, manual, README } from "./docs.ts";
 import { describe } from "./net.ts";
-import { absolute, expandUser, readText } from "./pathlib.ts";
+import { absolute, expandUser, isDir, readText } from "./pathlib.ts";
 import { authFile } from "./paths.ts";
 import { ModelRegistry } from "./providers/models.ts";
 import { saveApiKey } from "./providers/openrouter.ts";
 import * as registry from "./providers/registry.ts";
 import { formatFixed, osErrorText, purePath, repr, strip } from "./py.ts";
 import { buildRuntime, type Runtime } from "./runtime.ts";
+import { runSession } from "./tui/runtime.ts";
 import { VERSION } from "./version.ts";
 
 export const USAGE = `\
@@ -140,6 +143,9 @@ async function dispatch(args: string[]): Promise<number> {
       return runAuthCommand(parsed.rest);
     case "print":
       return runPrintCommand(parsed);
+    case "tui":
+    case "resume":
+      return runTuiCommand(parsed);
     default:
       return notPorted(parsed.command);
   }
@@ -762,6 +768,149 @@ async function runPrintCommand(parsed: ParsedArgs): Promise<number> {
     process.stderr,
   );
   return result.error ? 1 : 0;
+}
+
+/** Boot the full stack - settings, provider, tools, MCP, skills - and run the TUI. */
+async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
+  // Taken before anything starts, so no tool, MCP server or nested hx inherits it.
+  const renameLeft = process.env[RENAME_LEFT_ENV] ?? null;
+  delete process.env[RENAME_LEFT_ENV];
+  let runtime: Runtime;
+  let resume: string | null = null;
+  let moved: string | null = null;
+  try {
+    resume = resumeTarget(parsed);
+    moved = adoptSessionDirectory(parsed, resume);
+    runtime = buildRuntime(parsed, resume);
+  } catch (error) {
+    if (!(error instanceof MissingCredential)) return report(error);
+    // Onboard for the route the configured model needs, not always for
+    // OpenRouter: a user set to a Codex model wants a sign-in, not a key.
+    if ((await runLogin(error.providerId)) !== 0) return report(error);
+    try {
+      runtime = buildRuntime(parsed, resume);
+    } catch (retry) {
+      return report(retry);
+    }
+  }
+  if (moved) runtime.notices.push(moved);
+
+  let relaunch: string | null = null;
+  try {
+    await runtime.connectMcp();
+    await runtime.refreshModelsIfStale();
+    relaunch = await runSession(runtime.loop, runtime.bus, runtime.settings, {
+      models: runtime.models,
+      auth: runtime.auth,
+      sandboxActive: runtime.sandboxActive,
+      sandboxBackend: runtime.sandboxBackend,
+      skills: runtime.skills,
+      agents: runtime.agents,
+      notices: runtime.notices,
+      checkpoints: runtime.checkpoints,
+      renameLeft,
+    });
+  } finally {
+    runtime.bus.close();
+    // Everything, not only the provider: a background job left running would
+    // outlive the session that started it.
+    await runtime.aclose();
+  }
+  if (relaunch === null) return 0;
+  const left = runtime.loop.session;
+  return relaunchInto(relaunch, left.messages.length ? left.meta.sessionId : null);
+}
+
+/**
+ * Run `hx resume <id>` in the directory the session was recorded in: its
+ * paths, tool calls and grants all mean something there. An explicit `--cwd`
+ * still wins. Returns a notice when that directory is gone.
+ */
+function adoptSessionDirectory(parsed: ParsedArgs, sessionId: string | null): string | null {
+  if (sessionId === null || parsed.cwd !== null) return null;
+  let recorded: string;
+  try {
+    recorded = readMeta(sessionId).cwd;
+  } catch (error) {
+    if (error instanceof SessionNotFound) return null; // buildRuntime reports it
+    throw error;
+  }
+  if (isDir(recorded)) {
+    parsed.cwd = recorded;
+    return null;
+  }
+  return `This session was recorded in ${recorded}, which no longer exists; resumed here.`;
+}
+
+const osSignals = constants.signals as Record<string, number>;
+
+/** The run options that take the next argument as their value. */
+const RUN_OPTIONS_WITH_VALUES = new Set([
+  "--model",
+  "--mode",
+  "--cwd",
+  "--system-prompt",
+  "--append-system-prompt",
+  "--image",
+]);
+
+/**
+ * The arguments to start HX again on `sessionId`. The run's own options carry
+ * over; what picked the old session - `resume` and its id, and `--cwd` - does not.
+ */
+export function relaunchArgv(argv: readonly string[], sessionId: string): string[] {
+  const kept: string[] = [];
+  let index = 0;
+  while (index < argv.length) {
+    const arg = argv[index] as string;
+    if (arg === "--cwd") {
+      index += 2;
+      continue;
+    }
+    if (RUN_OPTIONS_WITH_VALUES.has(arg)) {
+      kept.push(...argv.slice(index, index + 2));
+      index += 2;
+      continue;
+    }
+    if (arg === "resume") {
+      index++;
+      if (index < argv.length && !(argv[index] as string).startsWith("-")) index++;
+      continue;
+    }
+    kept.push(arg);
+    index++;
+  }
+  return [...kept, "resume", sessionId];
+}
+
+/**
+ * The session a relaunch left behind, handed to the HX that replaces it, so
+ * the new process renames it as `/clear` and `/resume` rename theirs.
+ */
+export const RENAME_LEFT_ENV = "HX_RENAME_LEFT_SESSION";
+
+/**
+ * Start HX again, resumed on `sessionId`, and hand the terminal to it until
+ * it exits. Node cannot replace its own process image, so the new HX runs as
+ * a child with this one's terminal, from the directory this one was started
+ * in, and its exit status is this one's. `left` is the session being left,
+ * for the new process to rename.
+ */
+function relaunchInto(sessionId: string, left: string | null): number {
+  const env = { ...process.env };
+  if (left !== null) env[RENAME_LEFT_ENV] = left;
+  const child = spawnSync(
+    process.execPath,
+    [
+      ...process.execArgv,
+      process.argv[1] as string,
+      ...relaunchArgv(process.argv.slice(2), sessionId),
+    ],
+    { stdio: "inherit", env },
+  );
+  if (child.error) throw child.error;
+  if (child.signal) return 128 + (osSignals[child.signal] ?? 0);
+  return child.status ?? 1;
 }
 
 /** Resolve `hx resume [id]` to a session id, newest-first when omitted. */

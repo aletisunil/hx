@@ -158,6 +158,9 @@ export class OpenRouterProvider implements Provider {
           }
           yield* state.consume(chunk);
         }
+        // An aborted response ends its body rather than failing it, and a
+        // stream cut off is not one that finished.
+        if (signal.aborted) throw signal.reason;
       } catch (error) {
         if (signal.aborted || error instanceof ProviderError) throw error;
         throw new ProviderError((error as Error).message, { retryable: true });

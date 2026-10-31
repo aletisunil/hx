@@ -19,6 +19,6 @@ await build({
   define: { __HX_VERSION__: JSON.stringify(version) },
   sourcemap: "linked",
   // Native code, loaded from node_modules at run time rather than bundled.
-  external: ["sharp"],
+  external: ["sharp", "koffi"],
   logLevel: "warning",
 });

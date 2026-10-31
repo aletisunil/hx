@@ -38,11 +38,15 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.4",
+    "@types/markdown-it": "14.2.0",
     "@types/node": "22.20.5",
     "esbuild": "0.28.2",
     "typescript": "7.0.2"
   },
   "dependencies": {
+    "highlight.js": "11.12.0",
+    "koffi": "3.3.2",
+    "markdown-it": "14.3.2",
     "sharp": "0.35.5",
     "yaml": "2.9.1"
   }

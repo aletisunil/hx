@@ -9,7 +9,7 @@
  */
 
 /** Characters `str.isspace()` accepts. JavaScript's `\s` adds U+FEFF and drops U+001C-U+001F and U+0085. */
-const SPACE =
+export const SPACE =
   "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000";
 
 export function isSpace(char: string): boolean {
@@ -382,6 +382,28 @@ export function pyReplace(text: string, old: string, replacement: string, count 
     if (index < 0) break;
     out = out.slice(0, index) + replacement + out.slice(index + old.length);
     from = index + replacement.length;
+  }
+  return out;
+}
+
+/** `str.expandtabs(size)`: tab stops every `size` columns, counted from each line start. */
+export function expandTabs(text: string, size = 8): string {
+  let out = "";
+  let column = 0;
+  for (const char of text) {
+    if (char === "\t") {
+      if (size > 0) {
+        const pad = size - (column % size);
+        out += " ".repeat(pad);
+        column += pad;
+      }
+    } else if (char === "\n" || char === "\r") {
+      out += char;
+      column = 0;
+    } else {
+      out += char;
+      column++;
+    }
   }
   return out;
 }

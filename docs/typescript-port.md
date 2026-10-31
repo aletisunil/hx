@@ -43,9 +43,9 @@ wherever the result reaches a user or a file.
 |---|---|---|---|
 | 0 | Harness, scaffold, `--version`, `--help`, `docs`, `changelog`, `prompt` | 7 of `test_cli` | done |
 | 1 | Config, auth and logins, TLS, OpenRouter, models, sessions, the agent loop, tools, permissions, sandbox, hooks, skills, subagents, web search, `-p` | every test that does not open the TUI, bar MCP and trace | done |
-| 2 | Terminal renderer, keys, editor, markdown, TUI views, slash commands | `test_chat`, `test_input`, `test_queue`, `test_commands`, `test_plan_usage`, the TUI tests in `test_tools`, `test_edits`, `test_reads`, `test_shell` | |
-| 3 | MCP, `hx mcp`, `hx trace`, the Symbols tool | `test_extend`, the rest of `test_cli` | |
-| 4 | Codex, Claude Code and Devin providers; live tests | `test_claude_code` | |
+| 2 | Terminal renderer, keys, editor, markdown, TUI views, slash commands | `test_chat`, `test_input`, `test_queue`, `test_commands`, the TUI tests in `test_tools`, `test_edits`, `test_reads`, `test_shell`, `test_extend` | done |
+| 3 | MCP, `hx mcp`, `hx trace` and `/trace`, the Symbols tool | the rest of `test_extend` and `test_cli`, `test_trace_writes_a_self_contained_page` | |
+| 4 | Codex, Claude Code and Devin providers; live tests | `test_claude_code`, `test_plan_usage`, `test_effort_carries_into_every_new_session` | |
 | 5 | Delete the Python build; npm release, `install.sh`, `hx upgrade` | the whole suite | |
 
 ## Known differences
@@ -68,6 +68,21 @@ reaches:
 - Grep's built-in search, used when `rg` is not on `PATH`, runs JavaScript
   regular expressions. Python's `(?P<name>)`, `(?P=name)`, `\A` and `\Z` are
   translated; anything else outside the common subset is reported as invalid.
+
+- `@/abs…` in the prompt completes nothing. Python's `pathlib` raised on an
+  absolute pattern there.
+- `/resume` into another directory starts the new HX as a child process that
+  takes over the terminal. Python replaced its own process with `exec`, which
+  Node cannot do; the exit status is passed through.
+
+Bugs in the Python build that are kept, so the two builds stay comparable
+until the cutover, and then fixed:
+
+- `/mouse` toggles mouse reporting but then says the terminal driver has none.
+- `ctrl+t` and `/todos` say "No plan yet." even when the model wrote one: they
+  read a plan the session never holds.
+- Startup notices (a moved permission grant, a TLS override, a failed
+  catalogue refresh) are collected but never shown in the TUI.
 
 Behaviour that was a bug in the Python build and is not carried over:
 

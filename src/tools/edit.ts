@@ -373,7 +373,7 @@ class KeyError extends Error {
   }
 }
 
-const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+export const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 /** One meaningful line of a unified diff. */
 export interface DiffRow {

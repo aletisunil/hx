@@ -1,7 +1,14 @@
 {
   "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
   "files": {
-    "includes": ["src/**/*.ts", "scripts/**/*.mjs", "*.json", "!src/hx", "!src/tui/themes"]
+    "includes": [
+      "src/**/*.ts",
+      "scripts/**/*.mjs",
+      "*.json",
+      "!src/hx",
+      "!src/tui/themes",
+      "!src/term/unicode-tables.ts"
+    ]
   },
   "formatter": {
     "indentStyle": "space",
