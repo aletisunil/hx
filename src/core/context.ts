@@ -7,9 +7,10 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readdirSync } from "node:fs";
 import type { PromptSettings } from "../config.ts";
-import { compareCodePoints } from "../json.ts";
+import { compareCodePoints, dumps } from "../json.ts";
 import { isDir, isFile, join, readText, resolve } from "../pathlib.ts";
 import {
   projectInstructionsFiles,
@@ -21,7 +22,9 @@ import {
   userSystemPromptAppendFile,
   userSystemPromptFile,
 } from "../paths.ts";
-import { rstrip, strip } from "../py.ts";
+import { pyLen, rstrip, strip } from "../py.ts";
+import { estimateTokens as imageTokens } from "./images.ts";
+import type { Message } from "./messages.ts";
 
 /** One AGENTS.md in force: what it is, where it lives, what it says. */
 export interface Instructions {
@@ -207,4 +210,179 @@ function readPromptFile(path: string): string {
 /** The system prompt in force. Contains no volatile values (no clock, no counters). */
 export function loadSystemPrompt(cwd: string, prompt?: PromptSettings | null): string {
   return resolveSystemPrompt(cwd, prompt).text;
+}
+
+/** Anthropic's per-request limit on explicit `cache_control` markers. */
+export const MAX_CACHE_BREAKPOINTS = 4;
+
+/** One addressable chunk of the prefix, tracked so `/context` can show a breakdown. */
+export interface PromptSection {
+  readonly name: string;
+  readonly text: string;
+  tokens: number;
+}
+
+/**
+ * The exact payload handed to a provider, plus the accounting behind it.
+ *
+ * `messages` holds the conversation only. The provider prepends the system
+ * message when serialising, so `breakpoints` index the *payload* list where
+ * position 0 is that system message.
+ */
+export interface AssembledContext {
+  readonly system: PromptSection[];
+  messages: Message[];
+  readonly tools: Record<string, unknown>[];
+  /** Indices into the payload message list that carry an explicit cache
+   * breakpoint. Empty for implicit-caching models. */
+  readonly breakpoints: readonly number[];
+  readonly totalTokens: number;
+  readonly sections: PromptSection[];
+}
+
+/** Concatenated system sections, in declared order. */
+export function systemText(context: AssembledContext): string {
+  return context.system
+    .filter((section) => section.text)
+    .map((section) => section.text)
+    .join("\n\n");
+}
+
+/** Stable hash of everything above the first breakpoint; a change means the
+ * cache was invalidated. */
+export function prefixFingerprint(context: AssembledContext): string {
+  return createHash("sha256")
+    .update(systemText(context))
+    .update("\x00")
+    .update(dumps(context.tools, { sortKeys: true, separators: [",", ":"] }))
+    .digest("hex");
+}
+
+/** Assembles an `AssembledContext` from session state. */
+export class ContextBuilder {
+  /** Estimated tokens that must accumulate below the rolling breakpoint before
+   * it is allowed to move. Advancing it every turn rewrites the cache
+   * constantly and costs more than the hit it buys. */
+  static readonly BREAKPOINT_HYSTERESIS_TOKENS = 4_096;
+  static readonly CHARS_PER_TOKEN = 3.7;
+
+  private breakpointB: number | null = null;
+
+  constructor(
+    public systemPrompt: string,
+    public cwd: string,
+    public keepRecentTurns = 6,
+  ) {}
+
+  /** Assemble the request. `cacheMode` is `explicit` (place `cache_control`
+   * markers), `implicit` (rely on prefix stability alone), or `none`. */
+  build(
+    messages: Message[],
+    tools: Record<string, unknown>[],
+    options: {
+      skillsIndex?: string | null;
+      projectContext?: string | null;
+      cacheMode?: string;
+    } = {},
+  ): AssembledContext {
+    const system: PromptSection[] = [{ name: "system", text: this.systemPrompt, tokens: 0 }];
+    if (options.skillsIndex) system.push({ name: "skills", text: options.skillsIndex, tokens: 0 });
+    if (options.projectContext) {
+      system.push({ name: "project", text: options.projectContext, tokens: 0 });
+    }
+    for (const section of system) section.tokens = this.estimateTokens(section.text);
+
+    const active = messages.filter((m) => !m.compacted);
+    const sorted = sortTools(tools);
+    const explicit = (options.cacheMode ?? "explicit") === "explicit";
+    const breakpoints = explicit ? this.placeBreakpoints(active) : [];
+    const toolText = dumps(sorted, { sortKeys: true });
+    const sections: PromptSection[] = [
+      ...system,
+      { name: "tools", text: toolText, tokens: this.estimateTokens(toolText) },
+      {
+        name: "history",
+        text: "",
+        tokens: active.reduce((total, m) => total + this.estimateMessageTokens(m), 0),
+      },
+    ];
+    return {
+      system,
+      messages: active,
+      tools: sorted,
+      breakpoints,
+      totalTokens: sections.reduce((total, s) => total + s.tokens, 0),
+      sections,
+    };
+  }
+
+  /**
+   * Choose breakpoint indices into the payload list (0 = system message).
+   *
+   * Breakpoint A sits on the system message, at the end of the static prefix.
+   * Breakpoint B rolls forward to just before the last `keepRecentTurns`
+   * messages, and only moves once enough tokens have accumulated below it.
+   */
+  placeBreakpoints(messages: Message[]): number[] {
+    const breakpoints = [0];
+    if (messages.length <= this.keepRecentTurns) {
+      this.breakpointB = null;
+      return breakpoints;
+    }
+    const candidate = messages.length - this.keepRecentTurns;
+    if (this.breakpointB === null || this.breakpointB > candidate) {
+      // A shorter history - a rewind, /clear, a resumed session - brings B back with it.
+      this.breakpointB = candidate;
+    } else {
+      const below = messages
+        .slice(this.breakpointB, candidate)
+        .reduce((total, m) => total + this.estimateMessageTokens(m), 0);
+      if (below >= ContextBuilder.BREAKPOINT_HYSTERESIS_TOKENS) this.breakpointB = candidate;
+    }
+    if (this.breakpointB > 0) breakpoints.push(this.breakpointB);
+    return breakpoints.slice(0, MAX_CACHE_BREAKPOINTS);
+  }
+
+  /** Cheap local token estimate for gauges and the compaction trigger.
+   * Deliberately approximate; the authoritative counts come back from the provider. */
+  estimateTokens(text: string): number {
+    return text ? Math.trunc(pyLen(text) / ContextBuilder.CHARS_PER_TOKEN) + 1 : 0;
+  }
+
+  /** `estimateTokens` for a whole message, images charged by pixel count. */
+  estimateMessageTokens(message: Message): number {
+    return this.estimateTokens(messageText(message)) + messageImageTokens(message);
+  }
+}
+
+/** Canonical tool ordering: builtins first, then `mcp__*`, each by name. The
+ * serialised tool block sits in the cached prefix, so the order must not
+ * depend on registration order. */
+export function sortTools(tools: Record<string, unknown>[]): Record<string, unknown>[] {
+  const key = (tool: Record<string, unknown>) => String(tool.name ?? "");
+  return [...tools].sort((a, b) => {
+    const mcp = Number(key(a).startsWith("mcp__")) - Number(key(b).startsWith("mcp__"));
+    return mcp || compareCodePoints(key(a), key(b));
+  });
+}
+
+/** Estimated tokens for every image in a message, tool results' included. */
+export function messageImageTokens(message: Message): number {
+  let total = 0;
+  for (const block of message.content) {
+    if (block.type === "image") total += imageTokens(block);
+    else if (block.type === "tool_result") {
+      total += block.images.reduce((sum, image) => sum + imageTokens(image), 0);
+    }
+  }
+  return total;
+}
+
+function messageText(message: Message): string {
+  const parts: string[] = [];
+  for (const block of message.content) {
+    const text = ("text" in block && block.text) || ("content" in block && block.content) || null;
+    if (typeof text === "string") parts.push(text);
+  }
+  return parts.join("\n");
 }

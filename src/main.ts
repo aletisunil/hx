@@ -1,3 +1,4 @@
+import "./providers/subscriptions.ts";
 import { main } from "./cli.ts";
 
 // A reader that goes away - `hx docs | head` - ends the output, not the

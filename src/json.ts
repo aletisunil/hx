@@ -30,13 +30,16 @@ export interface DumpOptions {
   readonly sortKeys?: boolean;
   /** Escape every non-ASCII character as `\uXXXX`. Python's default. */
   readonly ensureAscii?: boolean;
+  /** `[item, key]` separators; Python's default is `[", ", ": "]`, or `[",", ": "]` with an indent. */
+  readonly separators?: readonly [string, string];
 }
 
 /** `json.dumps(value, indent=..., sort_keys=..., ensure_ascii=...)`. */
 export function dumps(value: unknown, options: DumpOptions = {}): string {
   const ensureAscii = options.ensureAscii ?? true;
   const indent = options.indent;
-  const itemSeparator = indent === undefined ? ", " : ",";
+  const itemSeparator = options.separators?.[0] ?? (indent === undefined ? ", " : ",");
+  const keySeparator = options.separators?.[1] ?? ": ";
   const sortKeys = options.sortKeys ?? false;
 
   const write = (node: unknown, depth: number): string => {
@@ -60,7 +63,7 @@ export function dumps(value: unknown, options: DumpOptions = {}): string {
       if (sortKeys) keys = [...keys].sort(compareCodePoints);
       const items = keys.map(
         (key) =>
-          `${string(key, ensureAscii)}: ${write((node as Record<string, unknown>)[key], depth + 1)}`,
+          `${string(key, ensureAscii)}${keySeparator}${write((node as Record<string, unknown>)[key], depth + 1)}`,
       );
       return wrap("{", "}", items, depth);
     }
