@@ -2,18 +2,38 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 
-from hx.tools import anchors
 from tests.e2e.conftest import HX, git
 from tests.e2e.stub import Stub, ToolCall, call, calls, say
 
 
 def _anchor(text: str, line: int) -> str:
-    """The anchor Read prints beside 1-based ``line`` of ``text``."""
-    labels, _ = anchors.compute(anchors.split(text)[0])
-    return labels[line - 1]
+    """The anchor Read prints beside 1-based ``line`` of ``text``.
+
+    Written out here, not imported, so the suite tests whichever build it runs: a SHA-1 over
+    the line and its two neighbours, cut to the narrowest of 4, 6 or 8 hex digits that keeps
+    every distinct window distinct.
+    """
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    full = [
+        hashlib.sha1(
+            "\x00".join(
+                (
+                    lines[i - 1] if i > 0 else "",
+                    lines[i],
+                    lines[i + 1] if i + 1 < len(lines) else "",
+                )
+            ).encode()
+        ).hexdigest()
+        for i in range(len(lines))
+    ]
+    width = next(w for w in (4, 6, 8, 40) if len({v[:w] for v in full}) == len(set(full)))
+    return full[line - 1][:width]
 
 
 def test_a_crlf_file_takes_an_edit_written_with_plain_newlines(hx: HX, stub: Stub) -> None:

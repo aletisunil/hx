@@ -18,3 +18,7 @@ htmlcov/
 # entirely, so there is nothing here left to hide.
 snapshot_report.html
 e2e-report/
+
+# The TypeScript build
+node_modules/
+e2e-report-ts/

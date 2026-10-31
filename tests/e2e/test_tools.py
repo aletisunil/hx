@@ -616,7 +616,7 @@ def test_a_tool_call_hangs_its_result_under_its_header(hx: HX, stub: Stub) -> No
     assert painted == {"default"}, "a tool call is drawn on the terminal's own background"
 
 
-DARK_THEME = Path(__file__).parents[2] / "src" / "hx" / "tui" / "themes" / "dark.json"
+DARK_THEME = Path(__file__).parents[2] / "src" / "tui" / "themes" / "dark.json"
 
 
 def _dark(role: str) -> str:

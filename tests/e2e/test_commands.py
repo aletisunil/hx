@@ -301,7 +301,7 @@ def test_ctrl_p_palette_runs_a_command(hx: HX) -> None:
     term.press("enter")
     screen = term.wait_for("Permission mode: default")
     term.snapshot("/permissions from the palette")
-    assert f"Sandbox: {SANDBOX.value}" in screen
+    assert f"Sandbox: {SANDBOX}" in screen
 
 
 def test_mode_command(hx: HX) -> None:

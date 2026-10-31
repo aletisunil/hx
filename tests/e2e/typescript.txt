@@ -1,0 +1,7 @@
+tests/e2e/test_cli.py::test_version_and_help
+tests/e2e/test_cli.py::test_unknown_option_is_a_usage_error
+tests/e2e/test_cli.py::test_image_flag_needs_print_mode
+tests/e2e/test_cli.py::test_docs_ship_with_the_binary
+tests/e2e/test_cli.py::test_changelog_prints_this_release
+tests/e2e/test_cli.py::test_every_tag_has_a_changelog_section
+tests/e2e/test_cli.py::test_prompt_shows_project_instructions

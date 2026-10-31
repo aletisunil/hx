@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -25,19 +27,33 @@ from typing import Any
 
 import pytest
 
-from hx.permissions.sandbox import SandboxBackend, detect_backend
 from tests.e2e.report import REPO, Report, Step, TestRecord
 from tests.e2e.stub import RELEASES_PATH, SONNET, Stub
 from tests.e2e.terminal import Terminal
 
-HX_BIN = Path(sys.executable).parent / "hx"
+HX_BIN = Path(os.environ.get("HX_E2E_BIN") or Path(sys.executable).parent / "hx").resolve()
+"""The build under test. ``HX_E2E_BIN`` names any executable, or a ``.js`` file to run
+with the ``node`` on this PATH; unset, it is the ``hx`` installed beside this Python.
+The suite never imports HX, so either build answers to the same tests."""
 
-SANDBOX = detect_backend()
-SANDBOX_STATUS = "no-sandbox" if SANDBOX is SandboxBackend.NONE else f"sandbox {SANDBOX.value}"
+VERSION = json.loads((REPO / "package.json").read_text())["version"]
+"""The version both builds must report. ``package.json`` is where it lives."""
+
+
+def _sandbox() -> str:
+    if platform.system() == "Darwin" and Path("/usr/bin/sandbox-exec").exists():
+        return "seatbelt"
+    if platform.system() == "Linux" and shutil.which("bwrap"):
+        return "bubblewrap"
+    return "none"
+
+
+SANDBOX = _sandbox()
+SANDBOX_STATUS = "no-sandbox" if SANDBOX == "none" else f"sandbox {SANDBOX}"
 """How the status bar names the sandbox on this machine: seatbelt on macOS,
 bubblewrap on Linux with ``bwrap`` installed."""
 requires_sandbox = pytest.mark.skipif(
-    SANDBOX is SandboxBackend.NONE, reason="no OS sandbox (sandbox-exec or bwrap) here"
+    SANDBOX == "none", reason="no OS sandbox (sandbox-exec or bwrap) here"
 )
 SANDBOX_REFUSALS = ("Operation not permitted", "Read-only file system", "Permission denied")
 """How a confined command fails: seatbelt says the first, bwrap's read-only
@@ -57,6 +73,19 @@ _SHIMS = {
     "osascript": 'printf "%s\\n" "$*" >> "$E2E_OSASCRIPT"',
     "open": 'printf "%s\\n" "$*" >> "$E2E_OPENED"',
 }
+
+
+def _launcher() -> str:
+    """The body of ``bin/hx``: what a user's PATH would resolve ``hx`` to.
+
+    A shim rather than the build itself, so the PATH a test hands HX holds nothing of the
+    developer's - not the venv's ``python``, not the directory ``node`` lives in.
+    """
+    if HX_BIN.suffix in (".js", ".mjs"):
+        node = shutil.which("node")
+        assert node, "HX_E2E_BIN is a script, and no node is on PATH to run it"
+        return f'exec "{node}" "{HX_BIN}" "$@"'
+    return f'exec "{HX_BIN}" "$@"'
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -140,7 +169,7 @@ class HX:
         self.opened_log = root / "opened.log"
         for folder in (self.home, self.hx_home, self.bin):
             folder.mkdir(exist_ok=True)
-        for name, body in _SHIMS.items():
+        for name, body in {**_SHIMS, "hx": _launcher()}.items():
             shim = self.bin / name
             shim.write_text(f"#!/bin/sh\n{body}\n")
             shim.chmod(0o755)
@@ -150,7 +179,7 @@ class HX:
 
     def env(self, **overrides: str) -> dict[str, str]:
         env = {
-            "PATH": f"{self.bin}{os.pathsep}{HX_BIN.parent}{os.pathsep}/usr/bin:/bin:/usr/sbin:/sbin",
+            "PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": str(self.home),
             "HX_HOME": str(self.hx_home),
             "LANG": "en_US.UTF-8",
@@ -224,7 +253,7 @@ class HX:
         see :data:`tests.e2e.terminal.KEYBOARDS`.
         """
         term = Terminal(
-            [str(HX_BIN), *args],
+            [str(self.bin / "hx"), *args],
             env=self.env(**(env or {})),
             cwd=cwd or self.project,
             columns=columns,
@@ -256,7 +285,7 @@ class HX:
         """Run ``hx`` without a terminal - a pipe on both ends, as a script would."""
         started = time.monotonic()
         result = subprocess.run(
-            [str(HX_BIN), *args],
+            [str(self.bin / "hx"), *args],
             input=input,
             capture_output=True,
             text=True,

@@ -1,0 +1,45 @@
+{
+  "name": "@aletisunil/hx",
+  "version": "0.2.20",
+  "description": "HX - an agent harness for the terminal",
+  "license": "MIT",
+  "author": "Sunil Aleti",
+  "homepage": "https://hx.sunilaleti.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aletisunil/hx.git"
+  },
+  "bugs": "https://github.com/aletisunil/hx/issues",
+  "keywords": [
+    "agent",
+    "cli",
+    "tui",
+    "llm",
+    "openrouter",
+    "coding-agent"
+  ],
+  "type": "module",
+  "bin": {
+    "hx": "dist/hx.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=22.15"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit && biome check .",
+    "format": "biome format --write .",
+    "e2e": "npm run build && HX_E2E_BIN=dist/hx.js HX_E2E_REPORT=e2e-report-ts uv run pytest $(cat tests/e2e/typescript.txt)"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.4",
+    "@types/node": "22.20.5",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

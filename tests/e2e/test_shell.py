@@ -167,7 +167,7 @@ def test_a_background_job_does_not_read_the_terminal(hx: HX, stub: Stub) -> None
 def test_output_split_mid_character_keeps_its_characters(hx: HX, stub: Stub) -> None:
     """Non-ASCII output arrives intact even when a read ends in the middle of a character."""
     stub.script(
-        call("Bash", command="python -c \"import sys; sys.stdout.write('a' + 'é' * 6000)\""),
+        call("Bash", command="python3 -c \"import sys; sys.stdout.write('a' + 'é' * 6000)\""),
         say("Printed."),
     )
     hx.run("-p", "print accents", "--mode", "bypass", check=True)

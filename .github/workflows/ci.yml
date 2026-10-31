@@ -17,6 +17,31 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy
 
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: astral-sh/setup-uv@v3
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: uv sync --extra dev
+      # The end-to-end tests the TypeScript build has been ported far enough to
+      # pass. The list grows with each phase of the port and goes away with it.
+      - run: uv run pytest $(cat tests/e2e/typescript.txt)
+        env:
+          HX_E2E_BIN: dist/hx.js
+          HX_E2E_REPORT: e2e-report-ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-report-typescript
+          path: e2e-report-ts/
+
   test:
     strategy:
       fail-fast: false

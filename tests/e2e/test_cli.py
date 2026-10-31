@@ -8,8 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hx import __version__
-from tests.e2e.conftest import HX
+from tests.e2e.conftest import HX, VERSION
 from tests.e2e.report import REPO
 
 ECHO_SERVER = Path(__file__).parent / "fixtures" / "echo_server.py"
@@ -18,7 +17,7 @@ ECHO_SERVER = Path(__file__).parent / "fixtures" / "echo_server.py"
 def test_version_and_help(hx: HX) -> None:
     """`hx --version` names the installed version; `hx --help` prints usage and exits 0."""
     version = hx.run("--version", check=True)
-    assert version.stdout.strip() == f"hx {__version__}"
+    assert version.stdout.strip() == f"hx {VERSION}"
 
     usage = hx.run("--help", check=True)
     assert "an agent harness for the terminal" in usage.stdout
@@ -60,8 +59,8 @@ def test_docs_ship_with_the_binary(hx: HX) -> None:
 def test_changelog_prints_this_release(hx: HX) -> None:
     """`hx changelog <version>` prints the section for the installed version - so bumping the
     version without writing its CHANGELOG.md section fails the suite before a tag exists."""
-    result = hx.run("changelog", __version__, check=True)
-    assert re.search(rf"^## \[?{re.escape(__version__)}\]?", result.stdout, re.MULTILINE)
+    result = hx.run("changelog", VERSION, check=True)
+    assert re.search(rf"^## \[?{re.escape(VERSION)}\]?", result.stdout, re.MULTILINE)
 
 
 def test_every_tag_has_a_changelog_section(hx: HX) -> None:
