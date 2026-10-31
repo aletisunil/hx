@@ -31,13 +31,13 @@ from tests.e2e.report import REPO, Report, Step, TestRecord
 from tests.e2e.stub import RELEASES_PATH, SONNET, Stub
 from tests.e2e.terminal import Terminal
 
-HX_BIN = Path(os.environ.get("HX_E2E_BIN") or Path(sys.executable).parent / "hx").resolve()
-"""The build under test. ``HX_E2E_BIN`` names any executable, or a ``.js`` file to run
-with the ``node`` on this PATH; unset, it is the ``hx`` installed beside this Python.
-The suite never imports HX, so either build answers to the same tests."""
+HX_BIN = Path(os.environ.get("HX_E2E_BIN") or REPO / "dist" / "hx.js").resolve()
+"""The build under test: the bundle ``npm run build`` writes, run with the ``node`` on
+this PATH. ``HX_E2E_BIN`` names another - an installed ``hx``, or a packed and
+installed tarball's. The suite never imports HX."""
 
 VERSION = json.loads((REPO / "package.json").read_text())["version"]
-"""The version both builds must report. ``package.json`` is where it lives."""
+"""The version the build must report. ``package.json`` is where it lives."""
 
 
 def _sandbox() -> str:

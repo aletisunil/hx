@@ -11,60 +11,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-      - run: uv sync --extra dev
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run mypy
-
-  typescript:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - uses: astral-sh/setup-uv@v3
       - run: npm ci
-      # bubblewrap, so the sandbox tests run on this build as on the other.
-      - run: |
-          sudo apt-get update && sudo apt-get install -y bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: npm run check
-      - run: npm run build
-      - run: uv sync --extra dev
-      # The end-to-end tests the TypeScript build has been ported far enough to
-      # pass. The list grows with each phase of the port and goes away with it.
-      - run: uv run pytest $(cat tests/e2e/typescript.txt)
-        env:
-          HX_E2E_BIN: dist/hx.js
-          HX_E2E_REPORT: e2e-report-ts
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: e2e-report-typescript
-          path: e2e-report-ts/
+      # The end-to-end suite's own Python.
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
 
   test:
     strategy:
       fail-fast: false
       matrix:
-        # Every supported minor on Linux catches version bugs; macOS runs the
-        # floor and the ceiling only, to catch platform bugs without paying for
-        # the full OS x version grid.
-        os: [ubuntu-latest]
-        python: ["3.11", "3.12", "3.13", "3.14"]
-        include:
-          - os: macos-latest
-            python: "3.11"
-          - os: macos-latest
-            python: "3.14"
+        # Node 22 is the floor package.json promises; the newest release
+        # catches what a fresh install meets.
+        os: [ubuntu-latest, macos-latest]
+        node: ["22", "24"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
       - uses: astral-sh/setup-uv@v3
-      - run: uv sync --extra dev --python ${{ matrix.python }}
+      - run: npm ci
       # bubblewrap, so the Linux sandbox tests run instead of skipping. Ubuntu
       # 24.04 confines unprivileged user namespaces with AppArmor, which bwrap
       # needs; the runner is throwaway, so lift that rather than ship a profile.
@@ -72,69 +46,67 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      # `live` needs an API key and real spend, so it never runs in CI.
-      - run: uv run pytest -m "not live"
+      - run: npm run e2e
       # What every end-to-end test saw, screen by screen - pass or fail.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: e2e-report-${{ matrix.os }}-${{ matrix.python }}
+          name: e2e-report-${{ matrix.os }}-node${{ matrix.node }}
           path: e2e-report/
 
   install-script:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
       - run: sudo apt-get update && sudo apt-get install -y shellcheck
       - run: shellcheck install.sh
+      # The tarball npm would publish, installed by the script in a clean
+      # container that has Node and nothing else.
+      - run: npm ci && npm run build && npm pack
       - name: install from a clean container
         run: |
-          docker run --rm -v "$PWD:/src" debian:bookworm-slim bash -c '
+          docker run --rm -v "$PWD:/src" node:22-bookworm-slim bash -c '
             set -eux
-            apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
             cd /tmp
-            HX_PACKAGE=/src sh /src/install.sh
-            export PATH="$HOME/.local/bin:$PATH"
+            HX_PACKAGE=$(ls /src/sunilaleti-hx-*.tgz) sh /src/install.sh
             hx --version
           '
 
-  publish:
+  release:
     needs: [lint, test, install-script]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
-      id-token: write
       contents: write # the GitHub release
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-      - run: uv build
-      # The wheel about to ship, not the checkout: it is what `hx --version`
-      # and `hx changelog` will answer from once installed. Both are checked
-      # before PyPI, which cannot be undone: a tag without its CHANGELOG
-      # section stops here. The notes are that section without its heading -
-      # the release title already says which version it is.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci && npm run build
+      # The bundle about to be released, not the checkout: it is what
+      # `hx --version` and `hx changelog` answer from once installed. A tag
+      # without its CHANGELOG section stops here. The notes are that section
+      # without its heading - the release title already says which version.
       - name: the tag names the version being built
         run: |
-          wheel=$(ls dist/*.whl)
-          built=$(uvx --from "$wheel" hx --version)
+          built=$(node dist/hx.js --version)
           test "$built" = "hx ${GITHUB_REF_NAME#v}" || {
             echo "::error::tag $GITHUB_REF_NAME builds $built"
             exit 1
           }
-          uvx --from "$wheel" hx changelog "$GITHUB_REF_NAME" | tail -n +3 > "$RUNNER_TEMP/notes.md"
+          node dist/hx.js changelog "$GITHUB_REF_NAME" | tail -n +3 > "$RUNNER_TEMP/notes.md"
           test -s "$RUNNER_TEMP/notes.md" || {
             echo "::error::CHANGELOG.md has no section for $GITHUB_REF_NAME"
             exit 1
           }
-      # Trusted publishing: no long-lived token stored in the repo. A rerun
-      # finds the files already there and goes on to the release.
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          skip-existing: true
-      # After PyPI, so a release on GitHub always has a package behind it. A
-      # rerun keeps the release that is already there.
+      # npm publish stays a maintainer's step (see README, Releasing): the
+      # release on GitHub records a version that is already on npm.
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

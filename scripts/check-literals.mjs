@@ -10,7 +10,6 @@ const bad = [];
 const walk = (dir) => {
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
-    if (path === "src/hx") continue;
     if (statSync(path).isDirectory()) walk(path);
     else if (path.endsWith(".ts")) {
       const text = readFileSync(path, "utf8");

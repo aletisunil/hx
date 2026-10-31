@@ -3,16 +3,16 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/aletisunil/hx/main/install.sh | sh
 #
-# Bootstraps `uv` if it is missing, then installs hx as an isolated uv tool with
-# a pinned Python. Idempotent: re-running upgrades in place.
+# Checks for Node.js, then installs hx globally with npm. Idempotent:
+# re-running updates in place.
 
 set -eu
 
-# The PyPI distribution is hx-cli; the command it installs is `hx`.
-HX_PACKAGE="${HX_PACKAGE:-hx-cli}"
-HX_PYTHON="${HX_PYTHON:-3.12}"
+# The npm package is @sunilaleti/hx; the command it installs is `hx`.
+HX_PACKAGE="${HX_PACKAGE:-@sunilaleti/hx}"
+HX_NODE_MAJOR=22
+HX_NODE_MINOR=15
 HX_SUPPORT_EMAIL="iam@sunilaleti.dev"
-UV_INSTALLER="https://astral.sh/uv/install.sh"
 
 log()  { printf '\033[0;36m==>\033[0m %s\n' "$1"; }
 warn() { printf '\033[0;33mwarning:\033[0m %s\n' "$1" >&2; }
@@ -135,34 +135,27 @@ banner() {
     printf '  Questions or issues? Contact \033[1;33m%s\033[0m\n\n' "$HX_SUPPORT_EMAIL"
 }
 
-ensure_uv() {
-    if have uv; then
-        log "uv found: $(uv --version)"
-        return
+ensure_node() {
+    have node && have npm ||
+        die "HX needs Node.js $HX_NODE_MAJOR.$HX_NODE_MINOR or newer, with npm. Install it from https://nodejs.org/ and re-run."
+    version=$(node --version)
+    major=$(printf '%s' "$version" | sed 's/^v\([0-9]*\)\..*/\1/')
+    minor=$(printf '%s' "$version" | sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/')
+    if [ "$major" -lt "$HX_NODE_MAJOR" ] ||
+        { [ "$major" -eq "$HX_NODE_MAJOR" ] && [ "$minor" -lt "$HX_NODE_MINOR" ]; }; then
+        die "HX needs Node.js $HX_NODE_MAJOR.$HX_NODE_MINOR or newer; this is $version. Update it from https://nodejs.org/ and re-run."
     fi
-    log "Installing uv"
-    have curl || have wget || die "need curl or wget to bootstrap uv"
-    if have curl; then
-        curl -LsSf "$UV_INSTALLER" | sh
-    else
-        wget -qO- "$UV_INSTALLER" | sh
-    fi
-    # The uv installer drops binaries here but does not touch the current shell.
-    for candidate in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
-        [ -x "$candidate/uv" ] && PATH="$candidate:$PATH"
-    done
-    export PATH
-    have uv || die "uv installed but not on PATH; open a new shell and re-run"
+    log "Node.js found: $version"
 }
 
 install_hx() {
-    log "Installing $HX_PACKAGE (Python $HX_PYTHON)"
-    uv tool install --python "$HX_PYTHON" --force "$HX_PACKAGE"
+    log "Installing $HX_PACKAGE"
+    npm install --global "$HX_PACKAGE"
 }
 
 check_path() {
     have hx && return
-    bindir="$(uv tool dir --bin 2>/dev/null || echo "$HOME/.local/bin")"
+    bindir="$(npm prefix --global)/bin"
     warn "hx is not on your PATH yet."
     # shellcheck disable=SC2016  # $PATH is literal text for the user to copy.
     printf '\n  Add this to your shell profile:\n\n    export PATH="%s:$PATH"\n\n' "$bindir"
@@ -170,7 +163,7 @@ check_path() {
 
 main() {
     banner
-    ensure_uv
+    ensure_node
     install_hx
     check_path
     log "Done. Run 'hx' inside a project directory."

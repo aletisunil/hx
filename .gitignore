@@ -1,15 +1,11 @@
+# The end-to-end suite's Python
 __pycache__/
 *.py[cod]
 .venv/
-venv/
-dist/
-build/
-*.egg-info/
 .pytest_cache/
-.mypy_cache/
 .ruff_cache/
-.coverage
-htmlcov/
+
+dist/
 .DS_Store
 .hx/sessions/
 # Not .hx/settings.json: that file is the project's *shared* configuration and
@@ -18,7 +14,4 @@ htmlcov/
 # entirely, so there is nothing here left to hide.
 snapshot_report.html
 e2e-report/
-
-# The TypeScript build
 node_modules/
-e2e-report-ts/

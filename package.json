@@ -37,7 +37,7 @@
     "build": "node scripts/build.mjs",
     "check": "tsc --noEmit && biome check . && node scripts/check-literals.mjs",
     "format": "biome format --write .",
-    "e2e": "npm run build && HX_E2E_BIN=dist/hx.js HX_E2E_REPORT=e2e-report-ts uv run pytest $(cat tests/e2e/typescript.txt)",
+    "e2e": "npm run build && uv run pytest tests/e2e",
     "prepublishOnly": "npm run check && npm run build"
   },
   "devDependencies": {

@@ -1,7 +1,8 @@
 # HX
 
-An agent harness for the terminal. Python core, its own terminal renderer,
-OpenRouter for models.
+An agent harness for the terminal. TypeScript on Node.js, its own terminal
+renderer, and models through OpenRouter or a ChatGPT, Claude or Devin
+subscription.
 
 HX runs in your project directory, reads and edits your code, runs commands in
 a sandboxed shell, and shows you what every turn costs.
@@ -17,6 +18,12 @@ npm install --global @sunilaleti/hx
 HX runs on [Node.js](https://nodejs.org/) 22.15 or newer, on macOS and Linux.
 Run the same command again to update. Then run `hx`: the first time, it opens
 with the HX logo and says to type `/login`.
+
+Or let the install script check your Node.js version and run that command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aletisunil/hx/main/install.sh | sh
+```
 
 ### `@sunilaleti/hx` on npm, `hx` in your terminal
 
@@ -37,9 +44,14 @@ to your `PATH`:
 export PATH="$(npm prefix --global)/bin:$PATH"
 ```
 
-The Python build, `hx-cli` on PyPI, keeps working on the same `~/.hx`:
-sessions, sign-ins and settings carry over in both directions. Install one or
-the other - both put a command named `hx` on your `PATH`.
+Coming from `hx-cli`, the Python build on PyPI? It is no longer released.
+Remove it, then install from npm - sessions, sign-ins and settings in `~/.hx`
+carry over:
+
+```sh
+uv tool uninstall hx-cli
+npm install --global @sunilaleti/hx
+```
 
 ### Credentials
 
@@ -373,7 +385,7 @@ allowlist it if you would rather not be asked:
 
 ### Keys
 
-Every key below is defined once, in `src/hx/keys.py`. `/help`, the hints line
+Every key below is defined once, in `src/keys.ts`. `/help`, the hints line
 under the prompt and this table all read from that registry, and any of them can
 be rebound (see [Keybindings](#keybindings)).
 
@@ -474,7 +486,7 @@ says so; copy the file over and drag or paste its path instead.
 #### Keybindings
 
 Any key can be rebound in `~/.hx/keybindings.json`, keyed by the action ids in
-`src/hx/keys.py`:
+`src/keys.ts`:
 
 ```json
 {
@@ -721,7 +733,7 @@ route at another OpenAI-compatible endpoint - a gateway, or a recording proxy.
 stderr so stdout stays pipeable. `/prompt` shows the same thing inside a running
 session.
 
-The built-in prompt is `SYSTEM_PROMPT` in `src/hx/core/context.py`. It is
+The built-in prompt is `SYSTEM_PROMPT` in `src/core/context.ts`. It is
 replaced by the first of these that exists:
 
 | Source | Scope |
@@ -785,7 +797,7 @@ mapping semantic roles onto them. Drop one in `~/.hx/themes/mine.json` and
 ```
 
 The role names are pi's, so [pi](https://github.com/earendil-works/pi) theme
-files load here unchanged. `src/hx/tui/themes/dark.json` is the reference.
+files load here unchanged. `src/tui/themes/dark.json` is the reference.
 A few roles pi has no concept of may be left out, and borrow another role:
 `toolArgs`, the colour of a tool call's paths and patterns, borrows `accent`;
 `panel` and `mdCodeBlockBg` borrow `surface`; `userText` borrows `text`; and
@@ -1213,23 +1225,26 @@ bypassed by delegating through `Task`.
 
 ```sh
 git clone https://github.com/aletisunil/hx && cd hx
-uv sync --extra dev
+npm ci
 
-uv run pytest                # the suite; live tests are deselected
-uv run ruff check . && uv run ruff format --check .
-uv run mypy                  # strict
-uv run hx                    # run from the checkout
+npm run check                # tsc, biome, and the source-literal check
+npm run build                # dist/hx.js, the bundle npm ships
+node dist/hx.js              # run from the checkout
+npm run e2e                  # build, then the whole end-to-end suite
+uv run ruff check . && uv run ruff format --check .   # the suite's own Python
 ```
 
-The suite is end-to-end. Each test in `tests/e2e/` starts the installed `hx`
-binary - on a real pseudo-terminal for the TUI, or as a plain subprocess for
+The suite is end-to-end, written in Python with pytest, and run with
+[uv](https://docs.astral.sh/uv/). Each test in `tests/e2e/` starts the `hx`
+bundle - on a real pseudo-terminal for the TUI, or as a plain subprocess for
 print mode and the other commands - in a private `$HOME` and `$HX_HOME`, and
 points it at a local OpenRouter stand-in with `HX_OPENROUTER_BASE_URL`, and
 at a ChatGPT stand-in with `HX_CODEX_BASE_URL`.
 Everything between the keyboard and the socket is the shipped code; only the
 model's replies are scripted. The screen is read back through a VT emulator,
 so assertions are on the cells a terminal shows, not on the bytes HX meant to
-write.
+write. The suite never imports HX: it tests `dist/hx.js` by default, and any
+other `hx` - an installed one, say - named by `HX_E2E_BIN`.
 
 Every run writes `e2e-report/`: `index.html` shows each test's outcome and
 every screen it checked, rendered in colour, and one text file per screen lets
@@ -1239,41 +1254,26 @@ two runs be compared with `diff -r`. CI uploads it from every test job as an
 Tests that need the OS sandbox are skipped where there is no backend
 (`sandbox-exec` on macOS, `bwrap` on Linux).
 
-Tests marked `live` hit a real API. The OpenRouter ones cost money:
-
-```sh
-OPENROUTER_API_KEY=... uv run pytest -m live tests/test_live.py
-
-# the Codex route draws on your ChatGPT subscription instead
-hx auth login openai-codex
-uv run pytest -m live tests/test_live_codex.py
-
-# and the Devin route on your Devin subscription
-hx auth login devin
-uv run pytest -m live tests/test_live_devin.py
-```
-
-They are the only place the wire formats, streaming, tool use and a genuine
-cache hit are proven against a real service; everything else runs against the
-stand-in.
-
 ### Layout
 
 ```
-src/hx/
-  cli.py config.py paths.py frontmatter.py git.py
+src/
+  cli.ts runtime.ts config.ts paths.ts frontmatter.ts git.ts trace.ts
   core/         loop, context assembly, compaction, late injection, sessions, usage
   auth/         credential store, OAuth flows, per-route resolution
-  providers/    OpenRouter, Codex, Devin, the model catalogue
+  providers/    OpenRouter, Codex, Claude Code, Devin, the model catalogue
   tools/        Bash, Read, Write, Edit, Glob, Grep, Symbols, TodoWrite, Task,
                 WebSearch, WebFetch, line anchors, output capping
   permissions/  rule engine, shell decomposition, Seatbelt/bubblewrap
   hooks/        the four events, the trust boundary, subprocess execution
-  skills/ agents/ mcp/
-  keys.py       keybinding registry: ids, defaults, descriptions, user overrides
+  skills/ agents/
+  mcp/          client, OAuth, and approval for a project's servers
+  keys.ts       keybinding registry: ids, defaults, descriptions, user overrides
   term/         the renderer: raw mode, input decoding, the differ, the screen
   tui/          views, commands, per-tool renderers, themes
     themes/     the shipped palettes, as JSON
+  py.ts pathlib.ts json.ts   Python's string, path and JSON behaviour, which
+                             HX's output and files were written against
 ```
 
 The core is headless and emits events; the TUI and print mode are both just
@@ -1284,44 +1284,34 @@ imports `tui/`.
 
 ## Releasing
 
-For maintainers. HX publishes to PyPI as **`hx-cli`** from CI, on a tag.
-
-One-time setup:
-
-1. Push the repo to `github.com/<owner>/hx` and update the URLs in
-   `pyproject.toml`.
-2. Create a GitHub environment named `pypi`.
-3. On PyPI, add a [trusted publisher](https://docs.pypi.org/trusted-publishers/)
-   for the project: owner, repo `hx`, workflow `ci.yml`, environment `pypi`.
-   No API token is stored anywhere.
-
-Each release:
+For maintainers. HX is published to npm as **`@sunilaleti/hx`**, on the
+`latest` tag. Every version is a stable release; there is no beta channel.
 
 ```sh
 # 1. move CHANGELOG.md's [Unreleased] entries under the new version, dated,
 #    and leave a fresh empty [Unreleased] behind
-# 2. bump __version__ in src/hx/__init__.py
-# 3. uv run pytest tests/e2e/test_cli.py  # the version must have a section
-git commit -am "release: X.Y.Z"
-git tag v$(uv run hx --version | cut -d' ' -f2) && git push origin main --tags
+# 2. bump "version" in package.json (npm version X.Y.Z --no-git-tag-version)
+# 3. npm run e2e        # the whole suite; the version must have a section
+git commit -am "chore(release): X.Y.Z"
+npm login             # once, as sunilaleti
+npm publish           # runs check and build first (prepublishOnly)
+git tag vX.Y.Z && git push origin main --tags
 ```
 
 Step 1 is not optional and is not a convention: `tests/e2e/test_cli.py` fails the
-whole suite when `__version__` has no `CHANGELOG.md` section, so a release that
-skips it cannot get past CI to the `publish` job. The file ships inside the
-wheel and `hx changelog` prints it, so a version with no section there reaches
-users as a blank release.
+whole suite when the version has no `CHANGELOG.md` section. The file ships
+inside the bundle and `hx changelog` prints it, so a version with no section
+there reaches users as a blank release.
 
-The `publish` job runs only on `refs/tags/v*` and only after lint, the test
-suite and an install-script run in a clean Debian container have passed. It builds with
-`uv build`, checks that the wheel's version matches the tag and has a `CHANGELOG.md`
-section, uploads via OIDC, and then creates the GitHub release with that section
-as its notes.
+The tag starts CI's `release` job, after lint, the test suite and an
+install-script run in a clean container have passed. It builds the bundle,
+checks that its version matches the tag and has a `CHANGELOG.md` section, and
+creates the GitHub release with that section as its notes.
 
-To check a build before tagging:
+To see what npm would ship before publishing:
 
 ```sh
-uv build && ls dist/
+npm pack --dry-run
 ```
 
 ---
@@ -1333,13 +1323,11 @@ streaming with prefix caching and accurate cost accounting, session persistence
 and resume, the tool suite, the permission engine and OS sandbox, late
 injection, compaction, output capping, skills, subagents, MCP, and the TUI.
 
-Three routes to a model: an OpenRouter API key, a ChatGPT Plus/Pro
-subscription over OAuth, or a Devin subscription over OAuth. The model id
-decides which.
+Four routes to a model: an OpenRouter API key, a ChatGPT Plus/Pro
+subscription over OAuth, a Claude Pro/Max subscription through Claude Code, or
+a Devin subscription over OAuth. The model id decides which.
 
-Published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/), released
-from CI on a tag.
+Published to npm as [`@sunilaleti/hx`](https://www.npmjs.com/package/@sunilaleti/hx).
+The Python build that came before it, `hx-cli` on PyPI, stopped at 0.2.20.
 
-The one thing still unproven in CI is a live call on any route: the `live`
-tests exist and cover all three wire formats, tool use, reasoning replay and a
-genuine cache hit, but they need a credential and are deselected by default.
+No test reaches a real model: every route is proven against a local stand-in.

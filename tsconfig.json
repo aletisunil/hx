@@ -17,6 +17,5 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/hx"]
+  "include": ["src/**/*.ts"]
 }

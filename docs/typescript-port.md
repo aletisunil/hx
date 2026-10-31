@@ -1,36 +1,24 @@
 # The TypeScript port
 
-HX is being rewritten from Python to TypeScript, one module at a time, with no
-new features. The Python build stays the reference until the port is complete.
+HX was rewritten from Python to TypeScript, one module at a time, with no new
+features. The port is complete: 1.0.0 is the TypeScript build, and the Python
+build, `hx-cli` on PyPI, was deleted from the repository. It stopped at 0.2.20.
 
-## How parity is checked
+This page records how the two builds were kept in step, and what still differs
+from the Python build.
+
+## How parity was checked
 
 The end-to-end suite in `tests/e2e` drives `hx` only from the outside: a pty, a
-stub model server, files and exit codes. It never imports HX, so it tests
-either build:
-
-```sh
-uv run pytest tests/e2e                    # the Python build
-npm run e2e                                # the TypeScript build, ported tests only
-```
-
-`tests/e2e/typescript.txt` lists the tests the TypeScript build must pass. Each
-phase adds its tests to the list; CI runs it in the `typescript` job.
-
-Run the whole suite against both builds and compare the reports to catch
-differences the assertions do not look at:
-
-```sh
-uv run pytest tests/e2e
-HX_E2E_BIN=dist/hx.js HX_E2E_REPORT=e2e-report-ts uv run pytest tests/e2e
-diff -r e2e-report e2e-report-ts
-```
+stub model server, files and exit codes. It never imports HX, so it tested
+either build, one phase at a time. The two builds' reports - every screen and
+every request each test saw - were compared with `diff -r` to catch
+differences the assertions do not look at.
 
 ## Layout
 
-The TypeScript sources sit in `src/` beside the Python package in `src/hx/`,
-one module for each Python module. When the port is complete, `src/hx/` is
-deleted and nothing else moves.
+The TypeScript sources took the place of the Python package, one module for
+each Python module, under the same names.
 
 `src/py.ts`, `src/pathlib.ts` and `src/json.ts` reproduce the Python behaviour
 that HX's output and files depend on: string whitespace, path printing,
@@ -46,26 +34,13 @@ wherever the result reaches a user or a file.
 | 2 | Terminal renderer, keys, editor, markdown, TUI views, slash commands | `test_chat`, `test_input`, `test_queue`, `test_commands`, the TUI tests in `test_tools`, `test_edits`, `test_reads`, `test_shell`, `test_extend` | done |
 | 3 | MCP, `hx mcp`, `hx trace` and `/trace`, the Symbols tool | the rest of `test_extend` and `test_cli`, `test_trace_writes_a_self_contained_page` | done |
 | 4 | Codex, Claude Code and Devin providers; live tests | `test_claude_code`, `test_plan_usage`, `test_effort_carries_into_every_new_session` | done |
-| 5 | Delete the Python build; npm release and `install.sh` | the whole suite | npm 1.0.0 ready; Python still in the tree |
+| 5 | Delete the Python build; npm release and `install.sh` | the whole suite | done (1.0.0) |
 
 ## Publishing
 
-The TypeScript build is published to npm as `@sunilaleti/hx`. The Python
-build stays in the tree until `ts-rewrite` is merged; the merge deletes it.
-
-```sh
-npm login                       # once, as sunilaleti
-npm run e2e                     # the whole suite, on the bundle npm will ship
-npm publish                     # runs check and build first (prepublishOnly)
-```
-
-There is one channel, `latest`: every version is a stable release, and a
-plain `npm publish` moves `latest` to it. There are no betas and no `next`
-tag. Each version needs its `## [x.y.z]` section in CHANGELOG.md before it is
-published.
-
-The `next` tag was the beta channel up to `0.3.0-beta.1`. Once 1.0.0 is out,
-remove it, so nothing points at the beta:
+See [Releasing](../README.md#releasing) in the README. Every version is a
+stable release on npm's `latest` tag. The `next` tag was the beta channel up to
+`0.3.0-beta.1`; once 1.0.0 is out, remove it, so nothing points at the beta:
 
 ```sh
 npm dist-tag rm @sunilaleti/hx next
@@ -127,11 +102,10 @@ Changes made on purpose after the port, so not in the Python build:
   `hx mcp approve`, file tools ask before credential files, the command parser
   sees `<(...)`, `>(...)`, zsh substitutions, awk pipes and `find -fprint0`,
   deny rules see through assignments, paths and wrappers, `acceptEdits` stops
-  at the project, and `$HX_HOME` is `0700`. `tests/e2e/test_security.py` fails
-  on the Python build by design.
+  at the project, and `$HX_HOME` is `0700`.
 
-Bugs in the Python build that are kept, so the two builds stay comparable
-until the cutover, and then fixed:
+Bugs carried over from the Python build, kept so the two builds stayed
+comparable, and still to fix:
 
 - `/mouse` toggles mouse reporting but then says the terminal driver has none.
 - `ctrl+t` and `/todos` say "No plan yet." even when the model wrote one: they

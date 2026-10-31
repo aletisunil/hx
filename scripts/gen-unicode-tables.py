@@ -1,9 +1,9 @@
-"""Generate src/term/unicode-tables.ts from the tables the Python build measured with.
+"""Generate src/term/unicode-tables.ts from wcwidth and unicodedata.
 
-The terminal renderer's widths have to agree with the terminal's, and the
-Python build's agreed with wcwidth and unicodedata. Running this against them
-reproduces those answers exactly: one range list per width, and the combining
-marks grapheme clusters extend over.
+The terminal renderer's widths have to agree with the terminal's, and HX's have
+always followed wcwidth and unicodedata. Running this against them reproduces
+those answers exactly: one range list per width, and the combining marks
+grapheme clusters extend over.
 
     uv run python scripts/gen-unicode-tables.py
 """
@@ -49,11 +49,15 @@ body = [
     "",
     emit("ZERO", "Code points `wcwidth` gives no cells.", ranges(lambda cp: widths[cp] == 0)),
     emit("WIDE", "Code points `wcwidth` gives two cells.", ranges(lambda cp: widths[cp] == 2)),
-    emit("CONTROL", "Code points `wcwidth` will not measure (-1).", ranges(lambda cp: widths[cp] < 0)),
+    emit(
+        "CONTROL", "Code points `wcwidth` will not measure (-1).", ranges(lambda cp: widths[cp] < 0)
+    ),
     emit(
         "MARKS",
         "General categories Mn, Me and Mc: marks that attach to the glyph before them.",
-        ranges(lambda cp: not surrogate(cp) and unicodedata.category(chr(cp)) in ("Mn", "Me", "Mc")),
+        ranges(
+            lambda cp: not surrogate(cp) and unicodedata.category(chr(cp)) in ("Mn", "Me", "Mc")
+        ),
     ),
 ]
 Path("src/term/unicode-tables.ts").write_text("\n".join(body))

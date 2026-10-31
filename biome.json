@@ -5,7 +5,6 @@
       "src/**/*.ts",
       "scripts/**/*.mjs",
       "*.json",
-      "!src/hx",
       "!src/tui/themes",
       "!src/term/unicode-tables.ts"
     ]

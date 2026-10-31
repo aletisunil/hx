@@ -43,6 +43,10 @@ the project follows [semantic versioning](https://semver.org/).
 
 - `hx upgrade`. Update by running the install command again.
 - The beta channel (`@sunilaleti/hx@next`). Every version is a stable release on `latest`.
+- The Python build. `hx-cli` on PyPI stops at 0.2.20 and gets no more releases. To move over,
+  run `uv tool uninstall hx-cli` and install from npm: `~/.hx` carries over as it is.
+  `install.sh` now checks for Node.js 22.15 or newer and installs from npm.
+- The `live` tests, which drove the Python build's internals against real APIs.
 
 ### Security
 
