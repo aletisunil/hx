@@ -27,16 +27,37 @@ import { EndOfInput, getpass, Interrupted, input, stdinIsTty } from "./console.t
 import { loadInstructions, resolveSystemPrompt } from "./core/context.ts";
 import { ImageError, loadImageFile } from "./core/images.ts";
 import type { ImageBlock } from "./core/messages.ts";
-import { latestSession, readMeta, SessionNotFound } from "./core/session.ts";
+import {
+  latestSession,
+  loadSession,
+  readMeta,
+  type Session,
+  SessionNotFound,
+} from "./core/session.ts";
 import { changelog, DocsUnavailable, docText, manual, README } from "./docs.ts";
+import { MCPError } from "./mcp/client.ts";
+import {
+  loadConfigs as loadMcpConfigs,
+  MCPManager,
+  type MCPServerConfig,
+  signIn as mcpSignIn,
+  removeConfig as removeMcpConfig,
+  type ServerStatus,
+  saveConfig as saveMcpConfig,
+  serverConfig,
+  usesOauth,
+} from "./mcp/manager.ts";
+import { credentialId as mcpCredentialId, SignInNotRequired } from "./mcp/oauth.ts";
 import { describe } from "./net.ts";
-import { absolute, expandUser, isDir, readText } from "./pathlib.ts";
+import { absolute, expandUser, isDir, join, readText, resolve } from "./pathlib.ts";
 import { authFile } from "./paths.ts";
 import { ModelRegistry } from "./providers/models.ts";
 import { saveApiKey } from "./providers/openrouter.ts";
 import * as registry from "./providers/registry.ts";
 import { formatFixed, osErrorText, purePath, repr, strip } from "./py.ts";
 import { buildRuntime, type Runtime } from "./runtime.ts";
+import { count } from "./text.ts";
+import { buildTrace, defaultTracePath, TRACE_FILENAME, writeTrace } from "./trace.ts";
 import { runSession } from "./tui/runtime.ts";
 import { VERSION } from "./version.ts";
 
@@ -143,6 +164,10 @@ async function dispatch(args: string[]): Promise<number> {
       return runAuthCommand(parsed.rest);
     case "print":
       return runPrintCommand(parsed);
+    case "mcp":
+      return runMcpCommand(parsed.rest);
+    case "trace":
+      return runTraceCommand(parsed);
     case "tui":
     case "resume":
       return runTuiCommand(parsed);
@@ -770,6 +795,245 @@ async function runPrintCommand(parsed: ParsedArgs): Promise<number> {
   return result.error ? 1 : 0;
 }
 
+/**
+ * Whether a lone `hx trace` argument is a destination, not a session id. Ids
+ * are `20260918-215601-7608a6b0`: no separator, no extension, no `~` or `.`.
+ */
+const looksLikeAPath = (arg: string) =>
+  arg.includes("/") ||
+  arg.startsWith("~") ||
+  arg.startsWith(".") ||
+  arg.toLowerCase().endsWith(".html");
+
+/**
+ * `hx trace [SESSION_ID] [PATH]` - write a session out as one HTML page. It
+ * reads the transcript rather than running anything, so it works on a
+ * session that ended months ago and on one another terminal has open now.
+ */
+function runTraceCommand(parsed: ParsedArgs): number {
+  const rest = parsed.rest;
+  const cwd = resolve(parsed.cwd ?? process.cwd());
+  let target: string | null = null;
+  let sessionId: string | null = null;
+  if (rest.length > 1) [sessionId, target] = rest as [string, string];
+  else if (rest.length) {
+    if (looksLikeAPath(rest[0] as string)) target = rest[0] as string;
+    else sessionId = rest[0] as string;
+  }
+  if (sessionId === null) {
+    const latest = latestSession(cwd);
+    if (latest === null) {
+      print(`error: no sessions recorded for ${cwd}`, process.stderr);
+      return 1;
+    }
+    sessionId = latest.sessionId;
+  }
+  let session: Session;
+  try {
+    session = loadSession(sessionId);
+  } catch (error) {
+    if (!(error instanceof SessionNotFound)) throw error;
+    print(`error: no session ${repr(sessionId)}`, process.stderr);
+    return 1;
+  }
+  let destination = defaultTracePath(session);
+  if (target !== null) {
+    // Relative to the shell, not to `--cwd`: that flag picks the project to
+    // trace, and `out.html` means the directory the user is standing in.
+    destination = purePath(expandUser(target));
+    if (isDir(destination)) destination = join(destination, TRACE_FILENAME);
+  }
+  let written: string;
+  try {
+    written = writeTrace(buildTrace(session), destination);
+  } catch (error) {
+    if (!(error as NodeJS.ErrnoException).code) throw error;
+    print(`error: could not write the trace: ${osErrorText(error)}`, process.stderr);
+    return 1;
+  }
+  // The path on stdout alone, so `open "$(hx trace)"` works.
+  print(written);
+  return 0;
+}
+
+const MCP_USAGE = `\
+hx mcp list                                  Show configured servers
+hx mcp add NAME COMMAND [ARGS...]            Add a stdio server
+hx mcp add NAME --url URL [--header K:V]...  Add an HTTP server
+hx mcp login NAME                            Sign in to an HTTP server in the browser
+hx mcp logout NAME                           Forget a server's sign-in
+hx mcp remove NAME                           Remove a server
+
+Add --user to write to ~/.hx/mcp.json instead of the project's .hx/mcp.json.
+An HTTP server that asks for sign-in gets it over OAuth unless a --header
+already sends Authorization.
+`;
+
+/** `hx mcp ...`: manage the configured MCP servers. */
+async function runMcpCommand(given: string[]): Promise<number> {
+  if (given.length && ["--help", "-h", "help"].includes(given[0] as string)) {
+    print(MCP_USAGE);
+    return 0;
+  }
+  const userLevel = given.includes("--user");
+  const args = given.filter((arg) => arg !== "--user");
+  const cwd = process.cwd();
+
+  if (!args.length || args[0] === "list") {
+    const configs = loadMcpConfigs(cwd);
+    if (!configs.length) {
+      print("No MCP servers configured.\n");
+      print(MCP_USAGE);
+      return 0;
+    }
+    for (const status of await probeServers(configs)) {
+      if (status.needsLogin) {
+        print(`${ljust(status.name, 20)} ${status.error} - run \`hx mcp login ${status.name}\``);
+        continue;
+      }
+      const mark = status.connected ? "ok" : "unavailable";
+      const detail = status.error ? ` - ${status.error}` : ` (${count(status.toolCount, "tool")})`;
+      print(`${ljust(status.name, 20)} ${mark}${detail}`);
+    }
+    return 0;
+  }
+
+  if (args[0] === "add") {
+    if (args.length < 3) {
+      print(MCP_USAGE, process.stderr);
+      return 2;
+    }
+    const name = args[1] as string;
+    let config: MCPServerConfig;
+    if (args[2] === "--url") {
+      let url: string;
+      let headers: Record<string, string>;
+      try {
+        [url, headers] = parseHttpAdd(args.slice(3));
+      } catch (error) {
+        if (!(error instanceof UsageError)) throw error;
+        print(`error: ${error.message}\n\n${MCP_USAGE}`, process.stderr);
+        return 2;
+      }
+      config = serverConfig({ name, transport: "http", url, headers });
+    } else {
+      config = serverConfig({
+        name,
+        transport: "stdio",
+        command: args[2] as string,
+        args: args.slice(3),
+      });
+    }
+    print(`Added ${name} to ${saveMcpConfig(config, cwd, userLevel)}`);
+    return 0;
+  }
+
+  if (args[0] === "login" || args[0] === "logout") {
+    if (args.length < 2) {
+      print(MCP_USAGE, process.stderr);
+      return 2;
+    }
+    const server = loadMcpConfigs(cwd).find((c) => c.name === args[1]);
+    if (server === undefined) {
+      print(`No server named ${args[1]}.`, process.stderr);
+      return 1;
+    }
+    return args[0] === "login" ? mcpLogin(server) : mcpLogout(server);
+  }
+
+  if (args[0] === "remove") {
+    if (args.length < 2) {
+      print(MCP_USAGE, process.stderr);
+      return 2;
+    }
+    if (removeMcpConfig(args[1] as string, cwd, userLevel)) {
+      print(`Removed ${args[1]}.`);
+      return 0;
+    }
+    print(`No server named ${args[1]}.`, process.stderr);
+    return 1;
+  }
+
+  print(MCP_USAGE, process.stderr);
+  return 2;
+}
+
+/** `URL [--header 'Name: value']...` from `hx mcp add NAME --url`. */
+function parseHttpAdd(rest: string[]): [string, Record<string, string>] {
+  if (!rest.length || (rest[0] as string).startsWith("--"))
+    throw new UsageError("--url needs a URL");
+  const url = rest[0] as string;
+  const headers: Record<string, string> = {};
+  const tail = rest.slice(1);
+  while (tail.length) {
+    const flag = tail.shift() as string;
+    if (!["--header", "-H"].includes(flag) || !tail.length)
+      throw new UsageError(`unexpected ${repr(flag)}`);
+    const raw = tail.shift() as string;
+    const colon = raw.indexOf(":");
+    const name = colon < 0 ? raw : raw.slice(0, colon);
+    if (colon < 0 || !strip(name)) throw new UsageError("a header is written 'Name: value'");
+    headers[strip(name)] = strip(raw.slice(colon + 1));
+  }
+  return [url, headers];
+}
+
+async function mcpLogin(config: MCPServerConfig): Promise<number> {
+  try {
+    await mcpSignIn(config, new ConsoleLogin());
+  } catch (error) {
+    if (error instanceof SignInNotRequired) {
+      print(error.message);
+      return 0;
+    }
+    if (
+      error instanceof MCPError ||
+      error instanceof OAuthError ||
+      error instanceof CallbackError
+    ) {
+      print(`error: ${error.message}`, process.stderr);
+      return 1;
+    }
+    if (error instanceof Interrupted) {
+      print("\nCancelled.", process.stderr);
+      return 1;
+    }
+    throw error;
+  }
+  const [status] = (await probeServers([config])) as [ServerStatus];
+  if (status.connected) {
+    print(`Signed in to ${config.name}: ${count(status.toolCount, "tool")} available.`);
+    return 0;
+  }
+  print(`Signed in, but ${config.name} is still unavailable: ${status.error}`, process.stderr);
+  return 1;
+}
+
+function mcpLogout(config: MCPServerConfig): number {
+  if (!config.url) {
+    print(`${config.name} is a local server; there is no sign-in to forget.`);
+    return 0;
+  }
+  if (!usesOauth(config)) {
+    // The stored sign-in is the server's, not this entry's: another project
+    // may reach the same server over OAuth and still need it.
+    print(`${config.name} sends its own Authorization header; there is no sign-in to forget.`);
+    return 0;
+  }
+  if (new AuthStore().delete(mcpCredentialId(config.url))) print(`Signed out of ${config.name}.`);
+  else print(`Not signed in to ${config.name}.`);
+  return 0;
+}
+
+async function probeServers(configs: MCPServerConfig[]): Promise<ServerStatus[]> {
+  const manager = new MCPManager(configs);
+  try {
+    return await manager.connectAll();
+  } finally {
+    await manager.closeAll();
+  }
+}
+
 /** Boot the full stack - settings, provider, tools, MCP, skills - and run the TUI. */
 async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
   // Taken before anything starts, so no tool, MCP server or nested hx inherits it.
@@ -806,6 +1070,7 @@ async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
       sandboxBackend: runtime.sandboxBackend,
       skills: runtime.skills,
       agents: runtime.agents,
+      mcp: runtime.mcp,
       notices: runtime.notices,
       checkpoints: runtime.checkpoints,
       renameLeft,

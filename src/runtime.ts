@@ -23,16 +23,15 @@ import { AgentLoop } from "./core/loop.ts";
 import { loadSession, newSession, type Session } from "./core/session.ts";
 import { GitWatcher, gitInjector } from "./git.ts";
 import { HookEngine } from "./hooks/engine.ts";
+import { loadConfigs as loadMcpConfigs, MCPManager, type ServerStatus } from "./mcp/manager.ts";
 import { describe, tlsNotice } from "./net.ts";
-import { exists, join } from "./pathlib.ts";
+import { join } from "./pathlib.ts";
 import {
   ensureUserDirs,
   projectLocalSettingsFile,
-  projectMcpFile,
   projectSettingsFile,
   sessionCheckpointsDir,
   sessionOutputsDir,
-  userHome,
 } from "./paths.ts";
 import { loadRules, migrateLegacyRules, PermissionEngine } from "./permissions/engine.ts";
 import { defaultPolicy, Sandbox } from "./permissions/sandbox.ts";
@@ -69,6 +68,7 @@ export class Runtime {
     readonly checkpoints: CheckpointStore,
     /** What `/hooks` reports on. */
     readonly hooks: HookEngine,
+    readonly mcp: MCPManager | null,
     notices: string[],
   ) {
     this.notices = notices;
@@ -83,25 +83,19 @@ export class Runtime {
   }
 
   /**
-   * Connect MCP servers and register their tools. The MCP client is still to
-   * come across from the Python build; a configured server is said to be
-   * unavailable rather than left out without a word.
+   * Connect MCP servers and register their tools. Done after the loop is
+   * built: a slow or broken server delays tool availability, not startup.
    */
-  async connectMcp(): Promise<
-    { name: string; connected: boolean; needsLogin: boolean; error: string }[]
-  > {
-    const configured = [projectMcpFile(this.settings.cwd), join(userHome(), "mcp.json")].some(
-      exists,
-    );
-    if (!configured) return [];
-    return [
-      {
-        name: "mcp",
-        connected: false,
-        needsLogin: false,
-        error: "MCP servers are not ported to the TypeScript build yet",
-      },
-    ];
+  async connectMcp(): Promise<ServerStatus[]> {
+    if (this.mcp === null) return [];
+    const statuses = await this.mcp.connectAll();
+    this.mcp.registerTools(this.tools);
+    for (const status of statuses)
+      if (status.needsLogin)
+        this.notices.push(
+          `MCP server ${status.name} needs sign-in. Run /mcp login ${status.name}.`,
+        );
+    return statuses;
   }
 
   /**
@@ -126,6 +120,7 @@ export class Runtime {
   }
 
   async aclose(): Promise<void> {
+    await this.mcp?.closeAll();
     await this.jobs?.closeAll();
     await this.shell?.close();
     this.sandbox?.cleanup();
@@ -284,6 +279,7 @@ export function buildRuntime(parsed: RuntimeArgs, resume: string | null = null):
     tools,
     checkpoints,
     hooks,
+    new MCPManager(loadMcpConfigs(settings.cwd)),
     notices,
   );
 }

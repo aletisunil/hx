@@ -45,7 +45,7 @@ export interface SessionMeta {
 }
 
 /** `meta.json`, with the keys in the order they have always been written. */
-function metaToDict(meta: SessionMeta): Record<string, unknown> {
+export function metaToDict(meta: SessionMeta): Record<string, unknown> {
   return {
     session_id: meta.sessionId,
     cwd: meta.cwd,

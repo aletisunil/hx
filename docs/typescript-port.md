@@ -44,7 +44,7 @@ wherever the result reaches a user or a file.
 | 0 | Harness, scaffold, `--version`, `--help`, `docs`, `changelog`, `prompt` | 7 of `test_cli` | done |
 | 1 | Config, auth and logins, TLS, OpenRouter, models, sessions, the agent loop, tools, permissions, sandbox, hooks, skills, subagents, web search, `-p` | every test that does not open the TUI, bar MCP and trace | done |
 | 2 | Terminal renderer, keys, editor, markdown, TUI views, slash commands | `test_chat`, `test_input`, `test_queue`, `test_commands`, the TUI tests in `test_tools`, `test_edits`, `test_reads`, `test_shell`, `test_extend` | done |
-| 3 | MCP, `hx mcp`, `hx trace` and `/trace`, the Symbols tool | the rest of `test_extend` and `test_cli`, `test_trace_writes_a_self_contained_page` | |
+| 3 | MCP, `hx mcp`, `hx trace` and `/trace`, the Symbols tool | the rest of `test_extend` and `test_cli`, `test_trace_writes_a_self_contained_page` | done |
 | 4 | Codex, Claude Code and Devin providers; live tests | `test_claude_code`, `test_plan_usage`, `test_effort_carries_into_every_new_session` | |
 | 5 | Delete the Python build; npm release, `install.sh`, `hx upgrade` | the whole suite | |
 
@@ -74,6 +74,16 @@ reaches:
 - `/resume` into another directory starts the new HX as a child process that
   takes over the terminal. Python replaced its own process with `exec`, which
   Node cannot do; the exit status is passed through.
+
+- The Symbols tool reads its grammars from `@vscode/tree-sitter-wasm`, where
+  Python used the `tree-sitter-language-pack` wheels. It is optional in both
+  builds and off until installed: `npm install -g @vscode/tree-sitter-wasm`
+  beside HX. Its answers match Python's on Python, TypeScript, TSX,
+  JavaScript, Go and Rust.
+- Times in session files and traces are recorded to the millisecond, where
+  Python recorded them to the microsecond.
+- When several MCP servers fail at once, their warnings can reach stderr in
+  a different order.
 
 Bugs in the Python build that are kept, so the two builds stay comparable
 until the cutover, and then fixed:

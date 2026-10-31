@@ -26,6 +26,7 @@ import { resumableSessions, type Session } from "../core/session.ts";
 import { formatCost, formatPercent, formatRenewal, formatTokens } from "../core/usage.ts";
 import { compareCodePoints } from "../json.ts";
 import { keymap } from "../keys.ts";
+import { type MCPManager, type ServerStatus, usesOauth } from "../mcp/manager.ts";
 import { describe } from "../net.ts";
 import { expandUser, isDir, join, resolve } from "../pathlib.ts";
 import {
@@ -49,6 +50,13 @@ import {
   strip,
 } from "../py.ts";
 import { count } from "../text.ts";
+import {
+  buildTrace,
+  defaultTracePath,
+  openInBrowser,
+  TRACE_FILENAME,
+  writeTrace,
+} from "../trace.ts";
 import type { HXSession } from "./runtime.ts";
 import { palettes, THEME } from "./theme.ts";
 import { ConfigureDialog, LoginDialog, ProviderDialog, type ProviderRow } from "./views/login.ts";
@@ -595,24 +603,7 @@ async function cmdAgents(ctx: CommandContext, _args: string): Promise<void> {
   ctx.app.notice(lines.join("\n"));
 }
 
-/** One MCP server's state, as `/mcp` reports it. */
-export interface McpServerStatus {
-  readonly name: string;
-  readonly connected: boolean;
-  readonly needsLogin: boolean;
-  readonly error: string;
-  readonly toolCount: number;
-}
-
-/** What `/mcp` needs from the MCP client. */
-export interface McpManager {
-  readonly configs: readonly { readonly name: string; readonly usesOauth: boolean }[];
-  config(name: string): { readonly name: string; readonly usesOauth: boolean } | null;
-  status(): McpServerStatus[];
-  login(name: string, interaction: LoginDialog): Promise<McpServerStatus>;
-  logout(name: string): Promise<boolean>;
-  reconnect(name: string): Promise<McpServerStatus>;
-}
+export type McpManager = MCPManager;
 
 /** `/mcp [login|logout|reconnect NAME]` - server status, and signing in. */
 async function cmdMcp(ctx: CommandContext, args: string): Promise<void> {
@@ -634,7 +625,8 @@ async function cmdMcp(ctx: CommandContext, args: string): Promise<void> {
     }
     if (action === "login") await mcpLogin(ctx, manager, name);
     else if (action === "logout") {
-      if (!manager.config(name)?.usesOauth) {
+      const config = manager.config(name);
+      if (config === null || !usesOauth(config)) {
         ctx.app.notice(`${name} does not sign in with OAuth; nothing to forget.`, "warning");
         return;
       }
@@ -664,13 +656,13 @@ async function cmdMcp(ctx: CommandContext, args: string): Promise<void> {
 /** The server `/mcp login` means when there is exactly one it could mean. */
 function onlyServerNeedingLogin(manager: McpManager): string {
   const waiting = manager.status().filter((s) => s.needsLogin);
-  return waiting.length === 1 ? (waiting[0] as McpServerStatus).name : "";
+  return waiting.length === 1 ? (waiting[0] as ServerStatus).name : "";
 }
 
 async function mcpLogin(ctx: CommandContext, manager: McpManager, name: string): Promise<void> {
   const modal = new LoginDialog(`Sign in to ${name}`, () => ctx.app.repaint());
   ctx.app.show(modal);
-  let status: McpServerStatus;
+  let status: ServerStatus;
   try {
     status = await manager.login(name, modal);
   } catch (error) {
@@ -689,7 +681,7 @@ async function mcpLogin(ctx: CommandContext, manager: McpManager, name: string):
 function mcpStatusNotice(
   ctx: CommandContext,
   name: string,
-  status: McpServerStatus,
+  status: ServerStatus,
   signedIn = false,
 ): void {
   const prefix = signedIn ? `Signed in to ${name}` : name;
@@ -1084,39 +1076,23 @@ async function cmdCopy(ctx: CommandContext, _args: string): Promise<void> {
   ctx.app.notice(`Copied the last reply to the clipboard (${used}).`, "success");
 }
 
-/** Writes the session to a self-contained HTML page and returns where, and
- * how many bytes. Supplied by the trace module. */
-export type TraceWriter = (ctx: CommandContext, target: string) => Promise<string>;
-/** Opens a written trace, where a real browser can be reached. */
-export type TraceOpener = (path: string) => Promise<boolean>;
-
-let traceWriter: TraceWriter | null = null;
-let traceOpener: TraceOpener | null = null;
-
-/** Wire `/trace` to the trace module, which registers itself when loaded. */
-export function setTraceWriter(writer: TraceWriter, opener: TraceOpener): void {
-  traceWriter = writer;
-  traceOpener = opener;
-}
-
 /**
  * `/trace [path]` - write the whole session to a self-contained HTML page.
- * `--no-open` writes the file and stops there.
+ * Traced from the live session, so the turn that just landed is in the page.
+ * `--no-open` writes the file and stops there; opening is attempted only
+ * where a graphical browser can be reached.
  */
 async function cmdTrace(ctx: CommandContext, args: string): Promise<void> {
   const [target, openAfter] = traceArgs(args);
-  if (traceWriter === null || traceOpener === null) {
-    ctx.app.notice("Tracing is not ported to the TypeScript build yet.", "error");
-    return;
-  }
   let written: string;
   try {
-    written = await traceWriter(ctx, target);
+    written = writeSessionTrace(ctx, target);
   } catch (error) {
+    if (!(error as NodeJS.ErrnoException).code) throw error;
     ctx.app.notice(`Could not write the trace: ${osErrorText(error)}`, "error");
     return;
   }
-  const opened = openAfter && (await traceOpener(written));
+  const opened = openAfter && (await openInBrowser(written));
   const trailer =
     openAfter && !opened ? " No browser could be launched here; open it yourself." : "";
   ctx.app.notice(
@@ -1131,11 +1107,25 @@ function traceArgs(args: string): [string, boolean] {
   return [words.filter((word) => word !== "--no-open").join(" "), !words.includes("--no-open")];
 }
 
-/** Where `/trace <target>` writes: a directory gets the default file name. */
-export function traceTarget(cwd: string, target: string, filename: string): string {
-  let path = expandUser(target);
-  if (!path.startsWith("/")) path = join(cwd, path);
-  return isDir(path) ? join(path, filename) : path;
+/** Flush, build and write the trace of the session in force. */
+function writeSessionTrace(ctx: CommandContext, target: string): string {
+  const session = ctx.session;
+  session.flush();
+  const loop = ctx.app.loop;
+  const trace = buildTrace(session, {
+    systemPrompt: loop.context.systemPrompt,
+    tools: loop.tools.schemas(),
+    projectContext: loop.projectContext,
+    skillsIndex: loop.skillsIndex,
+    live: true,
+  });
+  let path = defaultTracePath(session);
+  if (target) {
+    path = expandUser(target);
+    if (!path.startsWith("/")) path = join(ctx.settings.cwd, path);
+    if (isDir(path)) path = join(path, TRACE_FILENAME);
+  }
+  return writeTrace(trace, path);
 }
 
 /** Compact file size for a notice (e.g. `184 KB`). */

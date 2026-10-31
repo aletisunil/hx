@@ -18,7 +18,7 @@ import {
 const DESCRIPTION = `Read a file from the local filesystem.
 
 Returns numbered lines, each labelled with a short content anchor:
-\`   12 a3f9\\tcontent\`. Pass those anchors to Edit's \`hashline\` argument to
+\`   12 a3f9\tcontent\`. Pass those anchors to Edit's \`hashline\` argument to
 replace a span without retyping it. Use \`offset\`/\`limit\` for large files.
 Prefer reading the part you need over reading a whole large file.
 

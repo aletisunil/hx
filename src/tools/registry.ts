@@ -32,6 +32,7 @@ import { EditTool } from "./edit.ts";
 import { GlobTool } from "./glob.ts";
 import { GrepTool } from "./grep.ts";
 import { ReadTool } from "./read.ts";
+import { SymbolsTool, available as symbolsAvailable } from "./symbols.ts";
 import { type TodoList, TodoWriteTool } from "./todo.ts";
 import { CreditLedger, WebFetchTool, WebSearchTool } from "./websearch.ts";
 import { WriteTool } from "./write.ts";
@@ -156,6 +157,7 @@ export function buildDefaultRegistry(
   registry.register(new EditTool(options.checkpoints ?? null));
   registry.register(new GlobTool());
   registry.register(new GrepTool());
+  if (symbolsAvailable()) registry.register(new SymbolsTool());
   if (options.todos) registry.register(new TodoWriteTool(options.todos, options.bus ?? null));
   if (options.auth?.hasCredential(TAVILY)) {
     // One ledger between them: the bill is per key, not per tool.

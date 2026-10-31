@@ -287,6 +287,9 @@ export interface RequestOptions {
   readonly body?: string | Buffer;
   /** Seconds to connect and to wait for each read. */
   readonly timeout?: number;
+  /** Seconds to wait for each read once the headers are in, when that differs
+   * from `timeout`. 0 waits forever: a stream the server holds open. */
+  readonly readTimeout?: number;
   readonly signal?: AbortSignal;
 }
 
@@ -315,7 +318,9 @@ export function request(url: string, options: RequestOptions = {}): Promise<Http
         signal: options.signal,
       },
       (incoming) => {
-        incoming.setTimeout(timeout, () => incoming.destroy(new TimeoutError(target.hostname)));
+        const read = options.readTimeout === undefined ? timeout : options.readTimeout * 1000;
+        if (read > 0)
+          incoming.setTimeout(read, () => incoming.destroy(new TimeoutError(target.hostname)));
         resolve(wrap(incoming));
       },
     );

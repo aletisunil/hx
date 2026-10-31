@@ -17,8 +17,10 @@ await build({
     js: '#!/usr/bin/env node\nimport { createRequire as __hxRequire } from "node:module";\nconst require = __hxRequire(import.meta.url);',
   },
   define: { __HX_VERSION__: JSON.stringify(version) },
+  // The trace page's template, bundled as the text it is.
+  loader: { ".html": "text" },
   sourcemap: "linked",
   // Native code, loaded from node_modules at run time rather than bundled.
-  external: ["sharp", "koffi"],
+  external: ["sharp", "koffi", "@vscode/tree-sitter-wasm"],
   logLevel: "warning",
 });
