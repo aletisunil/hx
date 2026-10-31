@@ -3,7 +3,7 @@
 import { readFileSync, rmSync } from "node:fs";
 import { build } from "esbuild";
 
-const { name, version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url)));
+const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url)));
 
 // The build owns dist/: whatever else is there - a uv build's wheels and the
 // .gitignore it leaves, which hides the bundle from npm - would ship with it.
@@ -20,7 +20,7 @@ await build({
   banner: {
     js: '#!/usr/bin/env node\nimport { createRequire as __hxRequire } from "node:module";\nconst require = __hxRequire(import.meta.url);',
   },
-  define: { __HX_VERSION__: JSON.stringify(version), __HX_PACKAGE__: JSON.stringify(name) },
+  define: { __HX_VERSION__: JSON.stringify(version) },
   // The trace page's template, bundled as the text it is.
   loader: { ".html": "text" },
   sourcemap: "linked",

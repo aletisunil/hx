@@ -415,10 +415,20 @@ export class HintsBar extends Widget {
   }
 }
 
+/** HX's logo, as the installer draws it. */
+export const LOGO = [
+  "    __  __  _  __",
+  "   / / / / | |/ /",
+  "  / /_/ /  |   /",
+  " / __  /  /   |",
+  "/_/ /_/  /_/|_|",
+];
+
 /** The block printed once, at the top of the session. */
 export class Header extends Widget {
   private versionText: string;
   private isExpanded = false;
+  private showLogo = false;
 
   constructor(
     version = "",
@@ -450,10 +460,23 @@ export class Header extends Widget {
     this.expanded = !this.isExpanded;
   }
 
+  /** The logo above the title: on the first screen of someone not signed in. */
+  get logo(): boolean {
+    return this.showLogo;
+  }
+
+  set logo(value: boolean) {
+    this.showLogo = value;
+    this.invalidate();
+  }
+
   draw(width: number): string[] {
     if (this.quiet) return [];
     const keys = keymap();
-    const lines = [fg("accent", "hx", { bold: true }) + fg("dim", ` v${this.versionText}`)];
+    const lines = this.showLogo
+      ? [...LOGO.map((row) => fg("accent", row, { bold: true })), ""]
+      : [];
+    lines.push(fg("accent", "hx", { bold: true }) + fg("dim", ` v${this.versionText}`));
     if (!this.isExpanded) {
       // Prose, so wrapped between words on a narrow terminal.
       const inner = Math.max(1, width - 2);

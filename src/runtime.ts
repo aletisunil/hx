@@ -6,7 +6,7 @@
 import type { AgentDefinition } from "./agents/definitions.ts";
 import { discover as discoverAgents } from "./agents/definitions.ts";
 import { SubagentRunner } from "./agents/subagent.ts";
-import { AuthResolver } from "./auth/resolve.ts";
+import { AuthResolver, MissingCredential } from "./auth/resolve.ts";
 import type { Layer } from "./config.ts";
 import { liftProjectGrants, loadSettings, type Settings } from "./config.ts";
 import { CheckpointStore } from "./core/checkpoints.ts";
@@ -23,6 +23,7 @@ import { AgentLoop } from "./core/loop.ts";
 import { loadSession, newSession, type Session } from "./core/session.ts";
 import { GitWatcher, gitInjector } from "./git.ts";
 import { HookEngine } from "./hooks/engine.ts";
+import { partition as partitionMcp, waitingNotice } from "./mcp/approval.ts";
 import { loadConfigs as loadMcpConfigs, MCPManager, type ServerStatus } from "./mcp/manager.ts";
 import { describe, tlsNotice } from "./net.ts";
 import { join } from "./pathlib.ts";
@@ -36,11 +37,12 @@ import {
 import { loadRules, migrateLegacyRules, PermissionEngine } from "./permissions/engine.ts";
 import { defaultPolicy, Sandbox } from "./permissions/sandbox.ts";
 import type { Provider } from "./providers/base.ts";
+import { DeferredProvider } from "./providers/deferred.ts";
 import { ModelRegistry } from "./providers/models.ts";
 import { buildProvider } from "./providers/registry.ts";
 import { buildIndex, discover as discoverSkills, type Skill } from "./skills/loader.ts";
 import { ActiveSkills, SkillTool } from "./skills/runtime.ts";
-import { BackgroundJobs, PersistentShell } from "./tools/bash.ts";
+import { BackgroundJobs, PersistentShell, posixShell } from "./tools/bash.ts";
 import { buildDefaultRegistry, type ToolRegistry } from "./tools/registry.ts";
 import { TaskTool } from "./tools/task.ts";
 import { TodoList, todoInjector } from "./tools/todo.ts";
@@ -149,8 +151,16 @@ export interface RuntimeArgs {
   readonly overrides: Layer | null;
 }
 
-/** Boot the stack: settings, provider, session, sandbox, tools, loop. */
-export function buildRuntime(parsed: RuntimeArgs, resume: string | null = null): Runtime {
+/**
+ * Boot the stack: settings, provider, session, sandbox, tools, loop. With
+ * `signedOut`, a route with no credential gets a provider that waits for a
+ * sign-in instead of failing: the TUI opens, and `/login` is one command away.
+ */
+export function buildRuntime(
+  parsed: RuntimeArgs,
+  resume: string | null = null,
+  signedOut = false,
+): Runtime {
   ensureUserDirs();
   const settings = loadSettings(parsed.cwd, parsed.overrides);
   const bus = new EventBus();
@@ -166,10 +176,16 @@ export function buildRuntime(parsed: RuntimeArgs, resume: string | null = null):
   const session = resume ? loadSession(resume) : newSession(settings.cwd, settings.models.model);
   // Built after the session because a subscription route keys its prompt
   // cache on the session id.
-  const provider = buildProvider(settings.models.model, auth, {
-    sessionId: session.meta.sessionId,
-    models,
-  });
+  let provider: Provider;
+  try {
+    provider = buildProvider(settings.models.model, auth, {
+      sessionId: session.meta.sessionId,
+      models,
+    });
+  } catch (error) {
+    if (!(signedOut && error instanceof MissingCredential)) throw error;
+    provider = new DeferredProvider(settings.models.model, auth, session.meta.sessionId, models);
+  }
 
   const sandbox = settings.permissions.sandbox
     ? new Sandbox(defaultPolicy(settings.cwd, settings.permissions.allowNetwork))
@@ -212,6 +228,15 @@ export function buildRuntime(parsed: RuntimeArgs, resume: string | null = null):
       `Ignored ${hooks.ignored.length} hook(s) declared in the project's shared settings - hooks run shell commands, so they are only loaded from your own settings. See /hooks.`,
     );
   }
+
+  if (settings.bash.shell && posixShell(settings.bash.shell) !== settings.bash.shell)
+    notices.push(
+      `bash.shell is ${settings.bash.shell}, which does not speak POSIX sh; commands run in ${shell.shell}.`,
+    );
+
+  const [mcpServers, waitingServers] = partitionMcp(loadMcpConfigs(settings.cwd), settings.cwd);
+  const waiting = waitingServers.filter((server) => server.config.enabled);
+  for (const server of waiting) notices.push(waitingNotice(server));
 
   const agents = new Map(discoverAgents(settings.cwd).map((agent) => [agent.name, agent]));
   const subagents = new SubagentRunner({
@@ -279,7 +304,7 @@ export function buildRuntime(parsed: RuntimeArgs, resume: string | null = null):
     tools,
     checkpoints,
     hooks,
-    new MCPManager(loadMcpConfigs(settings.cwd)),
+    new MCPManager(mcpServers, undefined, waiting),
     notices,
   );
 }

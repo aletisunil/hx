@@ -48,6 +48,7 @@ import type { Component } from "../term/component.ts";
 import type { Key } from "../term/keydecode.ts";
 import { TuiRunner } from "../term/loop.ts";
 import { ShiftEnter } from "../term/modifiers.ts";
+import { Spacer } from "../term/primitives.ts";
 import type { Terminal } from "../term/terminal.ts";
 import { VERSION } from "../version.ts";
 import { ClipboardError, copyText, readImage } from "./clipboard.ts";
@@ -112,6 +113,8 @@ export interface SessionExtras {
   checkpoints?: CheckpointStore | null;
   renameLeft?: string | null;
   terminal?: Terminal | null;
+  /** The model's route has no credential: what to say, on the first screen. */
+  signIn?: string | null;
 }
 
 /** Work that runs beside a turn - a slash command or a shell line - and the
@@ -207,6 +210,7 @@ export class HXSession {
     this.refreshStatus();
     // `hx resume <id>` loads the session before this object exists.
     if (this.loop.session.activeMessages().length) this.replayTranscript();
+    if (this.extra.signIn) this.showSignIn(this.extra.signIn);
     if (this.loop.permissions !== null)
       this.loop.permissions.asker = (request) => this.askPermission(request);
 
@@ -255,6 +259,14 @@ export class HXSession {
       status.invalidate();
       this.runner.requestRender();
     }
+  }
+
+  /** Say how to sign in, a row below the header, under the logo - unless a
+   * resumed conversation is already on screen. */
+  private showSignIn(hint: string): void {
+    if (!this.view.transcript.blocks.length) this.view.header.logo = true;
+    this.view.transcript.add(new Spacer(1));
+    this.view.transcript.add(new Notice(hint, "warning"));
   }
 
   // -- the surface the slash commands expect ---------------------------------

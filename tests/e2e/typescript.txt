@@ -9,5 +9,6 @@ tests/e2e/test_plan_usage.py
 tests/e2e/test_print.py
 tests/e2e/test_queue.py
 tests/e2e/test_reads.py
+tests/e2e/test_security.py
 tests/e2e/test_shell.py
 tests/e2e/test_tools.py

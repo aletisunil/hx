@@ -11,12 +11,12 @@ a sandboxed shell, and shows you what every turn costs.
 ## Install
 
 ```sh
-npm install --global @sunilaleti/hx@next
+npm install --global @sunilaleti/hx
 ```
 
 HX runs on [Node.js](https://nodejs.org/) 22.15 or newer, on macOS and Linux.
-Update with `hx upgrade`. The `@next` tag is the beta channel while the
-TypeScript build is being tested; a beta upgrades to the next beta.
+Run the same command again to update. Then run `hx`: the first time, it opens
+with the HX logo and says to type `/login`.
 
 ### `@sunilaleti/hx` on npm, `hx` in your terminal
 
@@ -329,6 +329,7 @@ hx --no-sandbox             # disable OS sandboxing (rules still apply)
 hx --system-prompt @p.md    # replace the system prompt for one run
 hx --append-system-prompt "Always run the tests"   # add to it; repeatable
 hx mcp list|add|remove      # manage MCP servers
+hx mcp approve <server>     # let a server from the project's .hx/mcp.json start
 hx mcp login <server>       # sign in to a remote MCP server in the browser
 hx mcp logout <server>      # forget a remote MCP server's sign-in
 hx auth [set|clear]         # manage the OpenRouter key
@@ -336,7 +337,6 @@ hx auth login [provider]    # sign in (openrouter, openai-codex, devin, claude-c
 hx auth logout <provider>   # forget a stored credential
 hx docs [section]           # the manual; no argument lists its sections
 hx changelog [version]      # what shipped in each version
-hx upgrade                  # update to the latest release
 ```
 
 Print mode is the scriptable one: stdout carries only the assistant's text, so
@@ -842,7 +842,19 @@ Two independent layers guard every tool call, and both must pass.
 holds even in bypass mode. Shell commands are decomposed into their real
 segments first, so an allow rule for `git status` does not carry
 `&& rm -rf /` along with it; a command that cannot be decomposed with
-confidence prompts rather than passing.
+confidence prompts rather than passing. What runs inside a command counts as a
+segment of its own - `$(...)`, `<(...)`, `>(...)` - so `cat <(rm -rf src)` is
+not a read-only `cat`. A deny rule matches the command however it is spelled:
+`deny: Bash(rm:*)` also stops `FOO=1 rm`, `/bin/rm` and `nohup rm`. An allow
+rule covers only what it names, so `allow: Bash(ls)` does not cover
+`LD_PRELOAD=x ls`.
+
+**Credential files** - the same `~/.ssh`, `~/.aws` and `auth.json` the sandbox
+guards - always ask before Read, Grep, Glob, Symbols, Write or Edit touch them,
+in every mode, symlinks followed. Those tools run inside HX, outside the
+sandbox. An allow rule that names the file, such as `allow: Read(~/.ssh/config)`,
+opens that one file. A search that starts above them, from `$HOME`, leaves
+them out.
 
 **An OS sandbox** wraps command execution: Seatbelt on macOS, bubblewrap on
 Linux. The filesystem is readable, writes are confined to the project and the
@@ -855,7 +867,13 @@ and the Tavily and Devin keys) are removed from the environment of every
 command it runs.
 
 Modes cycle with shift+tab: `plan` (read-only — mutating tools are not even
-offered to the model), `default`, `acceptEdits`, `bypass`.
+offered to the model), `default`, `acceptEdits`, `bypass`. `acceptEdits` covers
+the project's own files: a Write or Edit outside the project, through a symlink
+that leads out of it, or into its `.git` or `.hx` folder still asks.
+
+**Nothing that arrives with a clone runs by itself.** Hooks in a project's
+shared `.hx/settings.json` are ignored, and a server in its `.hx/mcp.json`
+starts only once you approve it - see [Extending it](#extending-it).
 
 ---
 
@@ -1083,7 +1101,16 @@ construction.
 ```
 
 Or `hx mcp add local python server.py`, or
-`hx mcp add remote --url https://example.com/mcp`. Tools arrive namespaced
+`hx mcp add remote --url https://example.com/mcp`.
+
+A server in the project's `.hx/mcp.json` runs a command on your machine, and
+the file arrives with a clone - so HX does not start it until you approve it.
+A session names each one waiting, with what it runs. `hx mcp approve local`
+starts it from the next session on, and `hx mcp add` approves what it adds.
+The approval is for that command: if a `git pull` changes it, the server waits
+again. Servers in your own `~/.hx/mcp.json` need no approval.
+
+Tools arrive namespaced
 `mcp__<server>__<tool>` in a deterministic order. Servers connect concurrently
 with a per-server timeout; one that is broken or slow logs a warning and is
 dropped rather than taking the session with it. A server that changes its tool

@@ -8,8 +8,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tests.e2e.conftest import HX, VERSION
+from tests.e2e.conftest import API_KEY, HX, VERSION
 from tests.e2e.report import REPO
+from tests.e2e.stub import Stub, say
 
 ECHO_SERVER = Path(__file__).parent / "fixtures" / "echo_server.py"
 
@@ -114,6 +115,37 @@ def test_missing_key_is_explained(hx: HX) -> None:
     assert result.returncode != 0
     assert "No OpenRouter API key found" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_first_run_opens_the_tui_and_says_to_login(hx: HX, stub: Stub) -> None:
+    """With nothing signed in, `hx` opens the TUI under the HX logo and says to /login rather
+    than asking for a key in the shell. A message sent before signing in gets the same answer
+    and never reaches a model; once a key is saved with /configure, the next one goes through."""
+    term = hx.tui(env={"HX_OPENROUTER_API_KEY": ""})
+    term.wait_for("Not signed in yet")
+    term.settle()
+    term.snapshot("first run, nothing signed in")
+    screen = term.text()
+    assert "/_/ /_/  /_/|_|" in screen
+    assert "Type /login to sign in with ChatGPT Plus/Pro, Claude Pro/Max" in screen
+    assert "OpenRouter API key (input hidden)" not in screen
+
+    term.submit("hello")
+    term.wait_for(lambda text: text.count("Not signed in yet") == 2)
+    assert stub.requests == []
+
+    term.submit("/configure")
+    term.wait_for("API key:")
+    term.paste(API_KEY)
+    term.press("enter")
+    term.wait_for("API key saved")
+
+    stub.script(say("Signed in and answering."))
+    term.submit("hello again")
+    term.wait_for("Signed in and answering.")
+    term.settle()
+    term.snapshot("the first message after signing in")
+    assert len(stub.requests) == 1
 
 
 def test_mcp_add_list_remove(hx: HX) -> None:

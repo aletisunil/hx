@@ -196,6 +196,18 @@ export function buildSeatbeltProfile(policy: SandboxPolicy): string {
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * The entry of `CREDENTIAL_PATHS` that `path` lies in, or `null`. `path` must be
+ * absolute with its symlinks resolved, as the credential paths are here.
+ */
+export function credentialPathOf(path: string): string | null {
+  for (const entry of CREDENTIAL_PATHS) {
+    const denied = real(absolute(expandUser(entry)));
+    if (path === denied || (entry.endsWith("/") && isRelativeTo(path, denied))) return entry;
+  }
+  return null;
+}
+
 /** Symlinks resolved: Seatbelt matches against the real path, so an
  * unresolved `/var/folders/...` deny silently covers nothing. */
 const real = (path: string) => resolve(path);

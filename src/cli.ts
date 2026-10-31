@@ -9,7 +9,6 @@
  * `hx mcp ...`         manage MCP servers
  * `hx docs [section]`  print the shipped manual
  * `hx changelog [ver]` print what shipped in each version
- * `hx upgrade`         self-update via npm
  *
  * Print mode exists so the harness is scriptable and E2E-testable without
  * driving a terminal UI.
@@ -35,6 +34,12 @@ import {
   SessionNotFound,
 } from "./core/session.ts";
 import { changelog, DocsUnavailable, docText, manual, README } from "./docs.ts";
+import {
+  approve as approveMcp,
+  describeServer,
+  partition as partitionMcp,
+  revoke as revokeMcp,
+} from "./mcp/approval.ts";
 import { MCPError } from "./mcp/client.ts";
 import {
   loadConfigs as loadMcpConfigs,
@@ -51,6 +56,7 @@ import { credentialId as mcpCredentialId, SignInNotRequired } from "./mcp/oauth.
 import { describe } from "./net.ts";
 import { absolute, expandUser, isDir, join, readText, resolve } from "./pathlib.ts";
 import { authFile } from "./paths.ts";
+import { DeferredProvider, signInHint } from "./providers/deferred.ts";
 import { ModelRegistry } from "./providers/models.ts";
 import { saveApiKey } from "./providers/openrouter.ts";
 import * as registry from "./providers/registry.ts";
@@ -59,7 +65,7 @@ import { buildRuntime, type Runtime } from "./runtime.ts";
 import { count } from "./text.ts";
 import { buildTrace, defaultTracePath, TRACE_FILENAME, writeTrace } from "./trace.ts";
 import { runSession } from "./tui/runtime.ts";
-import { PACKAGE, VERSION } from "./version.ts";
+import { VERSION } from "./version.ts";
 
 export const USAGE = `\
 hx - an agent harness for the terminal
@@ -76,7 +82,6 @@ Usage:
   hx auth [set|clear]       Show or change the OpenRouter API key
   hx docs [SECTION|--all]   Print the manual, or one section of it
   hx changelog [VERSION]    Print what shipped in each version
-  hx upgrade                Update hx to the latest version
   hx --version              Show version
   hx --help                 Show this message
 
@@ -168,29 +173,9 @@ async function dispatch(args: string[]): Promise<number> {
       return runMcpCommand(parsed.rest);
     case "trace":
       return runTraceCommand(parsed);
-    case "upgrade":
-      return runUpgradeCommand();
     default:
       return runTuiCommand(parsed);
   }
-}
-
-/**
- * `hx upgrade`: install the newest release with npm, on the channel this one
- * came from - a beta follows `next`, a release follows `latest`.
- */
-function runUpgradeCommand(): number {
-  const channel = VERSION.includes("-") ? "next" : "latest";
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const result = spawnSync(npm, ["install", "--global", `${PACKAGE}@${channel}`], {
-    stdio: "inherit",
-  });
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
-    print("npm is not installed. See https://nodejs.org/", process.stderr);
-    return 1;
-  }
-  if (result.error) throw result.error;
-  return result.status ?? 1;
 }
 
 export function parseArgs(args: string[]): ParsedArgs {
@@ -257,7 +242,7 @@ export function parseArgs(args: string[]): ParsedArgs {
 
   if (positional.length) {
     const [head, ...tail] = positional as [string, ...string[]];
-    if (["resume", "prompt", "trace", "mcp", "upgrade", "auth"].includes(head)) {
+    if (["resume", "prompt", "trace", "mcp", "auth"].includes(head)) {
       parsed.command = head;
       parsed.rest = tail;
       if (head === "resume" && tail.length) parsed.sessionId = tail[0] as string;
@@ -868,11 +853,14 @@ const MCP_USAGE = `\
 hx mcp list                                  Show configured servers
 hx mcp add NAME COMMAND [ARGS...]            Add a stdio server
 hx mcp add NAME --url URL [--header K:V]...  Add an HTTP server
+hx mcp approve NAME                          Let a server from the project's .hx/mcp.json start
 hx mcp login NAME                            Sign in to an HTTP server in the browser
 hx mcp logout NAME                           Forget a server's sign-in
 hx mcp remove NAME                           Remove a server
 
 Add --user to write to ~/.hx/mcp.json instead of the project's .hx/mcp.json.
+A server in the project's .hx/mcp.json came with the project, so it starts only
+once approved: \`hx mcp add\` approves what it adds, and \`hx mcp approve\` the rest.
 An HTTP server that asks for sign-in gets it over OAuth unless a --header
 already sends Authorization.
 `;
@@ -894,7 +882,15 @@ async function runMcpCommand(given: string[]): Promise<number> {
       print(MCP_USAGE);
       return 0;
     }
-    for (const status of await probeServers(configs)) {
+    // Listing must not start what the user has not approved: that would run it.
+    const [startable, waiting] = partitionMcp(configs, cwd);
+    for (const { config, changed } of waiting) {
+      const why = changed ? "changed since approved" : "not approved";
+      print(
+        `${ljust(config.name, 20)} ${why} - runs ${describeServer(config)}; run \`hx mcp approve ${config.name}\``,
+      );
+    }
+    for (const status of await probeServers(startable)) {
       if (status.needsLogin) {
         print(`${ljust(status.name, 20)} ${status.error} - run \`hx mcp login ${status.name}\``);
         continue;
@@ -933,6 +929,28 @@ async function runMcpCommand(given: string[]): Promise<number> {
       });
     }
     print(`Added ${name} to ${saveMcpConfig(config, cwd, userLevel)}`);
+    // The user typed it, so it needs no further approval.
+    if (!userLevel) approveMcp({ ...config, source: "project" }, cwd);
+    return 0;
+  }
+
+  if (args[0] === "approve") {
+    if (args.length < 2) {
+      print(MCP_USAGE, process.stderr);
+      return 2;
+    }
+    const server = loadMcpConfigs(cwd).find((c) => c.name === args[1]);
+    if (server === undefined) {
+      print(`No server named ${args[1]}.`, process.stderr);
+      return 1;
+    }
+    if (server.source === "user") {
+      print(`${server.name} is in your own ~/.hx/mcp.json; it needs no approval.`);
+      return 0;
+    }
+    approveMcp(server, cwd);
+    const does = server.url ? "connects to" : "runs";
+    print(`Approved ${server.name}. It ${does}: ${describeServer(server)}`);
     return 0;
   }
 
@@ -941,9 +959,17 @@ async function runMcpCommand(given: string[]): Promise<number> {
       print(MCP_USAGE, process.stderr);
       return 2;
     }
-    const server = loadMcpConfigs(cwd).find((c) => c.name === args[1]);
+    const configs = loadMcpConfigs(cwd);
+    const server = configs.find((c) => c.name === args[1]);
     if (server === undefined) {
       print(`No server named ${args[1]}.`, process.stderr);
+      return 1;
+    }
+    if (args[0] === "login" && partitionMcp([server], cwd)[1].length) {
+      print(
+        `${server.name} has not been approved. Run \`hx mcp approve ${server.name}\` first.`,
+        process.stderr,
+      );
       return 1;
     }
     return args[0] === "login" ? mcpLogin(server) : mcpLogout(server);
@@ -955,6 +981,7 @@ async function runMcpCommand(given: string[]): Promise<number> {
       return 2;
     }
     if (removeMcpConfig(args[1] as string, cwd, userLevel)) {
+      if (!userLevel) revokeMcp(args[1] as string, cwd);
       print(`Removed ${args[1]}.`);
       return 0;
     }
@@ -1053,19 +1080,17 @@ async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
   try {
     resume = resumeTarget(parsed);
     moved = adoptSessionDirectory(parsed, resume);
-    runtime = buildRuntime(parsed, resume);
+    // Signed out, the TUI still opens: it says to /login rather than asking
+    // for a key in the shell before anything is on screen.
+    runtime = buildRuntime(parsed, resume, true);
   } catch (error) {
-    if (!(error instanceof MissingCredential)) return report(error);
-    // Onboard for the route the configured model needs, not always for
-    // OpenRouter: a user set to a Codex model wants a sign-in, not a key.
-    if ((await runLogin(error.providerId)) !== 0) return report(error);
-    try {
-      runtime = buildRuntime(parsed, resume);
-    } catch (retry) {
-      return report(retry);
-    }
+    return report(error);
   }
   if (moved) runtime.notices.push(moved);
+  const signIn =
+    runtime.provider instanceof DeferredProvider
+      ? signInHint(runtime.loop.model, runtime.auth)
+      : null;
 
   let relaunch: string | null = null;
   try {
@@ -1082,6 +1107,7 @@ async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
       notices: runtime.notices,
       checkpoints: runtime.checkpoints,
       renameLeft,
+      signIn,
     });
   } finally {
     runtime.bus.close();

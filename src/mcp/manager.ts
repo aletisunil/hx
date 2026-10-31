@@ -33,6 +33,7 @@ import {
 } from "../tools/base.ts";
 import { capOutput, summarizeForUi } from "../tools/output.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
+import type { WaitingServer } from "./approval.ts";
 import {
   HTTPTransport,
   type JsonObject,
@@ -64,6 +65,9 @@ export interface MCPServerConfig {
   /** Seconds. */
   readonly timeout: number;
   readonly oauth: oauth.OAuthOptions;
+  /** Which `mcp.json` it came from. A project's arrives with a clone, so its
+   * servers wait for the user's approval - see `approval.ts`. */
+  readonly source: "user" | "project";
 }
 
 export function serverConfig(
@@ -78,6 +82,7 @@ export function serverConfig(
     enabled: true,
     timeout: 30,
     oauth: oauth.noOptions(),
+    source: "user",
     ...fields,
   };
 }
@@ -199,6 +204,8 @@ export class MCPManager {
   constructor(
     configs: readonly MCPServerConfig[],
     readonly store: AuthStore = new AuthStore(),
+    /** The project's servers that wait for approval, never started here. */
+    readonly waiting: readonly WaitingServer[] = [],
   ) {
     this.configs = configs.filter((config) => config.enabled);
   }
@@ -433,8 +440,11 @@ const userMcpFile = () => join(userHome(), "mcp.json");
 /** Read and merge user and project `mcp.json`. Project entries win by name. */
 export function loadConfigs(cwd: string): MCPServerConfig[] {
   const merged = new Map<string, MCPServerConfig>();
-  for (const path of [userMcpFile(), projectMcpFile(cwd)])
-    for (const config of readFile(path)) merged.set(config.name, config);
+  for (const [path, source] of [
+    [userMcpFile(), "user"],
+    [projectMcpFile(cwd), "project"],
+  ] as const)
+    for (const config of readFile(path, source)) merged.set(config.name, config);
   return [...merged.keys()]
     .sort(compareCodePoints)
     .map((name) => merged.get(name) as MCPServerConfig);
@@ -446,7 +456,7 @@ const isObject = (value: unknown): value is JsonObject =>
 const strings = (raw: unknown): Record<string, string> =>
   Object.fromEntries(Object.entries(isObject(raw) ? raw : {}).map(([k, v]) => [k, String(v)]));
 
-function readFile(path: string): MCPServerConfig[] {
+function readFile(path: string, source: MCPServerConfig["source"]): MCPServerConfig[] {
   if (!isFile(path)) return [];
   let data: unknown;
   try {
@@ -475,6 +485,7 @@ function readFile(path: string): MCPServerConfig[] {
         enabled: "enabled" in raw ? truthy(raw.enabled) : true,
         timeout: "timeout" in raw ? toFloat(raw.timeout) : 30,
         oauth: oauth.optionsFromJson(raw.oauth),
+        source,
       }),
     );
   }

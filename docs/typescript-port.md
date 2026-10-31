@@ -46,24 +46,30 @@ wherever the result reaches a user or a file.
 | 2 | Terminal renderer, keys, editor, markdown, TUI views, slash commands | `test_chat`, `test_input`, `test_queue`, `test_commands`, the TUI tests in `test_tools`, `test_edits`, `test_reads`, `test_shell`, `test_extend` | done |
 | 3 | MCP, `hx mcp`, `hx trace` and `/trace`, the Symbols tool | the rest of `test_extend` and `test_cli`, `test_trace_writes_a_self_contained_page` | done |
 | 4 | Codex, Claude Code and Devin providers; live tests | `test_claude_code`, `test_plan_usage`, `test_effort_carries_into_every_new_session` | done |
-| 5 | Delete the Python build; npm release, `install.sh`, `hx upgrade` | the whole suite | npm beta out; Python still in the tree |
+| 5 | Delete the Python build; npm release and `install.sh` | the whole suite | npm 1.0.0 ready; Python still in the tree |
 
-## Publishing the beta
+## Publishing
 
-The TypeScript build is published to npm as `@sunilaleti/hx` from the
-`ts-rewrite` branch, on the `next` tag, while it is tested. The Python build
-stays in the tree until the branch is merged; the merge deletes it.
+The TypeScript build is published to npm as `@sunilaleti/hx`. The Python
+build stays in the tree until `ts-rewrite` is merged; the merge deletes it.
 
 ```sh
 npm login                       # once, as sunilaleti
 npm run e2e                     # the whole suite, on the bundle npm will ship
-npm publish --tag next          # runs check and build first (prepublishOnly)
+npm publish                     # runs check and build first (prepublishOnly)
 ```
 
-A pre-release version must go out with `--tag`, so a beta never becomes what a
-plain `npm install --global @sunilaleti/hx` gets. For the next beta, add a
-`## [x.y.z-beta.n]` section to CHANGELOG.md, bump `version` in package.json,
-and publish again.
+There is one channel, `latest`: every version is a stable release, and a
+plain `npm publish` moves `latest` to it. There are no betas and no `next`
+tag. Each version needs its `## [x.y.z]` section in CHANGELOG.md before it is
+published.
+
+The `next` tag was the beta channel up to `0.3.0-beta.1`. Once 1.0.0 is out,
+remove it, so nothing points at the beta:
+
+```sh
+npm dist-tag rm @sunilaleti/hx next
+```
 
 ## Known differences
 
@@ -111,6 +117,18 @@ No end-to-end test reaches the Devin route, so it was checked against the
 Python build directly: both builds talked to one scripted Cascade server, and
 every request body, the parsed model catalogue, every streamed item and every
 error came out the same.
+
+Changes made on purpose after the port, so not in the Python build:
+
+- With nothing signed in, the TUI opens and says to `/login`, under the HX
+  logo; the Python build asked for an OpenRouter key in the shell first.
+- `hx upgrade` is gone: update with the install command.
+- The security fixes in 1.0.0 (see CHANGELOG.md): project MCP servers wait for
+  `hx mcp approve`, file tools ask before credential files, the command parser
+  sees `<(...)`, `>(...)`, zsh substitutions, awk pipes and `find -fprint0`,
+  deny rules see through assignments, paths and wrappers, `acceptEdits` stops
+  at the project, and `$HX_HOME` is `0700`. `tests/e2e/test_security.py` fails
+  on the Python build by design.
 
 Bugs in the Python build that are kept, so the two builds stay comparable
 until the cutover, and then fixed:

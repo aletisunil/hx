@@ -12,7 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, mkdirSync, openSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync, statSync } from "node:fs";
 import { expandUser, home, isDir, isFile, join, parent, readText, resolve } from "./pathlib.ts";
 import { isAlnum, purePath, strip } from "./py.ts";
 
@@ -189,7 +189,9 @@ export function projectInstructionsFiles(cwd: string, root: string | null): stri
 }
 
 /**
- * Create the user-level skeleton if it does not exist.
+ * Create the user-level skeleton if it does not exist, private to the user:
+ * transcripts hold whatever a session read, so `$HX_HOME` is made `0700` even
+ * when it was already there with wider permissions.
  *
  * That includes an empty `AGENTS.md`, so there is a file to find and fill in;
  * empty, it adds nothing to the prompt. An existing one - including a symlink,
@@ -197,7 +199,14 @@ export function projectInstructionsFiles(cwd: string, root: string | null): stri
  * session: the file is optional.
  */
 export function ensureUserDirs(): void {
-  for (const path of [userHome(), sessionsDir(), userSkillsDir(), userAgentsDir(), logsDir()]) {
+  const root = userHome();
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  try {
+    if (statSync(root).mode & 0o077) chmodSync(root, 0o700);
+  } catch {
+    // Not ours to change; the session still works.
+  }
+  for (const path of [sessionsDir(), userSkillsDir(), userAgentsDir(), logsDir()]) {
     mkdirSync(path, { recursive: true });
   }
   try {

@@ -608,7 +608,7 @@ export type McpManager = MCPManager;
 /** `/mcp [login|logout|reconnect NAME]` - server status, and signing in. */
 async function cmdMcp(ctx: CommandContext, args: string): Promise<void> {
   const manager = ctx.app.mcp;
-  if (manager === null || !manager.configs.length) {
+  if (manager === null || (!manager.configs.length && !manager.waiting.length)) {
     ctx.app.notice("No MCP servers configured. Add one with `hx mcp add`.", "warning");
     return;
   }
@@ -650,7 +650,10 @@ async function cmdMcp(ctx: CommandContext, args: string): Promise<void> {
       lines.push(`  ${ljust(status.name, 20)} ${status.error} - /mcp login ${status.name}`);
     else lines.push(`  ${ljust(status.name, 20)} unavailable - ${status.error}`);
   }
-  ctx.app.notice(lines.join("\n"), manager.status().every((s) => s.connected) ? "info" : "warning");
+  for (const { config } of manager.waiting)
+    lines.push(`  ${ljust(config.name, 20)} not approved - run \`hx mcp approve ${config.name}\``);
+  const healthy = manager.status().every((s) => s.connected) && !manager.waiting.length;
+  ctx.app.notice(lines.join("\n"), healthy ? "info" : "warning");
 }
 
 /** The server `/mcp login` means when there is exactly one it could mean. */

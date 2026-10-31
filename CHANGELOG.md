@@ -28,6 +28,51 @@ the project follows [semantic versioning](https://semver.org/).
 
 ---
 
+## [1.0.0] - 2026-10-31
+
+### Changed
+
+- The TypeScript build is the release: install it with `npm install --global @sunilaleti/hx`,
+  and run the same command again to update.
+- With nothing signed in, `hx` opens straight into the TUI, under the HX logo, and says to type
+  `/login`, instead of asking for an OpenRouter key in the shell before anything is on screen.
+  A model whose route is not signed in says to `/login` or pick another with `/model`, and the
+  first message after signing in goes through.
+
+### Removed
+
+- `hx upgrade`. Update by running the install command again.
+- The beta channel (`@sunilaleti/hx@next`). Every version is a stable release on `latest`.
+
+### Security
+
+- A server in a project's `.hx/mcp.json` no longer starts by itself: a cloned repository could
+  run any command the moment `hx` opened in it. HX names each waiting server and what it runs;
+  `hx mcp approve <server>` starts it, and `hx mcp add` approves what it adds. An approval is for
+  that command, so a server whose command changes waits again. Existing project servers need
+  approving once.
+- Read, Grep, Glob, Symbols, Write and Edit ask before touching `~/.ssh`, `~/.aws`, `~/.gnupg`,
+  `~/.kube`, `~/.config/gh`, `~/.docker/config.json`, `~/.netrc`, `~/.npmrc`, `~/.pypirc` and
+  HX's `auth.json`, in every mode and through symlinks. The sandbox kept the shell out of them,
+  but these tools run outside it. An allow rule naming the file opens it.
+- A command hidden inside another no longer passes as read-only: `cat <(rm -rf src)`, `>(...)`,
+  zsh's `=(...)` and glob qualifiers, an `awk` program that pipes to or reads from a command,
+  `@include`, and `find -fprint0` all ask now.
+- A deny rule holds however the command is spelled: behind `NAME=value` assignments, by full
+  path, or behind a wrapper such as `nohup`, `timeout`, `sudo` or `xargs`. An allow rule no
+  longer covers a command with assignments it does not name.
+- `acceptEdits` covers only the project: a write outside it, through a symlink that leads out
+  of it, or into its `.git` or `.hx` folder asks.
+- `$HX_HOME` (`~/.hx`), which holds every transcript, is made private to its owner (`0700`).
+
+### Fixed
+
+- Reads that come before a write in one turn run concurrently, as reads elsewhere do.
+- A login shell that does not speak POSIX sh - csh, tcsh, fish - no longer makes every command
+  wait out its timeout: commands run in bash.
+
+---
+
 ## [0.3.0-beta.1] - 2026-10-31
 
 ### Changed
@@ -1054,7 +1099,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v0.3.0-beta.1...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/aletisunil/hx/compare/v0.3.0-beta.1...v1.0.0
 [0.3.0-beta.1]: https://github.com/aletisunil/hx/compare/v0.2.20...v0.3.0-beta.1
 [0.2.20]: https://github.com/aletisunil/hx/compare/v0.2.19...v0.2.20
 [0.2.19]: https://github.com/aletisunil/hx/compare/v0.2.18...v0.2.19

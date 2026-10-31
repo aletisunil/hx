@@ -16,11 +16,19 @@ import { expandUser, join, resolve } from "../pathlib.ts";
 import { projectLocalSettingsFile, projectSettingsFile, userSettingsFile } from "../paths.ts";
 import { purePath, repr, strip } from "../py.ts";
 import { type CommandSegment, isReadOnly, matchSpecifier, parse } from "./parser.ts";
+import { credentialPathOf } from "./sandbox.ts";
 
 export type Decision = "allow" | "ask" | "deny";
 
 /** `always` is persisted to `~/.hx/projects/<project>/settings.local.json`. */
 export type GrantScope = "once" | "session" | "always";
+
+/** Tools whose specifiers are file paths. */
+const FILE_TOOLS = new Set(["Read", "Write", "Edit", "Grep", "Glob", "Symbols"]);
+
+/** Folders inside a project whose files run code or grant permissions: git
+ * hooks and config, HX's own settings, MCP servers, skills and agents. */
+const PROTECTED_DIRS = new Set([".git", ".hx"]);
 
 /** Fallback when the caller does not supply the registry's own metadata. */
 export const DEFAULT_MUTATING_TOOLS = new Set(["Bash", "Write", "Edit", "Task"]);
@@ -122,6 +130,16 @@ export class PermissionEngine {
     if (this.sessionGrants.has(this.grantKey(request)))
       return outcome("allow", "granted for this session");
 
+    // The shell's sandbox denies these outright. A file tool runs inside HX,
+    // outside the sandbox, so it asks - in every mode - unless an allow rule
+    // names the file.
+    const credential = this.credentialTouched(request);
+    if (credential !== null) {
+      const named = this.matchAllow(request, true);
+      if (named) return outcome("allow", "matched an allow rule", named);
+      return outcome("ask", `${credential} holds credentials`);
+    }
+
     if (request.toolName === "Bash" && request.specifier) {
       const parsed = parse(request.specifier);
       if (parsed.unparseable) {
@@ -147,7 +165,11 @@ export class PermissionEngine {
       return outcome("allow", "read-only tool in plan mode");
     }
     if (!request.mutating) return outcome("allow", "read-only tool");
-    if (this.mode === "acceptEdits" && PermissionEngine.EDIT_TOOLS.has(request.toolName)) {
+    if (
+      this.mode === "acceptEdits" &&
+      PermissionEngine.EDIT_TOOLS.has(request.toolName) &&
+      this.editsProject(request)
+    ) {
       return outcome("allow", "acceptEdits mode");
     }
     if (request.toolName === "Bash" && request.specifier) {
@@ -158,6 +180,44 @@ export class PermissionEngine {
       }
     }
     return outcome("ask", "mutating tool");
+  }
+
+  /** Where `specifier` really is: absolute, with `..` and symlinks resolved. */
+  private target(specifier: string): string {
+    return realPath(purePath(expandUser(specifier)), resolve(this.cwd));
+  }
+
+  /** The credential file or folder a file tool's call reaches, as written in
+   * `CREDENTIAL_PATHS`, or `null`. */
+  private credentialTouched(request: PermissionRequest): string | null {
+    if (!FILE_TOOLS.has(request.toolName)) return null;
+    for (const specifier of allSpecifiers(request)) {
+      const credential = credentialPathOf(this.target(specifier));
+      if (credential !== null) return credential;
+    }
+    return null;
+  }
+
+  /**
+   * Whether every file an edit changes is the project's own, which is all
+   * acceptEdits covers: inside the working directory once symlinks are
+   * resolved, and not in a folder whose files run code or grant permissions.
+   */
+  private editsProject(request: PermissionRequest): boolean {
+    const root = resolve(this.cwd);
+    const prefix = root === "/" ? "/" : `${root}/`;
+    const targets = allSpecifiers(request).map((specifier) => this.target(specifier));
+    return (
+      targets.length > 0 &&
+      targets.every(
+        (target) =>
+          target.startsWith(prefix) &&
+          !target
+            .slice(prefix.length)
+            .split("/")
+            .some((part) => PROTECTED_DIRS.has(part)),
+      )
+    );
   }
 
   private applies(rule: Rule, request: PermissionRequest): boolean {
@@ -173,13 +233,18 @@ export class PermissionEngine {
   }
 
   /**
-   * Allow requires *every* segment to be covered. Any-segment matching is
-   * right for deny (`safe && danger` must be caught) but catastrophic for
-   * allow: `allow: Bash(git status:*)` would green-light `git status && rm -rf /`.
+   * Allow requires *every* segment to be covered, each as it is written.
+   * Any-segment matching is right for deny (`safe && danger` must be caught)
+   * but catastrophic for allow: `allow: Bash(git status:*)` would green-light
+   * `git status && rm -rf /`.
    */
-  private matchAllow(request: PermissionRequest): Rule | null {
+  private matchAllow(request: PermissionRequest, named = false): Rule | null {
+    // `named`: only a rule that names what it allows, not a bare `Read`.
     const candidates = this.rules.filter(
-      (rule) => rule.decision === "allow" && this.applies(rule, request),
+      (rule) =>
+        rule.decision === "allow" &&
+        this.applies(rule, request) &&
+        (!named || rule.specifier !== null),
     );
     if (candidates.length === 0) return null;
 
@@ -204,7 +269,7 @@ export class PermissionEngine {
     let first: Rule | null = null;
     for (const segment of parsed.segments) {
       const covering = candidates.find(
-        (rule) => rule.specifier === null || matchSpecifier(segment, rule.specifier),
+        (rule) => rule.specifier === null || matchSpecifier(segment, rule.specifier, true),
       );
       if (covering === undefined) return null;
       first ??= covering;
@@ -337,6 +402,8 @@ export function persistableRules(toolName: string, specifier: string | null): st
 /** `git commit -m x` -> `git commit`; `rm -rf build` -> `null`. Approving
  * `rm -rf build` must not write `Bash(rm:*)` and quietly cover every `rm`. */
 function rulePrefix(segment: CommandSegment): string | null {
+  // `FOO=1 make` is not `make`: a rule for it would have to carry the assignment.
+  if (segment.assignments.length || !segment.executable) return null;
   const first = segment.args[0];
   if (first !== undefined && !first.startsWith("-")) return `${segment.executable} ${first}`;
   return null;

@@ -12,7 +12,7 @@ import { randomBytes } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { constants } from "node:os";
 import { PROVIDER_ENV } from "../auth/resolve.ts";
-import { isDir, join } from "../pathlib.ts";
+import { isDir, isFile, join } from "../pathlib.ts";
 import { formatFixed, repr, rstrip, splitLines, strip, toFloat, toInt, truthy } from "../py.ts";
 import { quote } from "../shlex.ts";
 import { count } from "../text.ts";
@@ -122,6 +122,21 @@ class Reader {
   }
 }
 
+/** Shells that read the POSIX sh the session speaks to them: `eval`, `$?`,
+ * `printf`, `exec 2>&1`. */
+const POSIX_SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ksh93", "mksh", "ash", "yash"]);
+
+/**
+ * The shell to run commands in: `shell`, or `$SHELL`, when it speaks POSIX sh.
+ * csh, tcsh, fish and the like do not - a command would run and its status
+ * never arrive - so they give way to bash, or `/bin/sh` without it.
+ */
+export function posixShell(shell: string | null = null): string {
+  const chosen = shell || process.env.SHELL || "";
+  if (POSIX_SHELLS.has(chosen.slice(chosen.lastIndexOf("/") + 1))) return chosen;
+  return isFile("/bin/bash") ? "/bin/bash" : "/bin/sh";
+}
+
 /**
  * A long-lived shell subprocess.
  *
@@ -150,7 +165,7 @@ export class PersistentShell {
     env: Record<string, string> = {},
     readonly sandbox: CommandWrapper | null = null,
   ) {
-    this.shell = shell || process.env.SHELL || "/bin/bash";
+    this.shell = posixShell(shell);
     this.env = commandEnvironment({ ...env, HX: "1", TERM: "dumb" });
   }
 

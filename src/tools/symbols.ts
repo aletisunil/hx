@@ -204,6 +204,13 @@ export class SymbolsTool extends Tool {
     };
   }
 
+  /** The file or folder read, so a path rule covers it. */
+  override permissionSpecifier(params: Params): string | null {
+    for (const key of ["file_path", "path"])
+      if (typeof params[key] === "string" && params[key]) return params[key] as string;
+    return null;
+  }
+
   async run(params: Params, ctx: ToolContext): Promise<ToolResult> {
     const mode = String(params.mode);
     const limit = toInt(params.limit || DEFAULT_LIMIT);

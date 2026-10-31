@@ -8,8 +8,9 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { glob, match, parts } from "../glob.ts";
-import { isFile } from "../pathlib.ts";
-import { splitLines, strip, toInt, truthy } from "../py.ts";
+import { absolute, expandUser, isFile, resolve } from "../pathlib.ts";
+import { CREDENTIAL_PATHS, credentialPathOf } from "../permissions/sandbox.ts";
+import { purePath, splitLines, strip, toInt, truthy } from "../py.ts";
 import { compileError, compile as compileRegex } from "../pyre.ts";
 import { count } from "../text.ts";
 import { which } from "../which.ts";
@@ -55,6 +56,11 @@ export class GrepTool extends Tool {
       },
       required: ["pattern"],
     };
+  }
+
+  /** The file or folder searched, so a path rule covers a search of it. */
+  override permissionSpecifier(params: Params): string | null {
+    return typeof params.path === "string" && params.path ? params.path : null;
   }
 
   async run(params: Params, ctx: ToolContext): Promise<ToolResult> {
@@ -126,7 +132,40 @@ function runRipgrep(
     }
     throw new ToolError(stderr || `ripgrep exited ${result.status}`);
   }
-  return splitLines(result.stdout ?? "").filter(Boolean);
+  const hidden = credentialsUnder(root);
+  return splitLines(result.stdout ?? "").filter(
+    (line) => line && !hidden.some((credential) => credential.covers(line)),
+  );
+}
+
+/**
+ * The credential files and folders inside `root`, spelled the way ripgrep
+ * prints paths under it. Most are hidden, which ripgrep skips, but `~/.config/gh`
+ * is not: a search of `~/.config` would read its token. ripgrep's own globs
+ * anchor to its working directory, not to `root`, so its lines are filtered
+ * instead.
+ */
+function credentialsUnder(root: string): { covers: (line: string) => boolean }[] {
+  const base = root.replace(/\/$/, "");
+  const real = resolve(root);
+  const found: { covers: (line: string) => boolean }[] = [];
+  for (const entry of CREDENTIAL_PATHS) {
+    const spellings = new Set([purePath(absolute(expandUser(entry))), resolve(expandUser(entry))]);
+    for (const path of spellings) {
+      let shown: string;
+      if (path.startsWith(`${real}/`)) shown = base + path.slice(real.length);
+      else if (path.startsWith(`${base}/`)) shown = path;
+      else continue;
+      // A line is `path`, `path:...` or, as context, `path-...`.
+      found.push({
+        covers: entry.endsWith("/")
+          ? (line) => line.startsWith(`${shown}/`)
+          : (line) =>
+              line === shown || line.startsWith(`${shown}:`) || line.startsWith(`${shown}-`),
+      });
+    }
+  }
+  return found;
 }
 
 function search(regex: RegExp, root: string, mode: string, params: Params): string[] {
@@ -153,10 +192,15 @@ function search(regex: RegExp, root: string, mode: string, params: Params): stri
   return results;
 }
 
+/** The files under `root`, bar ignored folders and credentials: a search from
+ * `$HOME` must not read `~/.ssh` on its way. ripgrep skips them as hidden. */
 function walk(root: string): string[] {
   if (isFile(root)) return [root];
   return glob(root, "**/*").filter(
-    (path) => isFile(path) && !parts(path).some((part) => IGNORED_DIRS.has(part)),
+    (path) =>
+      isFile(path) &&
+      !parts(path).some((part) => IGNORED_DIRS.has(part)) &&
+      credentialPathOf(resolve(path)) === null,
   );
 }
 

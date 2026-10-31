@@ -46,6 +46,11 @@ export class GlobTool extends Tool {
     };
   }
 
+  /** The folder searched, so a path rule covers a search of it. */
+  override permissionSpecifier(params: Params): string | null {
+    return typeof params.path === "string" && params.path ? params.path : null;
+  }
+
   async run(params: Params, ctx: ToolContext): Promise<ToolResult> {
     const root = searchRoot(params.path, ctx.cwd);
     if (!isDir(root)) throw new ToolError(`${root}: not a directory`);

@@ -20,6 +20,34 @@ const OPERATORS = ["&&", "||", ";;", ";", "|&", "|", "\n", "&"] as const;
  * qualifies only when it is launching something - see `isDynamic`. */
 export const DYNAMIC_EXECUTABLES = new Set(["eval", "exec", "source", ".", "env"]);
 
+/** Commands that run the command named in their arguments. A deny rule has to
+ * see through them: `nohup rm` is `rm`. */
+const WRAPPERS = new Set([
+  "builtin",
+  "caffeinate",
+  "chrt",
+  "command",
+  "doas",
+  "flock",
+  "gtimeout",
+  "ionice",
+  "nice",
+  "nohup",
+  "setsid",
+  "stdbuf",
+  "strace",
+  "sudo",
+  "taskset",
+  "time",
+  "timeout",
+  "unbuffer",
+  "watch",
+  "xargs",
+]);
+
+/** `NAME=value` before a command: it sets the command's environment. */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
+
 /** `2>&1`, `>&2`, `>&-` - duplicating a descriptor, never a file write. */
 const FD_DUP = /^\d*>&\d*-?$/;
 const OUT_OP = /^(?:\d*>>?|&>>?)$/;
@@ -118,7 +146,17 @@ export const READ_ONLY_COMMANDS = new Set([
 export const MUTATING_FLAGS: Record<string, Set<string>> = {
   sed: new Set(["-i", "--in-place"]),
   awk: new Set(["-i", "--include"]),
-  find: new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"]),
+  find: new Set([
+    "-delete",
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-fprint",
+    "-fprint0",
+    "-fprintf",
+    "-fls",
+  ]),
   fd: new Set(["-x", "--exec", "-X", "--exec-batch"]),
   sort: new Set(["-o", "--output", "--compress-program"]),
   tree: new Set(["-o"]),
@@ -279,8 +317,13 @@ const ENV_FLAGS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir"]);
 /** One command that will actually execute. */
 export interface CommandSegment {
   readonly raw: string;
+  /** Empty for a segment that only assigns variables. */
   readonly executable: string;
   readonly args: readonly string[];
+  /** The `NAME=value` words before the executable. They change what the
+   * command does - `PATH=. ls`, `LD_PRELOAD=x cat` - so a segment with any is
+   * never read-only, and an allow rule must name them. */
+  readonly assignments: readonly string[];
   /** True for `$(...)` / backtick content, which executes just as readily. */
   readonly inSubstitution: boolean;
 }
@@ -345,11 +388,19 @@ function toSegment(text: string, inSub: boolean): [CommandSegment | null, string
   if (tokens.length === 0) return [null, [], true];
   const [words, redirects] = splitRedirections(tokens);
   if (words.length === 0) return [null, redirects, true];
-  const executable = words[0] as string;
+  let first = 0;
+  while (first < words.length && ASSIGNMENT.test(words[first] as string)) first++;
+  const executable = words[first] ?? "";
   // A name produced by expansion is only known at runtime.
   const ok = !executable.includes("$") && !executable.includes("`");
   return [
-    { raw: stripped, executable, args: words.slice(1), inSubstitution: inSub },
+    {
+      raw: stripped,
+      executable,
+      args: words.slice(first + 1),
+      assignments: words.slice(0, first),
+      inSubstitution: inSub,
+    },
     redirects,
     ok,
   ];
@@ -447,10 +498,27 @@ function scan(text: string): [string[], string[], boolean] {
       index++;
       continue;
     }
-    if (text.startsWith("$(", index) || char === "`") {
+    // Command and process substitution: `<(cmd)` and `>(cmd)` run `cmd` as
+    // surely as `$(cmd)` does.
+    if (
+      text.startsWith("$(", index) ||
+      text.startsWith("<(", index) ||
+      text.startsWith(">(", index) ||
+      char === "`"
+    ) {
       const [body, consumed, closed] = readSubstitution(text, index);
       substitutions.push(...recurse(body, substitutions));
       ok = ok && closed;
+      index += consumed;
+      continue;
+    }
+    if (char === "(" && strip(buffer)) {
+      // Inside a command a parenthesis is not a subshell: zsh's `=(cmd)`, a
+      // glob qualifier that runs code (`*(e:cmd:)`), a function, an array.
+      // Its body is checked as a command, and the whole cannot be decomposed.
+      const [body, consumed] = readSubstitution(text, index);
+      substitutions.push(...recurse(body, substitutions));
+      ok = false;
       index += consumed;
       continue;
     }
@@ -492,39 +560,76 @@ function recurse(body: string, seen: string[]): string[] {
   return [...innerPieces, ...innerSubs.filter((s) => !seen.includes(s))];
 }
 
-/** Read a `$(...)` or backtick substitution starting at `index`. */
+/** Read a backtick substitution, or a parenthesised one - `$(`, `<(`, `>(` or a
+ * bare `(` - starting at `index`. */
 function readSubstitution(text: string, index: number): [string, number, boolean] {
   if (text[index] === "`") {
     const end = text.indexOf("`", index + 1);
     if (end === -1) return [text.slice(index + 1), text.length - index, false];
     return [text.slice(index + 1, end), end - index + 1, true];
   }
+  const open = text.indexOf("(", index);
   let depth = 0;
-  for (let cursor = index + 1; cursor < text.length; cursor++) {
+  for (let cursor = open; cursor < text.length; cursor++) {
     if (text[cursor] === "(") depth++;
     else if (text[cursor] === ")") {
       depth--;
-      if (depth === 0) return [text.slice(index + 2, cursor), cursor - index + 1, true];
+      if (depth === 0) return [text.slice(open + 1, cursor), cursor - index + 1, true];
     }
   }
-  return [text.slice(index + 2), text.length - index, false];
+  return [text.slice(open + 1), text.length - index, false];
 }
 
 /**
  * Match a segment against a rule specifier such as `git commit:*` or `ls`. `:*`
  * is a prefix match on the whole command line; a bare executable name matches
  * any invocation of it.
+ *
+ * `exact` is for allow rules, which grant what they name and no more: the
+ * command as written, assignments and all. Deny and ask rules match every way
+ * the command could be named - without its assignments, by its executable's
+ * name rather than path, and behind a wrapper - since each of those runs it.
  */
-export function matchSpecifier(segment: CommandSegment, pattern: string): boolean {
+export function matchSpecifier(segment: CommandSegment, pattern: string, exact = false): boolean {
   if (pattern === "*" || pattern === ":*") return true;
-  const commandLine = [segment.executable, ...segment.args].join(" ");
+  if (exact) return matchWords(written(segment), pattern);
+  return commandForms(segment).some((words) => matchWords(words, pattern));
+}
+
+function matchWords(words: readonly string[], pattern: string): boolean {
+  const commandLine = words.join(" ");
   if (pattern.endsWith(":*")) {
     const prefix = strip(pattern.slice(0, -2));
     return commandLine === prefix || commandLine.startsWith(`${prefix} `);
   }
   if (pattern.includes(" ")) return commandLine === pattern;
-  return segment.executable === pattern;
+  return words[0] === pattern;
 }
+
+const written = (segment: CommandSegment) =>
+  [...segment.assignments, segment.executable, ...segment.args].filter(Boolean);
+
+/** Every name the command a segment runs goes by: `/bin/rm -f x` is also
+ * `rm -f x`, and `timeout 5 rm -f x` is also `rm -f x`. */
+function commandForms(segment: CommandSegment): string[][] {
+  const words = [segment.executable, ...segment.args].filter(Boolean);
+  const forms: string[][] = [];
+  const add = (command: string[]) => {
+    forms.push(command);
+    const name = basename(command[0] as string);
+    if (name !== command[0]) forms.push([name, ...command.slice(1)]);
+  };
+  if (words.length === 0) return forms;
+  add(words);
+  if (WRAPPERS.has(basename(words[0] as string))) {
+    // Any operand could be the wrapped command: `timeout 5 rm`, `sudo -u x rm`.
+    for (let index = 1; index < words.length; index++)
+      if (!(words[index] as string).startsWith("-")) add(words.slice(index));
+  }
+  return forms;
+}
+
+const basename = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 
 /**
  * Heuristic allowlist of non-mutating commands (`ls`, `cat`, `git status`). The
@@ -532,6 +637,7 @@ export function matchSpecifier(segment: CommandSegment, pattern: string): boolea
  * Used only to relax prompting, never to grant something a deny rule covers.
  */
 export function isReadOnly(segment: CommandSegment): boolean {
+  if (segment.assignments.length) return false;
   if (segment.executable === "git") return gitIsReadOnly(segment.args);
   if (!READ_ONLY_COMMANDS.has(segment.executable)) return false;
   if (segment.executable === "env") return !envRunsACommand(segment.args);
@@ -549,8 +655,11 @@ export function isReadOnly(segment: CommandSegment): boolean {
 const PROGRAM_TEXT_COMMANDS = new Set(["awk", "sed"]);
 
 /** An `awk` program reaching outside itself: a subshell, an output redirection
- * on a `print`, or a pipeline to a command. `$1 > 5` is a comparison. */
-const AWK_WRITES = /system\s*\(|\|\s*["']|["']\s*\||print[f]?[^;}\n]*>/;
+ * or a pipe on a `print`, a command piped into `getline` - named by a string or
+ * a variable alike - a coprocess, or another program file pulled in. `$1 > 5`
+ * and `/a|b/` are a comparison and a regex. */
+const AWK_WRITES =
+  /system\s*\(|\|\s*["']|["']\s*\||\|\s*getline\b|\|&|print[f]?[^;}\n]*[>|]|@(?:include|load)\b/;
 
 /** Options whose value is more of the program. */
 const PROGRAM_TEXT_OPTIONS: Record<string, string[]> = {
@@ -560,7 +669,7 @@ const PROGRAM_TEXT_OPTIONS: Record<string, string[]> = {
 
 /** Options that load the program from a file, which cannot be judged from here. */
 const PROGRAM_FILE_OPTIONS: Record<string, string[]> = {
-  awk: ["-f", "--file", "-E", "--exec"],
+  awk: ["-f", "--file", "-E", "--exec", "-l", "--load"],
   sed: ["-f", "--file"],
 };
 

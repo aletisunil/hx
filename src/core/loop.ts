@@ -664,7 +664,7 @@ export class AgentLoop {
     };
     for (const call of calls) {
       if (this.runsSerially(call)) {
-        for (const pending of concurrent) await run(pending);
+        if (concurrent.length) await gather(concurrent);
         concurrent = [];
         await run(call);
       } else concurrent.push(call);
