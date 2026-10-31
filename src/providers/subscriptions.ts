@@ -3,9 +3,13 @@
  * order it asks them. Imported once at startup.
  */
 
+import "./codex.ts";
+import "./claude_code.ts";
+import "./devin.ts";
 import type { ResolvedAuth } from "../auth/resolve.ts";
-import { ProviderError } from "./base.ts";
+import * as claudeCodeCatalogue from "./claude_code_catalogue.ts";
 import { fetchModels as fetchCodexModels } from "./codex_catalogue.ts";
+import { fetchModels as fetchDevinModels } from "./devin_catalogue.ts";
 import {
   CLAUDE_CODE_MODELS,
   CODEX_MODELS,
@@ -13,11 +17,6 @@ import {
   SUBSCRIPTIONS,
   tokenFingerprint,
 } from "./models.ts";
-
-/** A route whose catalogue client is still to come across from the Python build. */
-const notPorted = (label: string) => async () => {
-  throw new ProviderError(`the ${label} model list is not ported to the TypeScript build yet`);
-};
 
 SUBSCRIPTIONS.push(
   {
@@ -31,14 +30,16 @@ SUBSCRIPTIONS.push(
     providerId: "devin",
     label: "Devin",
     fallback: DEVIN_MODELS,
-    fetch: notPorted("Devin"),
+    fetch: (auth: ResolvedAuth) => fetchDevinModels(auth),
     account: tokenFingerprint,
   },
   {
     providerId: "claude-code",
     label: "Claude Code",
     fallback: CLAUDE_CODE_MODELS,
-    fetch: notPorted("Claude Code"),
+    fetch: () => claudeCodeCatalogue.fetchModels(),
     account: (auth: ResolvedAuth) => String(auth.extra.account || "") || null,
+    version: () => claudeCodeCatalogue.installedVersion(),
+    advise: (installed: string | null) => claudeCodeCatalogue.updateAdvice(installed),
   },
 );

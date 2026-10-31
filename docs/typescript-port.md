@@ -45,7 +45,7 @@ wherever the result reaches a user or a file.
 | 1 | Config, auth and logins, TLS, OpenRouter, models, sessions, the agent loop, tools, permissions, sandbox, hooks, skills, subagents, web search, `-p` | every test that does not open the TUI, bar MCP and trace | done |
 | 2 | Terminal renderer, keys, editor, markdown, TUI views, slash commands | `test_chat`, `test_input`, `test_queue`, `test_commands`, the TUI tests in `test_tools`, `test_edits`, `test_reads`, `test_shell`, `test_extend` | done |
 | 3 | MCP, `hx mcp`, `hx trace` and `/trace`, the Symbols tool | the rest of `test_extend` and `test_cli`, `test_trace_writes_a_self_contained_page` | done |
-| 4 | Codex, Claude Code and Devin providers; live tests | `test_claude_code`, `test_plan_usage`, `test_effort_carries_into_every_new_session` | |
+| 4 | Codex, Claude Code and Devin providers; live tests | `test_claude_code`, `test_plan_usage`, `test_effort_carries_into_every_new_session` | done |
 | 5 | Delete the Python build; npm release, `install.sh`, `hx upgrade` | the whole suite | |
 
 ## Known differences
@@ -84,6 +84,16 @@ reaches:
   Python recorded them to the microsecond.
 - When several MCP servers fail at once, their warnings can reach stderr in
   a different order.
+
+- HTTP requests carry Node's defaults where Python carried httpx's: no
+  `User-Agent` of httpx's own, and no `Accept-Encoding: gzip, deflate`, so
+  servers answer uncompressed. The Devin route's Connect frames are gzipped by
+  Node's zlib, so their bytes differ while what they decompress to does not.
+
+No end-to-end test reaches the Devin route, so it was checked against the
+Python build directly: both builds talked to one scripted Cascade server, and
+every request body, the parsed model catalogue, every streamed item and every
+error came out the same.
 
 Bugs in the Python build that are kept, so the two builds stay comparable
 until the cutover, and then fixed:

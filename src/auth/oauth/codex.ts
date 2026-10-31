@@ -43,7 +43,7 @@ export const FREE_PLAN = "free";
 /** A plan name the token did not carry. Treated as entitled. */
 export const UNKNOWN_PLAN = "unknown";
 
-const ORIGINATOR = "hx";
+export const ORIGINATOR = "hx";
 const HTTP_TIMEOUT = 30;
 
 export function authorizeUrl(pkce: PKCE, state: string, originator = ORIGINATOR): string {
