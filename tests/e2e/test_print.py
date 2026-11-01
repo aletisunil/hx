@@ -8,6 +8,8 @@ import uuid
 import zlib
 from pathlib import Path
 
+import trustme
+
 from tests.e2e.conftest import HX, SANDBOX_REFUSALS, requires_sandbox
 from tests.e2e.report import REPO
 from tests.e2e.stub import GPT5, TEXT_ONLY, Reply, Stub, ToolCall, call, calls, fail, say
@@ -162,6 +164,36 @@ def test_sandbox_denies_credentials_that_do_not_exist_yet(hx: HX, stub: Stub) ->
     assert not netrc.exists() or netrc.read_text() == ""
     assert "notes-written" in output
     assert (hx.home / "notes.txt").read_text() == "kept\n"
+
+
+def test_https_is_verified_against_nodes_roots_and_the_os_store(
+    hx: HX, stub: Stub, tmp_path: Path
+) -> None:
+    """HX trusts what Node trusts - its own roots and `NODE_EXTRA_CA_CERTS` - as well as
+    the OS store. On macOS the OS store as Node reads it holds only the certificates
+    trusted by hand, so trusting it alone made every public HTTPS host unreachable.
+    A server signed by a CA nothing trusts is still refused, with what to do about it."""
+    trusted = trustme.CA(organization_name="Trusted by Node")
+    ca_file = tmp_path / "node-ca.pem"
+    trusted.cert_pem.write_to_path(str(ca_file))
+    stub.script(say("Over HTTPS."))
+    result = hx.run(
+        "-p",
+        "hello",
+        env={
+            "HX_OPENROUTER_BASE_URL": stub.https_url(trusted),
+            "NODE_EXTRA_CA_CERTS": str(ca_file),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "Over HTTPS.\n"
+
+    stranger = trustme.CA(organization_name="Trusted by nobody")
+    refused = hx.run("-p", "hello", env={"HX_OPENROUTER_BASE_URL": stub.https_url(stranger)})
+    assert refused.returncode != 0
+    assert "certificate" in refused.stderr.lower(), refused.stderr
+    assert "HX_CA_BUNDLE" in refused.stderr, refused.stderr
+    assert len(stub.requests) == 1
 
 
 def test_parallel_tool_calls_all_answered(hx: HX, stub: Stub) -> None:

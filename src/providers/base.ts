@@ -10,6 +10,7 @@
 import type { AssembledContext } from "../core/context.ts";
 import type { StopReason } from "../core/messages.ts";
 import { type PlanWindow, type TurnUsage, turnUsage } from "../core/usage.ts";
+import { certificateFailure } from "../net.ts";
 
 /** A chunk off the wire. */
 export interface StreamDelta {
@@ -79,6 +80,17 @@ export interface Provider {
  * `planWindows` carries the subscription's usage windows when the refusal
  * reported them - a limit reached is the moment they matter most.
  */
+/**
+ * A request that got no response, as a provider error. A certificate failure
+ * says what to do about it and is not retried: another attempt meets the same
+ * certificate. Anything else - a reset, a refused connection - is retried.
+ */
+export function unreached(error: unknown): ProviderError {
+  const certificate = certificateFailure(error);
+  if (certificate !== null) return new ProviderError(certificate);
+  return new ProviderError((error as Error).message, { retryable: true });
+}
+
 export class ProviderError extends Error {
   override name = "ProviderError";
   readonly status: number | null;

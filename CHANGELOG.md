@@ -28,6 +28,20 @@ the project follows [semantic versioning](https://semver.org/).
 
 ---
 
+## [1.1.1] - 2026-10-31
+
+### Fixed
+
+- HTTPS failed on macOS for every host - OpenRouter, ChatGPT, Tavily, npm - with "unable to get
+  local issuer certificate". HX verified against the OS trust store alone, and on macOS Node reads
+  only the certificates trusted by hand there, not the system roots. HX now trusts Node's own
+  roots and the OS store together, so a corporate CA in the keychain still works.
+- A certificate HX will not accept is reported with what to do about it - add the CA to the
+  system trust store or set `HX_CA_BUNDLE` - instead of Node's advice to restart it with
+  `--use-system-ca`, and is not retried: another attempt meets the same certificate.
+
+---
+
 ## [1.1.0] - 2026-10-31
 
 ### Added
@@ -1123,7 +1137,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/aletisunil/hx/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/aletisunil/hx/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/aletisunil/hx/compare/v0.3.0-beta.1...v1.0.0
 [0.3.0-beta.1]: https://github.com/aletisunil/hx/compare/v0.2.20...v0.3.0-beta.1

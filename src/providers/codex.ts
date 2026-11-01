@@ -13,7 +13,13 @@ import { formatRenewal, PlanWindow } from "../core/usage.ts";
 import { lines, request } from "../net.ts";
 import { strip } from "../py.ts";
 import { VERSION } from "../version.ts";
-import { type Provider, ProviderError, type ProviderRequest, type StreamItem } from "./base.ts";
+import {
+  type Provider,
+  ProviderError,
+  type ProviderRequest,
+  type StreamItem,
+  unreached,
+} from "./base.ts";
 import type { ModelRegistry } from "./models.ts";
 import { encodeBody, sleep } from "./openrouter.ts";
 import { BUILDERS } from "./registry.ts";
@@ -125,7 +131,7 @@ export class CodexProvider implements Provider {
       });
     } catch (error) {
       if (signal.aborted) throw error;
-      throw new ProviderError((error as Error).message, { retryable: true });
+      throw unreached(error);
     }
     const windows = planWindows(response.headers);
     try {

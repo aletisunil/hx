@@ -35,6 +35,7 @@ import {
   type ProviderRequest,
   type StreamItem,
   streamEnd,
+  unreached,
 } from "./base.ts";
 
 export const API_BASE = "https://openrouter.ai/api/v1";
@@ -135,7 +136,7 @@ export class OpenRouterProvider implements Provider {
       });
     } catch (error) {
       if (signal.aborted) throw error;
-      throw new ProviderError((error as Error).message, { retryable: true });
+      throw unreached(error);
     }
     try {
       if (response.status >= 400) {

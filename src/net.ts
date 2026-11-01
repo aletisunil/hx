@@ -8,8 +8,10 @@
  *
  * - `HX_CA_BUNDLE` (or `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`) - an explicit PEM
  *   file wins, because a user who names a bundle means it.
- * - otherwise the OS trust store, so a CA the machine already trusts is enough
- *   and nothing has to be exported by hand.
+ * - otherwise Node's own roots and the OS trust store together, so a CA the
+ *   machine already trusts is enough and nothing has to be exported by hand.
+ *   Never the OS store alone: on macOS Node reads only the certificates trusted
+ *   by hand there, not the system roots, and every public host would fail.
  *
  * `HX_SSL_NO_VERIFY=1` turns verification off. It exists because a blocked user
  * will otherwise reach for a worse workaround; it says so out loud in
@@ -103,11 +105,8 @@ export function tlsAgentOptions(): https.AgentOptions {
     const bundle = caBundle();
     let ca: string[];
     if (bundle !== null) ca = certificates(readText(bundle));
-    else {
-      ca = tls.getCACertificates("system");
-      // A machine whose store cannot be read still has Node's own roots.
-      if (ca.length === 0) ca = tls.getCACertificates("default");
-    }
+    else
+      ca = [...new Set([...tls.getCACertificates("default"), ...tls.getCACertificates("system")])];
     tlsOptions = { ca, ALPNProtocols: ["http/1.1"] };
   }
   return tlsOptions;
@@ -230,12 +229,10 @@ export class ConnectError extends Error {
  * several nested causes deep - is no use.
  */
 export function describe(error: unknown): string {
+  const certificate = certificateFailure(error);
+  if (certificate !== null) return certificate;
   for (const err of chain(error)) {
     const code = (err as NodeJS.ErrnoException).code ?? "";
-    if (VERIFY_CODES.has(code)) {
-      const reason = flatten((err as Error).message || "certificate verify failed");
-      return `TLS certificate verification failed (${reason}). ${tlsHint(reason)}`;
-    }
     if (code.startsWith("ERR_SSL") || code.startsWith("ERR_TLS")) {
       return `TLS handshake failed: ${flatten((err as Error).message)}.`;
     }
@@ -248,6 +245,23 @@ export function describe(error: unknown): string {
   // raised it: the hint is all there is left to add.
   const failure = error as Error;
   return withTlsHint(`${failure?.name ?? "Error"}: ${flatten(String(failure?.message ?? error))}`);
+}
+
+/** A certificate the client would not accept, said with what to do about it,
+ * or `null` for any other failure. Node's own advice - `--use-system-ca` - is
+ * left out: HX already reads the system store, and takes no Node flags. */
+export function certificateFailure(error: unknown): string | null {
+  for (const err of chain(error)) {
+    if (!VERIFY_CODES.has((err as NodeJS.ErrnoException).code ?? "")) continue;
+    const reason = flatten(
+      ((err as Error).message || "certificate verify failed").replace(
+        /;\s*if the root CA[\s\S]*$/,
+        "",
+      ),
+    );
+    return `TLS certificate verification failed (${reason}). ${tlsHint(reason)}`;
+  }
+  return null;
 }
 
 function chain(error: unknown): unknown[] {

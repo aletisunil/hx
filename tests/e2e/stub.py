@@ -21,12 +21,15 @@ more model calls than the test described cannot pass by accident.
 from __future__ import annotations
 
 import json
+import ssl
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+
+import trustme
 
 TITLE_SYSTEM = "You name things briefly and precisely."
 """The system prompt of HX's session-naming call (``hx.core.title``)."""
@@ -294,6 +297,19 @@ class Stub:
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._tls_servers: list[ThreadingHTTPServer] = []
+
+    def https_url(self, ca: trustme.CA) -> str:
+        """The same stand-in over HTTPS, with a certificate ``ca`` signed: a server
+        whose CA HX has to find in a trust store to reach it."""
+        server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        server.daemon_threads = True
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ca.issue_cert("127.0.0.1").configure_cert(context)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self._tls_servers.append(server)
+        return f"https://127.0.0.1:{server.server_address[1]}/api/v1"
 
     @property
     def url(self) -> str:
@@ -320,8 +336,9 @@ class Stub:
             for reply in self._script:
                 if reply.hold is not None:
                     reply.hold.set()
-        self._server.shutdown()
-        self._server.server_close()
+        for server in [self._server, *self._tls_servers]:
+            server.shutdown()
+            server.server_close()
 
     def script(self, *replies: Reply) -> None:
         """Queue completions, answered in order."""

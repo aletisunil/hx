@@ -293,9 +293,9 @@ number.
 Credits are *not* in the status bar's cost, which prices tokens: `/cost`
 under-reports a session that searched.
 
-**Behind a TLS-inspecting proxy.** HX verifies certificates against the
-operating system's trust store, so a corporate CA the machine already trusts
-needs no setup. When the CA lives only in a file, name it:
+**Behind a TLS-inspecting proxy.** HX verifies certificates against Node's own
+roots and the operating system's trust store together, so a corporate CA the
+machine already trusts needs no setup. When the CA lives only in a file, name it:
 
 ```sh
 export HX_CA_BUNDLE=/path/to/corp-ca.pem   # SSL_CERT_FILE and REQUESTS_CA_BUNDLE also work

@@ -36,6 +36,7 @@ import {
   type ProviderRequest,
   type StreamItem,
   streamEnd,
+  unreached,
 } from "./base.ts";
 import { wireModel } from "./devin_catalogue.ts";
 import * as wire from "./devin_wire.ts";
@@ -236,7 +237,7 @@ export class DevinProvider implements Provider {
       });
     } catch (error) {
       if (signal.aborted) throw error;
-      throw new ProviderError((error as Error).message, { retryable: true });
+      throw unreached(error);
     }
     try {
       if (response.status >= 400) {
@@ -355,7 +356,7 @@ export async function unaryCall(
     [status, payload] = await post(`${baseUrl}${path}`, body, wire.UNARY_HEADERS, timeout, signal);
   } catch (error) {
     if (signal?.aborted) throw error;
-    throw new ProviderError((error as Error).message, { retryable: true });
+    throw unreached(error);
   }
   if (status >= 400) throw httpError(operation, status, payload);
   return payload;
