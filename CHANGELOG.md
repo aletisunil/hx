@@ -28,6 +28,26 @@ the project follows [semantic versioning](https://semver.org/).
 
 ---
 
+## [1.1.0] - 2026-10-31
+
+### Added
+
+- HX updates itself, as Claude Code does. About once a day a session checks npm for a newer
+  release, installs it in the background with `npm install --global`, and says to restart.
+  `hx update` (or `hx upgrade`) updates now. Turn the background update off with
+  `"autoUpdates": false` in settings or `HX_DISABLE_AUTOUPDATER=1`. Only an npm install updates
+  itself; `hx -p` never does.
+  1.0.0 has no updater: install 1.1.0 once with `npm install --global @sunilaleti/hx@latest`, and
+  it keeps itself current from there.
+
+### Changed
+
+- CI runs the suite twice instead of four times - Linux and macOS, both on Node 24 - and
+  publishes with the npm that ships with Node 24. Node 22, the oldest HX supports, is checked
+  by installing the package on it and running `hx --version`.
+
+---
+
 ## [1.0.0] - 2026-10-31
 
 ### Changed
@@ -1103,7 +1123,8 @@ First release, published to PyPI as [`hx-cli`](https://pypi.org/project/hx-cli/)
 - `/configure` and `hx auth` for the OpenRouter key, `hx upgrade` for
   self-update, and `install.sh` bootstrapping uv with a pinned Python.
 
-[Unreleased]: https://github.com/aletisunil/hx/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/aletisunil/hx/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/aletisunil/hx/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/aletisunil/hx/compare/v0.3.0-beta.1...v1.0.0
 [0.3.0-beta.1]: https://github.com/aletisunil/hx/compare/v0.2.20...v0.3.0-beta.1
 [0.2.20]: https://github.com/aletisunil/hx/compare/v0.2.19...v0.2.20

@@ -39,6 +39,7 @@ CLAUDE_CODE_VERSION = "2.1.205"
 """What the fake ``claude`` reports by default - the current release, so no
 test sees an update hint it did not set up."""
 RELEASES_PATH = "/claude-code/dist-tags"
+HX_RELEASES_PATH = "/hx/dist-tags"
 
 CATALOGUE: list[dict[str, Any]] = [
     {
@@ -278,6 +279,13 @@ class Stub:
         pointed here with ``HX_CLAUDE_CODE_RELEASES_URL``; ``None`` answers 503,
         an npm registry the network cannot reach."""
         self.release_fetches = 0
+        self.hx_releases: dict[str, str] | None = {"latest": "0.0.1"}
+        """HX's own release channels on npm, for `hx update` and the background
+        updater. HX is pointed here with ``HX_RELEASES_URL``; ``None`` answers 503."""
+        self.hx_release_fetches = 0
+        self.hx_releases_hold: threading.Event | None = None
+        """When set, HX's releases are answered only once this event is: a slow
+        registry, caught with the check still out."""
         self._codex_script: deque[CodexReply] = deque()
         self.codex_requests: list[dict[str, Any]] = []
         """Every conversation request to the ChatGPT stand-in (not titles)."""
@@ -387,6 +395,15 @@ class Stub:
                         self._json(503, {"error": {"message": "catalogue unavailable"}})
                     else:
                         self._json(200, {"data": stub.models})
+                    return
+                if self.path.rstrip("/").endswith(HX_RELEASES_PATH):
+                    stub.hx_release_fetches += 1
+                    if stub.hx_releases_hold is not None:
+                        stub.hx_releases_hold.wait(timeout=30)
+                    if stub.hx_releases is None:
+                        self._json(503, {"error": "registry unavailable"})
+                    else:
+                        self._json(200, stub.hx_releases)
                     return
                 if self.path.rstrip("/").endswith(RELEASES_PATH):
                     stub.release_fetches += 1

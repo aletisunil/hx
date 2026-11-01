@@ -50,6 +50,7 @@ import { TuiRunner } from "../term/loop.ts";
 import { ShiftEnter } from "../term/modifiers.ts";
 import { Spacer } from "../term/primitives.ts";
 import type { Terminal } from "../term/terminal.ts";
+import type { UpdateOutcome } from "../update.ts";
 import { VERSION } from "../version.ts";
 import { ClipboardError, copyText, readImage } from "./clipboard.ts";
 import {
@@ -115,6 +116,8 @@ export interface SessionExtras {
   terminal?: Terminal | null;
   /** The model's route has no credential: what to say, on the first screen. */
   signIn?: string | null;
+  /** A background update under way: what it did, said when it is done. */
+  update?: Promise<UpdateOutcome | null> | null;
 }
 
 /** Work that runs beside a turn - a slash command or a shell line - and the
@@ -211,6 +214,18 @@ export class HXSession {
     // `hx resume <id>` loads the session before this object exists.
     if (this.loop.session.activeMessages().length) this.replayTranscript();
     if (this.extra.signIn) this.showSignIn(this.extra.signIn);
+    void this.extra.update?.then((outcome) => {
+      if (outcome === null) return;
+      const level = outcome.ok ? "success" : "warning";
+      if (this.view.transcript.blocks.length) {
+        this.notice(outcome.message, level);
+        return;
+      }
+      // On the first screen, a row below the header, as the sign-in notice is.
+      this.view.transcript.add(new Spacer(1));
+      this.view.transcript.add(new Notice(outcome.message, level));
+      this.runner.requestRender();
+    });
     if (this.loop.permissions !== null)
       this.loop.permissions.asker = (request) => this.askPermission(request);
 

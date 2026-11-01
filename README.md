@@ -16,8 +16,13 @@ npm install --global @sunilaleti/hx
 ```
 
 HX runs on [Node.js](https://nodejs.org/) 22.15 or newer, on macOS and Linux.
-Run the same command again to update. Then run `hx`: the first time, it opens
-with the HX logo and says to type `/login`.
+Then run `hx`: the first time, it opens with the HX logo and says to type
+`/login`.
+
+HX keeps itself up to date, as Claude Code does. About once a day, a session
+checks npm for a newer release, installs it in the background, and says to
+restart. Run `hx update` to update now. To turn the background update off, set
+`"autoUpdates": false` in `~/.hx/settings.json`, or `HX_DISABLE_AUTOUPDATER=1`.
 
 Or let the install script check your Node.js version and run that command:
 
@@ -349,6 +354,7 @@ hx auth login [provider]    # sign in (openrouter, openai-codex, devin, claude-c
 hx auth logout <provider>   # forget a stored credential
 hx docs [section]           # the manual; no argument lists its sections
 hx changelog [version]      # what shipped in each version
+hx update                   # install the newest release now (also: hx upgrade)
 ```
 
 Print mode is the scriptable one: stdout carries only the assistant's text, so
@@ -663,6 +669,7 @@ along with the `.hx/.gitignore` it added to hide it.
 {
   "theme": "dark",                    // dark | light | ansi, or a file in ~/.hx/themes
   "quiet_startup": false,             // skip the startup header
+  "autoUpdates": true,                // install new releases in the background, once a day
 
   "models": {
     "model": "anthropic/claude-sonnet-4.5",

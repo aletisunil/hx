@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 from tests.e2e.report import REPO, Report, Step, TestRecord
-from tests.e2e.stub import RELEASES_PATH, SONNET, Stub
+from tests.e2e.stub import HX_RELEASES_PATH, RELEASES_PATH, SONNET, Stub
 from tests.e2e.terminal import Terminal
 
 HX_BIN = Path(os.environ.get("HX_E2E_BIN") or REPO / "dist" / "hx.js").resolve()
@@ -194,6 +194,10 @@ class HX:
             "HX_CODEX_BASE_URL": self.stub.codex_url,
             # Never the real npm registry: which Claude Code is current is the stub's to say.
             "HX_CLAUDE_CODE_RELEASES_URL": self.stub.url + RELEASES_PATH,
+            # Never the real registry for HX's own releases either, and no
+            # background update unless a test asks for one.
+            "HX_RELEASES_URL": self.stub.url + HX_RELEASES_PATH,
+            "HX_DISABLE_AUTOUPDATER": "1",
             "HX_MODEL": SONNET,
             "HX_TRUE_COLOR": "1",
             # Keys here are written to the pty, not typed: whatever the

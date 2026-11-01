@@ -129,6 +129,8 @@ export interface Settings {
   readonly theme: string;
   /** Skip the startup header. For anyone who has read it already. */
   readonly quietStartup: boolean;
+  /** Install a newer release in the background, about once a day. */
+  readonly autoUpdates: boolean;
 }
 
 /** A settings layer as read from JSON, the environment or the command line. */
@@ -414,6 +416,7 @@ function buildSettings(data: Layer, cwd: string): Settings {
     tools: { hashline: truthy(pick(tools, "hashline", true)) },
     theme: pick(data, "theme", "dark") as string,
     quietStartup: truthy(pick(data, "quietStartup", pick(data, "quiet_startup", false))),
+    autoUpdates: truthy(pick(data, "autoUpdates", pick(data, "auto_updates", true))),
   };
 }
 

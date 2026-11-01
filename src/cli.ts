@@ -65,6 +65,7 @@ import { buildRuntime, type Runtime } from "./runtime.ts";
 import { count } from "./text.ts";
 import { buildTrace, defaultTracePath, TRACE_FILENAME, writeTrace } from "./trace.ts";
 import { runSession } from "./tui/runtime.ts";
+import { autoUpdate, runUpdate } from "./update.ts";
 import { VERSION } from "./version.ts";
 
 export const USAGE = `\
@@ -82,6 +83,7 @@ Usage:
   hx auth [set|clear]       Show or change the OpenRouter API key
   hx docs [SECTION|--all]   Print the manual, or one section of it
   hx changelog [VERSION]    Print what shipped in each version
+  hx update                 Update hx to the newest release
   hx --version              Show version
   hx --help                 Show this message
 
@@ -173,6 +175,9 @@ async function dispatch(args: string[]): Promise<number> {
       return runMcpCommand(parsed.rest);
     case "trace":
       return runTraceCommand(parsed);
+    case "update":
+    case "upgrade":
+      return runUpdate(print);
     default:
       return runTuiCommand(parsed);
   }
@@ -242,7 +247,7 @@ export function parseArgs(args: string[]): ParsedArgs {
 
   if (positional.length) {
     const [head, ...tail] = positional as [string, ...string[]];
-    if (["resume", "prompt", "trace", "mcp", "auth"].includes(head)) {
+    if (["resume", "prompt", "trace", "mcp", "auth", "update", "upgrade"].includes(head)) {
       parsed.command = head;
       parsed.rest = tail;
       if (head === "resume" && tail.length) parsed.sessionId = tail[0] as string;
@@ -1093,7 +1098,11 @@ async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
       : null;
 
   let relaunch: string | null = null;
+  const sessionOver = new AbortController();
   try {
+    // Started now, said when npm is done: it never holds up the session, nor
+    // its end.
+    const update = autoUpdate(runtime.settings.autoUpdates, sessionOver.signal);
     await runtime.connectMcp();
     await runtime.refreshModelsIfStale();
     relaunch = await runSession(runtime.loop, runtime.bus, runtime.settings, {
@@ -1108,8 +1117,10 @@ async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
       checkpoints: runtime.checkpoints,
       renameLeft,
       signIn,
+      update,
     });
   } finally {
+    sessionOver.abort();
     runtime.bus.close();
     // Everything, not only the provider: a background job left running would
     // outlive the session that started it.
