@@ -28,6 +28,28 @@ the project follows [semantic versioning](https://semver.org/).
 
 ---
 
+## [1.2.0] - 2026-11-01
+
+### Changed
+
+- Every picker - `/model`, `/resume`, `/effort`, `/rewind`, the command palette - opens as a whole
+  page above the prompt, however short its list or the conversation, and keeps that height while
+  you filter it.
+- `/resume` lists only the sessions recorded in this directory - not its parent, its subfolders
+  or anywhere else. To open a session from another directory, run `hx resume <id>`, which starts
+  HX there.
+
+### Fixed
+
+- Bypass mode asked before a command HX cannot take apart, such as `source .venv/bin/activate &&
+  pytest` or `env FOO=1 make`. It now runs them, as it runs everything else. It still asks when a
+  deny or ask rule for `Bash` exists, since the hidden command could be the one the rule stops.
+- Closing a picker with esc, or typing a `/` command, left blank rows above the prompt once the
+  conversation filled the screen. The picker and the command list now cover the conversation
+  while they are open and give it back when they close.
+
+---
+
 ## [1.1.1] - 2026-10-31
 
 ### Fixed

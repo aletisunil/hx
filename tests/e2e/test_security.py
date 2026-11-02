@@ -122,6 +122,39 @@ def test_a_deny_rule_holds_in_bypass_mode_however_the_command_is_spelled(
     assert "rm -rf everything" in results["echo"]
 
 
+def test_bypass_mode_runs_a_command_it_cannot_decompose_unless_a_rule_could_hide_in_it(
+    hx: HX, stub: Stub
+) -> None:
+    """Bypass approves everything no rule stops, so `env`, `source` and `eval`, which hide
+    what they run, run without asking. With a deny rule for the shell, the hidden command
+    could be the denied one, so the same calls ask again - headless, that is a refusal."""
+    (hx.project / "setup.sh").write_text("export GREETING=hello\n")
+    hidden = [
+        ToolCall("Bash", {"command": "env GREETING=hi printenv GREETING"}, id="env"),
+        ToolCall("Bash", {"command": "source ./setup.sh && echo $GREETING"}, id="source"),
+        ToolCall("Bash", {"command": "eval 'touch made-by-eval'"}, id="eval"),
+    ]
+    stub.script(calls(*hidden), say("Ran them."))
+    hx.run("-p", "set things up", "--mode", "bypass", check=True)
+    results = {
+        m["tool_call_id"]: m["content"] for m in stub.requests[1].messages if m["role"] == "tool"
+    }
+    assert "hi" in results["env"], results["env"]
+    assert "hello" in results["source"], results["source"]
+    assert (hx.project / "made-by-eval").exists()
+
+    (hx.project / "made-by-eval").unlink()
+    settings(hx, {"permissions": {"deny": ["Bash(rm:*)"]}})
+    stub.script(calls(*hidden), say("Refused."))
+    hx.run("-p", "set things up again", "--mode", "bypass", check=True)
+    results = {
+        m["tool_call_id"]: m["content"] for m in stub.requests[3].messages if m["role"] == "tool"
+    }
+    for call_id in ("env", "source", "eval"):
+        assert "needs approval" in results[call_id], results[call_id]
+    assert not (hx.project / "made-by-eval").exists()
+
+
 # -- files that are not the project's -------------------------------------------
 
 

@@ -14,8 +14,6 @@
  * driving a terminal UI.
  */
 
-import { spawnSync } from "node:child_process";
-import { constants } from "node:os";
 import * as claudeCode from "./auth/claude_code.ts";
 import { CallbackError, type LoginInteraction, OAuthError } from "./auth/oauth/browser.ts";
 import * as codexOAuth from "./auth/oauth/codex.ts";
@@ -1076,9 +1074,6 @@ async function probeServers(configs: MCPServerConfig[]): Promise<ServerStatus[]>
 
 /** Boot the full stack - settings, provider, tools, MCP, skills - and run the TUI. */
 async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
-  // Taken before anything starts, so no tool, MCP server or nested hx inherits it.
-  const renameLeft = process.env[RENAME_LEFT_ENV] ?? null;
-  delete process.env[RENAME_LEFT_ENV];
   let runtime: Runtime;
   let resume: string | null = null;
   let moved: string | null = null;
@@ -1097,7 +1092,6 @@ async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
       ? signInHint(runtime.loop.model, runtime.auth)
       : null;
 
-  let relaunch: string | null = null;
   const sessionOver = new AbortController();
   try {
     // Started now, said when npm is done: it never holds up the session, nor
@@ -1105,7 +1099,7 @@ async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
     const update = autoUpdate(runtime.settings.autoUpdates, sessionOver.signal);
     await runtime.connectMcp();
     await runtime.refreshModelsIfStale();
-    relaunch = await runSession(runtime.loop, runtime.bus, runtime.settings, {
+    await runSession(runtime.loop, runtime.bus, runtime.settings, {
       models: runtime.models,
       auth: runtime.auth,
       sandboxActive: runtime.sandboxActive,
@@ -1115,7 +1109,6 @@ async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
       mcp: runtime.mcp,
       notices: runtime.notices,
       checkpoints: runtime.checkpoints,
-      renameLeft,
       signIn,
       update,
     });
@@ -1126,9 +1119,7 @@ async function runTuiCommand(parsed: ParsedArgs): Promise<number> {
     // outlive the session that started it.
     await runtime.aclose();
   }
-  if (relaunch === null) return 0;
-  const left = runtime.loop.session;
-  return relaunchInto(relaunch, left.messages.length ? left.meta.sessionId : null);
+  return 0;
 }
 
 /**
@@ -1150,77 +1141,6 @@ function adoptSessionDirectory(parsed: ParsedArgs, sessionId: string | null): st
     return null;
   }
   return `This session was recorded in ${recorded}, which no longer exists; resumed here.`;
-}
-
-const osSignals = constants.signals as Record<string, number>;
-
-/** The run options that take the next argument as their value. */
-const RUN_OPTIONS_WITH_VALUES = new Set([
-  "--model",
-  "--mode",
-  "--cwd",
-  "--system-prompt",
-  "--append-system-prompt",
-  "--image",
-]);
-
-/**
- * The arguments to start HX again on `sessionId`. The run's own options carry
- * over; what picked the old session - `resume` and its id, and `--cwd` - does not.
- */
-export function relaunchArgv(argv: readonly string[], sessionId: string): string[] {
-  const kept: string[] = [];
-  let index = 0;
-  while (index < argv.length) {
-    const arg = argv[index] as string;
-    if (arg === "--cwd") {
-      index += 2;
-      continue;
-    }
-    if (RUN_OPTIONS_WITH_VALUES.has(arg)) {
-      kept.push(...argv.slice(index, index + 2));
-      index += 2;
-      continue;
-    }
-    if (arg === "resume") {
-      index++;
-      if (index < argv.length && !(argv[index] as string).startsWith("-")) index++;
-      continue;
-    }
-    kept.push(arg);
-    index++;
-  }
-  return [...kept, "resume", sessionId];
-}
-
-/**
- * The session a relaunch left behind, handed to the HX that replaces it, so
- * the new process renames it as `/clear` and `/resume` rename theirs.
- */
-export const RENAME_LEFT_ENV = "HX_RENAME_LEFT_SESSION";
-
-/**
- * Start HX again, resumed on `sessionId`, and hand the terminal to it until
- * it exits. Node cannot replace its own process image, so the new HX runs as
- * a child with this one's terminal, from the directory this one was started
- * in, and its exit status is this one's. `left` is the session being left,
- * for the new process to rename.
- */
-function relaunchInto(sessionId: string, left: string | null): number {
-  const env = { ...process.env };
-  if (left !== null) env[RENAME_LEFT_ENV] = left;
-  const child = spawnSync(
-    process.execPath,
-    [
-      ...process.execArgv,
-      process.argv[1] as string,
-      ...relaunchArgv(process.argv.slice(2), sessionId),
-    ],
-    { stdio: "inherit", env },
-  );
-  if (child.error) throw child.error;
-  if (child.signal) return 128 + (osSignals[child.signal] ?? 0);
-  return child.status ?? 1;
 }
 
 /** Resolve `hx resume [id]` to a session id, newest-first when omitted. */

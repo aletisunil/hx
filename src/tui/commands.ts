@@ -28,7 +28,7 @@ import { compareCodePoints } from "../json.ts";
 import { keymap } from "../keys.ts";
 import { type MCPManager, type ServerStatus, usesOauth } from "../mcp/manager.ts";
 import { describe } from "../net.ts";
-import { expandUser, isDir, join, resolve } from "../pathlib.ts";
+import { expandUser, isDir, join } from "../pathlib.ts";
 import {
   projectLocalSettingsFile,
   projectSettingsFile,
@@ -436,28 +436,21 @@ async function cmdTodos(ctx: CommandContext, _args: string): Promise<void> {
   ctx.app.showTodos();
 }
 
-/**
- * `/resume` - switch to another session. One in this directory is swapped
- * in place; one recorded elsewhere belongs to that directory, so HX
- * relaunches itself there.
- */
+/** `/resume` - switch to another session from this directory, in place. A
+ * session belongs to the directory it was recorded in: its sandbox, rules,
+ * prompt and tools. */
 async function cmdResume(ctx: CommandContext, _args: string): Promise<void> {
   if (ctx.app.isBusy) {
     ctx.app.notice("Interrupt the running turn before resuming another.", "warning");
     return;
   }
-  const here = resolve(ctx.settings.cwd);
   const sessions = resumableSessions(ctx.settings.cwd, ctx.app.loop.session.meta.sessionId);
   if (!sessions.length) {
-    ctx.app.notice("No other sessions to resume.", "warning");
+    ctx.app.notice("No other sessions to resume in this directory.", "warning");
     return;
   }
-  const chosen = await ctx.app.ask(new SessionPicker(sessions, here));
-  if (!chosen) return;
-  const meta = sessions.find((m) => m.sessionId === chosen);
-  if (meta === undefined) return;
-  if (meta.cwd === here) ctx.app.resumeSession(chosen);
-  else ctx.app.relaunchInto(meta);
+  const chosen = await ctx.app.ask(new SessionPicker(sessions));
+  if (chosen) ctx.app.resumeSession(chosen);
 }
 
 /** `/rewind` - take the session back to an earlier prompt, files and all. */

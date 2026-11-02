@@ -521,7 +521,7 @@ silently resolved.
 | `/cost` | tokens, cache savings, spend |
 | `/compact [focus]` | summarise older turns now |
 | `/clear` | fresh session, same directory |
-| `/resume` | switch to another session - this directory's first, then the rest |
+| `/resume` | switch to another session from this directory |
 | `/rewind` | go back to an earlier prompt, restoring the files HX changed |
 | `/title [text]` | show or set this session's name |
 | `/prompt` | the system prompt this session is running with |
@@ -552,6 +552,11 @@ conversation too short to fill the screen is padded above them rather than
 below, so the dock stays where you last saw it instead of creeping down the
 screen a block at a time. The padding is gone by the time the terminal starts
 scrolling.
+
+A picker opens as a whole page above the prompt, and the list `/` and `@`
+open as you type sits straight on it. Both cover the conversation while they
+are open rather than scrolling it away, so closing one gives the same rows
+back instead of leaving a gap above the prompt.
 
 Leaving takes the whole interface off the screen: the banner, the conversation
 and the dock are erased and your shell prompt comes back on the row HX started
@@ -772,16 +777,14 @@ from your first message.
 
 The live session is never renamed while it runs, and nothing is renamed on
 `/exit`, which returns your shell at once. A session you leave with `/clear` or
-`/resume` - including a `/resume` into another directory - is renamed in the
-background for what it became. `/title <text>` renames it yourself, and a name
-you chose is never replaced.
+`/resume` is renamed in the background for what it became. `/title <text>`
+renames it yourself, and a name you chose is never replaced.
 
-`/resume` lists every session except the one you are in: this directory's
-first, then other directories', each row naming where it lives. A session from
-this directory is swapped in place. One from elsewhere belongs to that
-directory - its sandbox, permission rules, prompt and tools - so HX restarts
-itself there with `hx resume <id>`, keeping options like `--mode` and
-`--model`.
+`/resume` lists the sessions recorded in this directory - not its parent or
+its subfolders - except the one you are in, and swaps the one you pick in
+place. A session belongs to the directory it was recorded in: its sandbox,
+permission rules, prompt and tools. To open one from elsewhere, run
+`hx resume <id>`, which starts HX in that session's directory.
 
 ### Themes
 
@@ -861,7 +864,8 @@ Two independent layers guard every tool call, and both must pass.
 holds even in bypass mode. Shell commands are decomposed into their real
 segments first, so an allow rule for `git status` does not carry
 `&& rm -rf /` along with it; a command that cannot be decomposed with
-confidence prompts rather than passing. What runs inside a command counts as a
+confidence prompts rather than passing - in bypass mode too, but only when a
+deny or ask rule for `Bash` could be hiding inside it. What runs inside a command counts as a
 segment of its own - `$(...)`, `<(...)`, `>(...)` - so `cat <(rm -rf src)` is
 not a read-only `cat`. A deny rule matches the command however it is spelled:
 `deny: Bash(rm:*)` also stops `FOO=1 rm`, `/bin/rm` and `nohup rm`. An allow

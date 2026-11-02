@@ -9,15 +9,13 @@
 import type { RewindPoint, SessionMeta } from "../../core/session.ts";
 import { formatTokens } from "../../core/usage.ts";
 import { describe } from "../../net.ts";
-import { tilde } from "../../paths.ts";
 import { resolveEffort } from "../../providers/codex_catalogue.ts";
 import { type ModelInfo, matchModels } from "../../providers/models.ts";
-import { formatFixed, lstrip, pyLen, strftime, strip } from "../../py.ts";
+import { formatFixed, lstrip, strftime, strip } from "../../py.ts";
 import { inverse } from "../../term/ansi.ts";
 import type { Component } from "../../term/component.ts";
 import { Lines, Rule, Spacer, Text } from "../../term/primitives.ts";
 import { CURSOR_MARKER } from "../../term/screen.ts";
-import { cellWidth } from "../../term/width.ts";
 import { count } from "../../text.ts";
 import { columns, oneLine } from "../format.ts";
 import { filterItems } from "../fuzzy.ts";
@@ -128,6 +126,12 @@ export abstract class Picker extends Framed {
       body.push(fg("muted", this.query ? "no matches" : "nothing to list"));
     else if (this.rowList.length > this.visibleRows())
       body.push(fg("muted", `(${this.selected + 1}/${this.rowList.length})`));
+    // The list keeps all the room it is given, however short it is, so a
+    // picker is always a whole page and does not shrink as a filter narrows it.
+    if (this.rowsAvailable !== null) {
+      const room = this.visibleRows() + (this.rowList.length > 1 ? 1 : 0);
+      while (body.length < room) body.push("");
+    }
 
     // An empty filter shows a hint, with the cursor before it.
     const filterLine = this.query
@@ -404,81 +408,29 @@ export class EffortPicker extends Picker {
   }
 }
 
-/** Most cells the directory of a session from elsewhere is given. */
-const DIRECTORY_WIDTH = 40;
-/** Below this a directory says nothing useful, and the row leaves it out. */
-const DIRECTORY_MINIMUM = 8;
-
-/**
- * Resume a previous session. This directory's sessions first, then everyone
- * else's with the directory named - picking one moves HX there.
- */
+/** Resume a previous session from this directory. */
 export class SessionPicker extends Picker {
   override title = "Resume session";
   override placeholder = "Filter sessions…";
-  /** Per row, the directory it belongs to when that is not this one. */
-  private directories = new Map<string, string>();
 
-  constructor(
-    readonly sessions: readonly SessionMeta[],
-    readonly here: string | null = null,
-  ) {
+  constructor(readonly sessions: readonly SessionMeta[]) {
     super();
     this.open();
   }
 
-  private elsewhere(meta: SessionMeta): string {
-    if (this.here === null || meta.cwd === this.here) return "";
-    return tilde(meta.cwd);
-  }
-
   rows(query: string): Row[] {
     const plain = (meta: SessionMeta) =>
-      `${when(meta.updatedAt)} ${size(meta)} ${meta.title || meta.sessionId} ${this.elsewhere(meta)}`;
-    this.directories = new Map();
-    return filterItems(this.sessions, query, plain).map((meta) => {
-      const elsewhere = this.elsewhere(meta);
-      if (elsewhere) this.directories.set(meta.sessionId, elsewhere);
-      return [
-        meta.sessionId,
-        [
-          fg("dim", when(meta.updatedAt)),
-          fg("muted", size(meta)),
-          // A session title is written by the model.
-          fg("text", oneLine(meta.title || meta.sessionId, RECORD_WIDTH)),
-        ],
-      ];
-    });
+      `${when(meta.updatedAt)} ${size(meta)} ${meta.title || meta.sessionId}`;
+    return filterItems(this.sessions, query, plain).map((meta) => [
+      meta.sessionId,
+      [
+        fg("dim", when(meta.updatedAt)),
+        fg("muted", size(meta)),
+        // A session title is written by the model.
+        fg("text", oneLine(meta.title || meta.sessionId, RECORD_WIDTH)),
+      ],
+    ]);
   }
-
-  /** The directory gets whatever the row has left, cut from the left -
-   * measured here, where the width is known. */
-  override draw(width: number): string[] {
-    const base: Row[] = this.rowList.map(([value, cells]) => [value, cells.slice(0, 3)]);
-    const laid = columns(base.map(([, cells]) => cells));
-    const used = laid.length ? Math.max(...laid.map(cellWidth)) : 0;
-    const prefix = cellWidth(CURSOR) + cellWidth(GUTTER);
-    const room = Math.min(DIRECTORY_WIDTH, width - 2 - prefix - used - 2);
-    this.rowList = base.map(([value, cells]) => {
-      const directory = this.directories.get(value);
-      return [
-        value,
-        directory !== undefined && room >= DIRECTORY_MINIMUM
-          ? [...cells, fg("dim", pathTail(directory, room))]
-          : cells,
-      ];
-    });
-    return super.draw(width);
-  }
-}
-
-/** `path` cut from the left to fit: the end of a path is the part that tells
- * two directories apart. */
-function pathTail(path: string, width: number): string {
-  let text = Array.from(oneLine(path, pyLen(path) + 1));
-  if (cellWidth(text.join("")) <= width) return text.join("");
-  while (text.length && cellWidth(text.join("")) > width - 1) text = text.slice(1);
-  return `…${text.join("")}`;
 }
 
 /** Pick the prompt to take the session back to. Newest first. */

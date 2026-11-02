@@ -147,6 +147,10 @@ export class PermissionEngine {
         // names, so it covers what cannot be decomposed. Ask still wins.
         const exact = this.match(request, "ask") ? null : this.exactAllow(request);
         if (exact) return outcome("allow", "matched an allow rule", exact);
+        // Bypass runs whatever no rule stops, so only a deny or ask rule for
+        // the shell can be hiding behind what cannot be decomposed.
+        if (this.mode === "bypass" && !this.restricted(request))
+          return outcome("allow", "bypass mode");
         return outcome("ask", "command could not be decomposed; approving it blind is not safe");
       }
     }
@@ -222,6 +226,11 @@ export class PermissionEngine {
 
   private applies(rule: Rule, request: PermissionRequest): boolean {
     return rule.tool === request.toolName || rule.tool === "*";
+  }
+
+  /** Whether any deny or ask rule could match this tool at all. */
+  private restricted(request: PermissionRequest): boolean {
+    return this.rules.some((rule) => rule.decision !== "allow" && this.applies(rule, request));
   }
 
   private match(request: PermissionRequest, decision: Decision): Rule | null {

@@ -86,6 +86,8 @@ export function isDockable(value: unknown): value is Dockable {
 /** What the dock needs from whatever is taking the user's typing. */
 export interface PromptLike extends Component {
   readonly value: string;
+  /** Rows drawn above the prompt's frame for a completion list. */
+  readonly completions?: readonly string[];
   clear(): void;
   setStatus(label: string): void;
   handleInput(key: string, data: string): boolean;
@@ -192,12 +194,18 @@ export class Dock extends Container {
     this.add(this.hints);
     this.add(this.status);
   }
+
+  /** The completion list comes and goes as you type, so it floats. */
+  floatingHeight(): number {
+    return this.prompt.completions?.length ?? 0;
+  }
 }
 
 /**
  * The whole document: a header, the transcript, an overlay, and the dock. The
- * overlay sits between the transcript and the dock rather than on top of
- * anything: a picker is a block that appears where the conversation is.
+ * overlay sits straight on the dock, and both stay on the bottom of the
+ * screen. The overlay floats: it covers the conversation's last rows instead
+ * of scrolling them away, and gives them back when it closes.
  */
 export class Session extends Container {
   /** Blank rows `show` puts between the transcript and the overlay. */
@@ -254,14 +262,20 @@ export class Session extends Container {
     return this.overlay.children.filter((child) => !(child instanceof Spacer)).at(-1) ?? null;
   }
 
-  /** Rows the renderer holds on the bottom of the screen: the dock only. */
+  /** Rows the renderer holds on the bottom of the screen: the overlay and
+   * the dock. */
   footerHeight(width: number): number {
-    return this.dock.render(width).length;
+    return this.overlay.render(width).length + this.dock.render(width).length;
+  }
+
+  /** Rows of the footer laid over the conversation rather than after it. */
+  floatingHeight(width: number): number {
+    return this.overlay.render(width).length + this.dock.floatingHeight();
   }
 
   /** How tall a thing on the overlay may be, on a terminal this size. */
   overlayRows(width: number, rows: number): number {
-    return Math.max(1, rows - this.footerHeight(width) - Session.OVERLAY_GAP);
+    return Math.max(1, rows - this.dock.render(width).length - Session.OVERLAY_GAP);
   }
 
   override handleInput(key: string, data: string): boolean {

@@ -27,12 +27,7 @@ import {
   toolResults,
   type UserTurn,
 } from "../core/messages.ts";
-import {
-  type Session as CoreSession,
-  loadSession,
-  newSession,
-  type SessionMeta,
-} from "../core/session.ts";
+import { type Session as CoreSession, loadSession, newSession } from "../core/session.ts";
 import { formatTokens } from "../core/usage.ts";
 import { BranchWatcher } from "../git.ts";
 import { keymap } from "../keys.ts";
@@ -112,7 +107,6 @@ export interface SessionExtras {
   mcp?: McpManager | null;
   notices?: string[];
   checkpoints?: CheckpointStore | null;
-  renameLeft?: string | null;
   terminal?: Terminal | null;
   /** The model's route has no credential: what to say, on the first screen. */
   signIn?: string | null;
@@ -138,8 +132,6 @@ export class HXSession {
   readonly view: Session;
   readonly runner: TuiRunner;
   commands: CommandRegistry | null = null;
-  /** A session from another directory to start again on, once this exits. */
-  relaunch: string | null = null;
 
   private readonly branch: BranchWatcher;
   private readonly tools = new Map<string, ToolBlock>();
@@ -232,7 +224,6 @@ export class HXSession {
     const events = this.consumeEvents();
     const spinner = setInterval(() => this.spin(), SPINNER_INTERVAL);
     const status = setInterval(() => this.watchStatus(), BRANCH_POLL_INTERVAL);
-    if (this.extra.renameLeft) this.detach(this.renameLeftBehind(this.extra.renameLeft));
     try {
       await this.runner.run();
     } finally {
@@ -383,15 +374,6 @@ export class HXSession {
     this.runner.stop();
   }
 
-  /** Leave, so HX can start again on a session from another directory. The
-   * CLI relaunches once the terminal is restored. */
-  relaunchInto(meta: SessionMeta): void {
-    this.relaunch = meta.sessionId;
-    this.addNotice(`Opening ${meta.title || meta.sessionId} in ${tilde(meta.cwd)}…`, "info");
-    this.runner.requestImmediateRender();
-    this.runner.stop();
-  }
-
   setMode(mode: PermissionMode): void {
     if (this.loop.permissions !== null) this.loop.permissions.mode = mode;
     this.status.setMode(mode, this.sandboxActive, this.sandboxBackend);
@@ -497,18 +479,6 @@ export class HXSession {
   renameOutgoingSession(session: CoreSession): void {
     if (!session.messages.length) return;
     this.detach(this.loop.retitleSession(session, this.backgroundAbort.signal));
-  }
-
-  /** Rename the session a `/resume` into another directory left behind. */
-  private async renameLeftBehind(sessionId: string): Promise<void> {
-    let session: CoreSession;
-    try {
-      session = loadSession(sessionId);
-    } catch {
-      return;
-    }
-    if (session.messages.length)
-      await this.loop.retitleSession(session, this.backgroundAbort.signal);
   }
 
   private detach(work: Promise<void>): void {
@@ -1353,21 +1323,17 @@ function invalidateAll(component: Component): void {
     invalidateAll(child);
 }
 
-/**
- * Run one interactive session to completion. Returns the id of a session to
- * relaunch into, when `/resume` picked one from another directory.
- */
+/** Run one interactive session to completion. */
 export async function runSession(
   loop: AgentLoop,
   bus: EventBus,
   settings: Settings,
   extra: SessionExtras = {},
-): Promise<string | null> {
+): Promise<void> {
   if (process.platform === "win32")
     throw new Error(
       "HX's terminal interface needs a POSIX terminal. On Windows, run it under WSL.",
     );
   const session = new HXSession(loop, bus, settings, extra);
   await session.run();
-  return session.relaunch;
 }

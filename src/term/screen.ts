@@ -10,6 +10,10 @@
  * - Only the changed tail is redrawn.
  * - A document shorter than the window is padded above its dock, so the prompt
  *   opens on the bottom row instead of creeping down the screen.
+ * - What only comes and goes at the bottom - a picker, a completion list -
+ *   is laid over the conversation's last visible rows instead of pushing them
+ *   into scrollback, so it hands them back when it closes rather than leaving
+ *   a hole that scrollback can never fill.
  *
  * A change *above* the visible region cannot be reached by moving the cursor,
  * so it forces a full repaint; the common cause is a resize.
@@ -55,9 +59,12 @@ export class LineHasBreak extends LineTooWide {
   override name = "LineHasBreak";
 }
 
-/** A document whose last rows are pinned to the bottom of the screen. */
+/** A document whose last rows are pinned to the bottom of the screen. Of
+ * those, the floating ones are laid over the rows above rather than given
+ * rows of their own. */
 interface Docked {
   footerHeight(width: number): number;
+  floatingHeight?(width: number): number;
 }
 
 type Cursor = [number, number] | null;
@@ -215,6 +222,11 @@ export class MainScreen {
    * bottom row of a screen the conversation has not filled yet. Rows that have
    * scrolled off the top cannot be handed back, so a document that shrinks
    * keeps the rows it has and the space opens above the dock.
+   *
+   * The floating rows of the footer claim no rows of their own: they cover
+   * the conversation's last visible rows instead, and closing them uncovers
+   * the same rows. Covered rows are always on screen, since the footer is
+   * no taller than the window.
    */
   private seatFooter(
     lines: string[],
@@ -223,8 +235,12 @@ export class MainScreen {
     keepPrevious = true,
   ): string[] {
     const footer = this.footerHeight(width);
-    if (footer <= 0 || footer >= height) return lines;
-    let target = height;
+    // A picker that fills the screen leaves no row of the conversation to
+    // show, which is still a footer that fits.
+    if (footer <= 0 || footer > height) return lines;
+    const floating = Math.min(this.floatingHeight(width), footer);
+    const split = Math.max(0, lines.length - footer);
+    let target = Math.max(height, split + footer - floating);
     if (
       keepPrevious &&
       this.previous.length &&
@@ -233,16 +249,25 @@ export class MainScreen {
     ) {
       target = Math.max(target, this.previous.length);
     }
-    const missing = target - lines.length;
-    if (missing <= 0) return lines;
-    const split = Math.max(0, lines.length - footer);
-    return [...lines.slice(0, split), ...Array<string>(missing).fill(""), ...lines.slice(split)];
+    const shown = target - footer;
+    if (shown === split) return lines;
+    const gap = Array<string>(Math.max(0, shown - split)).fill("");
+    return [...lines.slice(0, Math.min(split, shown)), ...gap, ...lines.slice(split)];
   }
 
   /** Rows at the end of the document that stay on the bottom row, asked of
    * the document: what is pinned is a property of the UI. */
   private footerHeight(width: number): number {
-    const measure = (this.root as Partial<Docked>).footerHeight;
+    return this.measure("footerHeight", width);
+  }
+
+  /** Rows of the footer that float over the conversation. */
+  private floatingHeight(width: number): number {
+    return this.measure("floatingHeight", width);
+  }
+
+  private measure(name: keyof Docked, width: number): number {
+    const measure = (this.root as Partial<Docked>)[name];
     if (measure === undefined) return 0;
     try {
       return Math.max(0, Math.trunc(measure.call(this.root, width)));

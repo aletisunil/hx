@@ -557,17 +557,12 @@ function backfilled(meta: SessionMeta): SessionMeta {
 export const RESUME_BACKFILL = 50;
 
 /**
- * Everything `/resume` can offer: this directory's sessions first, then the
- * rest, each newest-first. `exclude` is the session already open. A session
- * whose directory is gone is left out.
+ * Everything `/resume` can offer: the sessions recorded in this directory,
+ * not its parents or children, newest first. `exclude` is the session
+ * already open.
  */
 export function resumableSessions(cwd: string, exclude: string | null = null): SessionMeta[] {
-  const here = resolve(cwd);
-  const candidates = listSessions(null, null, 0).filter(
-    (meta) => meta.sessionId !== exclude && (meta.cwd === here || isDir(meta.cwd)),
-  );
-  // Stable sort over a newest-first list: each group keeps its recency.
-  candidates.sort((a, b) => Number(a.cwd !== here) - Number(b.cwd !== here));
+  const candidates = listSessions(cwd, null, 0).filter((meta) => meta.sessionId !== exclude);
   return candidates.map((meta, index) => (index < RESUME_BACKFILL ? backfilled(meta) : meta));
 }
 

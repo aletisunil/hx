@@ -453,48 +453,99 @@ def test_exit_while_the_session_is_being_named_still_names_it(hx: HX, stub: Stub
     assert term.wait_exit() == 0
 
 
-def test_resume_into_another_directory_renames_the_session_left(hx: HX, stub: Stub) -> None:
-    """/resume of a session from another directory relaunches HX there. The session left
-    behind is still renamed for what it became - by the new process, in the background."""
-    elsewhere = hx.root / "elsewhere"
-    elsewhere.mkdir()
-    stub.title = "Owl facts"
-    stub.script(say("Owls are nocturnal."))
-    hx.run("-p", "tell me about owls", cwd=elsewhere, check=True)
+def test_resume_lists_only_this_directorys_sessions(hx: HX, stub: Stub) -> None:
+    """/resume offers the sessions recorded in this directory and nowhere else - not its
+    parent, not a subfolder, not a sibling. Picking one swaps it in place, and the session
+    left behind is renamed in the background for what it became."""
+    subfolder = hx.project / "pkg"
+    subfolder.mkdir()
+    sibling = hx.root / "elsewhere"
+    sibling.mkdir()
+    for title, cwd in (
+        ("Owl facts", sibling),
+        ("Root of everything", hx.root),
+        ("Package internals", subfolder),
+        ("Parser history", hx.project),
+    ):
+        stub.title = title
+        stub.script(say(f"Answered: {title}."))
+        hx.run("-p", f"tell me about {title}", cwd=cwd, check=True)
 
-    stub.title = "Parser question"
-    stub.script(say("It parses rules."), say("Added --verbose."), say("Tests pass."))
+    stub.title = "Verbose flag question"
+    stub.script(say("It parses rules."), say("Added --verbose."))
     term = hx.tui()
     for prompt, reply in (
         ("what does parser.py do", "It parses rules."),
         ("now add a --verbose flag to the CLI", "Added --verbose."),
-        ("run the tests", "Tests pass."),
     ):
         term.submit(prompt)
         term.wait_for(reply)
-    stub.wait_for_title_requests(2)
+    stub.wait_for_title_requests(5)
 
     stub.title = "Verbose flag for the CLI"
     term.submit("/resume")
     screen = term.wait_for("Resume session")
-    assert "Owl facts" in screen
+    term.settle()
+    term.snapshot("only this directory's sessions")
+    assert "Parser history" in screen
+    for elsewhere in ("Owl facts", "Root of everything", "Package internals"):
+        assert elsewhere not in screen, elsewhere
     term.press("enter")
-    term.wait_for("Owls are nocturnal.")
-    term.snapshot("relaunched into the other directory")
-    stub.wait_for_title_requests(3)
+    term.wait_for("Answered: Parser history.")
+    stub.wait_for_title_requests(6)
     term.settle(0.5)
-    (left,) = [meta for meta in hx.sessions() if meta["prompt_count"] == 3]
+    (left,) = [meta for meta in hx.sessions() if meta["prompt_count"] == 2]
     assert left["title"] == "Verbose flag for the CLI"
-    (resumed,) = [meta for meta in hx.sessions() if meta["cwd"] == str(elsewhere)]
-    assert resumed["title"] == "Owl facts", "the live session is not renamed"
-
-    # The handoff stops at HX: nothing it starts inherits it, so a nested hx
-    # cannot rename the session a second time.
-    term.submit("!echo left=${HX_RENAME_LEFT_SESSION:-none}")
-    term.wait_for("left=none")
     term.press("ctrl+d")
     assert term.wait_exit() == 0
     assert "Traceback" not in term.scrollback()
+
+
+def test_pickers_float_over_a_long_conversation_and_give_it_back(hx: HX, stub: Stub) -> None:
+    """/model and /resume open as a whole page over the conversation, whether their list is
+    three models or more sessions than fit. Escape hands back the rows they covered: no run
+    of blank rows above the prompt, and nothing pushed into scrollback twice."""
+    for n in range(14):
+        stub.title = f"Earlier session {n:02}"
+        stub.script(say("ok"))
+        hx.run("-p", f"earlier {n}", check=True)
+    steps = "\n\n".join(f"Step {n} of the plan." for n in range(1, 41))
+    stub.script(say(steps))
+    term = hx.tui(rows=24, columns=110)
+    term.submit("plan the release")
+    term.wait_for("Step 40 of the plan.")
+    term.settle()
+
+    def above_prompt(screen: str) -> list[str]:
+        rows = screen.splitlines()
+        return rows[: rows.index(next(r for r in rows if "Ask HX" in r)) - 1]
+
+    for command, title in (("/model", "Select model"), ("/resume", "Resume session")):
+        term.submit(command)
+        screen = term.wait_for(title)
+        term.settle()
+        screen = term.text()
+        term.snapshot(f"{command} over a long conversation")
+        rows = above_prompt(screen)
+        assert not any("Step" in row for row in rows), screen
+        assert rows[0].strip() == "" and set(rows[1].strip()) == {"─"}, rows[:2]
+        assert title in rows[3] and "esc cancel" in rows[-2], screen
+        if command == "/resume":
+            assert "(1/14)" in screen, screen
+
+        term.press("esc")
+        term.wait_gone(title)
+        term.settle()
+        screen = term.text()
+        term.snapshot(f"after esc on {command}")
+        rows = above_prompt(screen)
+        tail = rows[[i for i, row in enumerate(rows) if row.strip() == command][-1] + 1 :]
+        assert len(tail) <= 4 and not any(r.strip() for r in tail), tail
+        assert "Step 40 of the plan." in screen
+
+    history = term.scrollback()
+    for n in range(1, 41):
+        assert history.count(f"Step {n} of the plan.") == 1, n
 
 
 def test_a_title_the_user_chose_is_never_replaced(hx: HX, stub: Stub) -> None:
